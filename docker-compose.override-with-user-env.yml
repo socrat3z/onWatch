@@ -1,0 +1,39 @@
+# Overlay for the with-user-env image: provider CLIs plus the D-Bus and
+# keyring plumbing their interactive OAuth needs.
+#
+# This file is NOT auto-loaded - Compose only does that for the exact name
+# docker-compose.override.yml. Layer it explicitly:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.override-with-user-env.yml up -d
+#
+# Or set it once per shell (or in .env) so plain `docker compose` commands
+# pick it up:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.override-with-user-env.yml
+#
+# Plain `docker compose up -d` without either builds the stock upstream image.
+
+services:
+  onwatch:
+    build:
+      dockerfile: Dockerfile.with-user-env
+
+    # Persist Antigravity CLI settings and encrypted keyring sessions.
+    # Authenticate once with: docker compose run --rm onwatch agy
+    # Deleting either volume requires authenticating again.
+    volumes:
+      - antigravity-profile:/home/nonroot/.gemini
+      - antigravity-keyring:/home/nonroot/.local/share/keyrings
+
+    # Upstream budgets 64M for a single Go process. This image also runs the
+    # embedded CLI, a D-Bus session, and gnome-keyring.
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 64M
+
+volumes:
+  antigravity-profile:
+  antigravity-keyring:

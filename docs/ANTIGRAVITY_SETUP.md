@@ -124,7 +124,51 @@ You'll see quota cards for each model, including:
 
 ## Docker/Container Configuration
 
-In containerized environments where process scanning doesn't work, you can manually configure the connection:
+### Docker with the containerized CLI
+
+The default image is distroless and has no `agy` CLI, so this needs the
+`with-user-env` image, which adds the CLI, D-Bus, and GNOME Keyring. With it,
+Antigravity polling runs entirely in the container - no host IDE or language
+server required. See [Fork image: with-user-env](../README.md#fork-image-with-user-env)
+for what the image contains.
+
+1. Point Compose at the override file, in your `.env`:
+
+   ```bash
+   COMPOSE_FILE=docker-compose.yml:docker-compose.override-with-user-env.yml
+   ```
+
+   Without this, `docker compose` builds the stock image and step 3 fails with
+   `executable file not found: agy`.
+
+2. Enable the CLI source in the same `.env`:
+
+   ```bash
+   ANTIGRAVITY_ENABLED=true
+   ANTIGRAVITY_SOURCE=cli
+   ```
+
+3. Authenticate interactively once. Complete the browser or displayed URL/code
+   OAuth flow, then exit the CLI:
+
+   ```bash
+   docker compose run --rm onwatch agy
+   ```
+
+4. Start onWatch:
+
+   ```bash
+   docker compose up -d
+   ```
+
+Compose persists the CLI profile and encrypted keyring in named volumes
+(`antigravity-profile`, `antigravity-keyring`). Removing either means
+authenticating again.
+
+### Host Language Server Fallback
+
+If you prefer a host language server instead of the containerized CLI - or you
+are running the stock distroless image - configure the connection manually:
 
 ### Environment Variables
 
