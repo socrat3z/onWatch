@@ -92,3 +92,7 @@ onwatch-test
 /result
 /result-*
 .direnv/
+
+# mise local overrides (mise.local.toml beats mise.toml, MISE_ENV variants too)
+mise.local.toml
+mise.*.local.toml

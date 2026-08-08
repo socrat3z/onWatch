@@ -203,6 +203,7 @@ func (h *Handler) buildCursorCurrent() map[string]interface{} {
 	}
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 	response["accountType"] = string(latest.AccountType)
 	response["planName"] = latest.PlanName
 

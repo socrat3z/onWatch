@@ -87,6 +87,8 @@ func (h *Handler) buildKimiCurrent() map[string]interface{} {
 		quotas = append(quotas, qm)
 	}
 	response["quotas"] = quotas
+	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 	response["user_id"] = latest.UserID
 	response["region"] = latest.Region
 	if latest.Membership != "" {
@@ -353,4 +355,3 @@ func (h *Handler) buildKimiInsights(hidden map[string]bool) insightsResponse {
 	}
 	return resp
 }
-

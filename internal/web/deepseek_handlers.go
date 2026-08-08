@@ -55,6 +55,7 @@ func (h *Handler) buildDeepSeekCurrent() map[string]interface{} {
 
 		if latest != nil {
 			response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+			response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 			response["snapshotAvailable"] = true
 
 			status := "healthy"

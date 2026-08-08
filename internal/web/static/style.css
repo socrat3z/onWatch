@@ -4297,3 +4297,117 @@ body.accounts-overview-mode #sessions-section {
     animation: none;
   }
 }
+
+/* ── Data freshness ── */
+/* Snapshot age is the honest signal for "is this screen still true?": a failed
+   poll leaves the last snapshot in place, so age covers both slow and broken. */
+
+.homepage-harness-header-meta {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.homepage-harness-freshness {
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.homepage-harness-freshness[data-freshness="stale"] {
+  border-color: var(--status-warning);
+  background: var(--status-warning-bg);
+  color: var(--status-warning-text);
+}
+
+.homepage-harness-freshness[data-freshness="error"] {
+  border-color: var(--status-danger);
+  background: var(--status-danger-bg);
+  color: var(--status-danger-text);
+}
+
+.homepage-harness-card[data-freshness="stale"] {
+  border-color: var(--status-warning);
+  box-shadow: inset 3px 0 0 var(--status-warning);
+}
+
+.homepage-harness-card[data-freshness="error"] {
+  border-color: var(--status-danger);
+  box-shadow: inset 3px 0 0 var(--status-danger);
+}
+
+/* Stale numbers should not read as confident numbers. */
+.homepage-harness-card[data-freshness="stale"] .homepage-harness-value,
+.homepage-harness-account[data-freshness="stale"] .homepage-harness-value {
+  opacity: 0.72;
+}
+
+.homepage-harness-card[data-freshness="error"] .homepage-harness-value,
+.homepage-harness-account[data-freshness="error"] .homepage-harness-value {
+  opacity: 0.55;
+}
+
+.homepage-harness-account-name {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.freshness-banner {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--status-warning);
+  border-radius: var(--radius-md);
+  background: var(--status-warning-bg);
+}
+
+.freshness-banner[data-freshness="error"] {
+  border-color: var(--status-danger);
+  background: var(--status-danger-bg);
+}
+
+.freshness-banner-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status-warning);
+}
+
+.freshness-banner[data-freshness="error"] .freshness-banner-dot {
+  background: var(--status-danger);
+}
+
+.freshness-banner-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.freshness-banner-text strong {
+  color: var(--status-warning-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.freshness-banner[data-freshness="error"] .freshness-banner-text strong {
+  color: var(--status-danger-text);
+}
+
+.freshness-banner-text span {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+}

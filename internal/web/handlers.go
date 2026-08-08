@@ -1958,6 +1958,8 @@ func (h *Handler) buildGrokCurrent() map[string]interface{} {
 		quotas = append(quotas, qm)
 	}
 	response["quotas"] = quotas
+	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 
 	// Carry identity for potential future UI use (displayed in settings or menubar perhaps).
 	response["email"] = latest.Email
@@ -2350,6 +2352,7 @@ func (h *Handler) buildSyntheticCurrent() map[string]interface{} {
 
 		if latest != nil {
 			response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+			response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 			response["subscription"] = buildQuotaResponse("Subscription", "Main API request quota for your plan", latest.Sub, h.tracker, "subscription")
 			response["search"] = buildQuotaResponse("Search (Hourly)", "Search endpoint calls, resets every hour", latest.Search, h.tracker, "search")
 			response["toolCalls"] = buildQuotaResponse("Tool Call Discounts", "Discounted tool call requests", latest.ToolCall, h.tracker, "toolcall")
@@ -2384,6 +2387,7 @@ func (h *Handler) buildZaiCurrent() map[string]interface{} {
 
 		if latest != nil {
 			response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+			response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 			tokensResp := buildZaiTokensQuotaResponse(latest)
 			timeResp := buildZaiTimeQuotaResponse(latest)
 
@@ -3269,6 +3273,7 @@ func (h *Handler) buildOpenRouterCurrent() map[string]interface{} {
 
 		if latest != nil {
 			response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+			response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 			response["snapshotAvailable"] = true
 			credits := map[string]interface{}{
 				"name":              "Credits",
@@ -5677,6 +5682,7 @@ func (h *Handler) buildAnthropicCurrent() map[string]interface{} {
 		}
 	}
 	response["capturedAt"] = latestCaptured.Format(time.RFC3339)
+	response["snapshotAt"] = latestCaptured.Format(time.RFC3339)
 
 	// Sort by display order
 	sort.SliceStable(latestPerQuota, func(i, j int) bool {
@@ -5731,6 +5737,7 @@ func (h *Handler) buildAnthropicCurrentFallback(response map[string]interface{})
 
 	now := time.Now().UTC()
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 	orderedQuotas := make([]api.AnthropicQuota, len(latest.Quotas))
 	copy(orderedQuotas, latest.Quotas)
 	sort.SliceStable(orderedQuotas, func(i, j int) bool {
@@ -7834,6 +7841,7 @@ func (h *Handler) buildCopilotCurrent() map[string]interface{} {
 	}
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 	if latest.CopilotPlan != "" {
 		response["copilotPlan"] = latest.CopilotPlan
 	}
@@ -8376,6 +8384,7 @@ func (h *Handler) buildCodexCurrent(accountID int64) map[string]interface{} {
 	}
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 	if latest.PlanType != "" {
 		response["planType"] = latest.PlanType
 	}
@@ -8502,6 +8511,7 @@ func (h *Handler) buildAntigravityCurrent() map[string]interface{} {
 	}
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 	if latest.Email != "" {
 		response["email"] = latest.Email
 	}
@@ -9504,6 +9514,7 @@ func (h *Handler) buildMiniMaxCurrent(accountID int64) map[string]interface{} {
 	}
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 
 	buildQuota := func(quota api.MiniMaxModelQuota, summaryModelName string) map[string]interface{} {
 		q := map[string]interface{}{

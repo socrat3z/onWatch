@@ -6035,6 +6035,100 @@ function normalizeBothQuotas(provider, payload) {
   return normalized;
 }
 
+// ── Data freshness ──
+//
+// A failed poll leaves the stored snapshot untouched, so snapshot age is the
+// ground truth for both "slipping behind" and "broken": the age of the newest
+// stored snapshot is how old the numbers on screen actually are.
+const FRESHNESS_STALE_MS = 30 * 60 * 1000;
+const FRESHNESS_ERROR_MS = 3 * 60 * 60 * 1000;
+
+function formatFreshnessAge(ms) {
+  if (!Number.isFinite(ms)) return '';
+  if (ms < 60000) return 'just now';
+  const mins = Math.floor(ms / 60000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+// providerFreshness maps a snapshot timestamp to a display state.
+// 'error' also covers "never polled successfully" (no snapshot at all).
+function providerFreshness(snapshotAt) {
+  const d = parseDateValue(snapshotAt);
+  if (!d) {
+    return {
+      state: 'error',
+      label: 'No data',
+      title: 'No snapshot stored yet - polling has never succeeded for this provider.',
+      ageMs: Infinity,
+    };
+  }
+  const ageMs = Date.now() - d.getTime();
+  const stamp = `Last update ${formatClockTime(d)}`;
+  const label = formatFreshnessAge(ageMs);
+  if (ageMs >= FRESHNESS_ERROR_MS) {
+    return { state: 'error', label, title: `Data is over 3h old - polling is likely failing. ${stamp}`, ageMs };
+  }
+  if (ageMs >= FRESHNESS_STALE_MS) {
+    return { state: 'stale', label, title: `Data is over 30m old. ${stamp}`, ageMs };
+  }
+  return { state: 'fresh', label, title: stamp, ageMs };
+}
+
+// Cards that group several accounts report their worst (oldest) member, so one
+// silently dead account cannot hide behind a healthy sibling.
+function oldestSnapshotAt(payloads) {
+  let oldest = null;
+  let sawMissing = false;
+  (Array.isArray(payloads) ? payloads : []).forEach((payload) => {
+    const d = parseDateValue(payload?.snapshotAt);
+    if (!d) { sawMissing = true; return; }
+    if (!oldest || d.getTime() < oldest.getTime()) oldest = d;
+  });
+  if (sawMissing) return null;
+  return oldest ? oldest.toISOString() : null;
+}
+
+function freshnessChipHTML(freshness) {
+  if (!freshness || freshness.state === 'unknown') return '';
+  return `<span class="homepage-harness-freshness" data-freshness="${escapeHTML(freshness.state)}" title="${escapeHTML(freshness.title)}">${escapeHTML(freshness.label)}</span>`;
+}
+
+// Banner summarising every card that is not fresh, so the problem is visible
+// without scanning each card.
+function renderFreshnessBannerHTML(entries) {
+  const degraded = (Array.isArray(entries) ? entries : [])
+    .filter(entry => entry.freshness && (entry.freshness.state === 'stale' || entry.freshness.state === 'error'));
+  if (degraded.length === 0) return '';
+
+  const failing = degraded.filter(entry => entry.freshness.state === 'error');
+  const slipping = degraded.length - failing.length;
+  const level = failing.length > 0 ? 'error' : 'stale';
+  const parts = [];
+  if (failing.length > 0) {
+    parts.push(`${failing.length} provider${failing.length === 1 ? '' : 's'} not updating`);
+  }
+  if (slipping > 0) {
+    parts.push(failing.length > 0
+      ? `${slipping} with stale data`
+      : `${slipping} provider${slipping === 1 ? '' : 's'} with stale data`);
+  }
+  const headline = parts.join(', ');
+  const detail = degraded
+    .map(entry => `${entry.title} (${entry.freshness.label})`)
+    .join(', ');
+
+  return `<div class="freshness-banner" data-freshness="${level}" role="status">
+    <span class="freshness-banner-dot" aria-hidden="true"></span>
+    <div class="freshness-banner-text">
+      <strong>${escapeHTML(headline)}</strong>
+      <span>${escapeHTML(detail)}</span>
+    </div>
+  </div>`;
+}
+
 function buildAllProviderEntries() {
   const current = State.allProvidersCurrent || {};
   const insights = State.allProvidersInsights || {};
@@ -6124,6 +6218,7 @@ function buildAllProviderEntries() {
           cardKey: sanitizeProviderCardKey('codex'),
           title: 'Codex',
           badge: `${groupAccounts.length} accounts`,
+          snapshotAt: oldestSnapshotAt(groupAccounts),
           accountsGroup: groupAccounts,
         });
         return;
@@ -6142,6 +6237,7 @@ function buildAllProviderEntries() {
           provider: 'codex',
           cardKey,
           title: `Codex - Account: ${accountName}`,
+          snapshotAt: account.snapshotAt || null,
           badge: toTitleCase(account.planType || ''),
           planType: account.planType || '',
           quotas: normalizeBothQuotas('codex', account),
@@ -6172,6 +6268,7 @@ function buildAllProviderEntries() {
           cardKey: sanitizeProviderCardKey('minimax'),
           title: bothProviderNames.minimax || 'MiniMax',
           badge: '',
+          snapshotAt: payload.snapshotAt || null,
           quotas: normalizeBothQuotas('minimax', payload),
           insights: insights.minimax || { stats: [], insights: [] },
           historyRows: Array.isArray(history.minimax) ? history.minimax : [],
@@ -6189,6 +6286,7 @@ function buildAllProviderEntries() {
           cardKey: sanitizeProviderCardKey('minimax'),
           title: bothProviderNames.minimax || 'MiniMax',
           badge: `${groupAccounts.length} accounts`,
+          snapshotAt: oldestSnapshotAt(groupAccounts),
           accountsGroup: groupAccounts,
         });
         return;
@@ -6207,6 +6305,7 @@ function buildAllProviderEntries() {
           provider: 'minimax',
           cardKey,
           title: `MiniMax - ${accountName}`,
+          snapshotAt: account.snapshotAt || null,
           badge: '',
           quotas: normalizeBothQuotas('minimax', account),
           insights: insightPayload,
@@ -6230,6 +6329,7 @@ function buildAllProviderEntries() {
         : (provider === 'cursor' || provider === 'opencode'
           ? (payload.planName || toTitleCase(payload.accountType || ''))
           : toTitleCase(payload.planType || '')),
+      snapshotAt: payload.snapshotAt || null,
       promoHtml: provider === 'anthropic' && payload.promo ? promoTagHTML() : '',
       planType: payload.planType || '',
       quotas: normalizeBothQuotas(provider, payload),
@@ -6239,6 +6339,9 @@ function buildAllProviderEntries() {
   };
 
   order.forEach(addProviderEntry);
+  entries.forEach((entry) => {
+    entry.freshness = entry.summaryOnly ? null : providerFreshness(entry.snapshotAt);
+  });
   return entries;
 }
 
@@ -6893,8 +6996,12 @@ function renderHomepageAccountsHTML(provider, accounts) {
     const accountId = account.accountId || account.id || idx + 1;
     const accountName = account.accountName || account.name || `Account ${accountId}`;
     const quotas = normalizeBothQuotas(provider, account);
-    return `<div class="homepage-harness-account" data-account-id="${escapeHTML(accountId)}">
-      <div class="homepage-harness-account-name">${escapeHTML(accountName)}</div>
+    const freshness = providerFreshness(account.snapshotAt);
+    return `<div class="homepage-harness-account" data-account-id="${escapeHTML(accountId)}" data-freshness="${escapeHTML(freshness.state)}">
+      <div class="homepage-harness-account-name">
+        <span>${escapeHTML(accountName)}</span>
+        ${freshnessChipHTML(freshness)}
+      </div>
       ${renderHomepageMetricsHTML(quotas)}
     </div>`;
   }).join('');
@@ -6912,9 +7019,11 @@ function renderAllProvidersView() {
     return;
   }
 
-  container.innerHTML = entries.map((entry) => {
+  container.innerHTML = renderFreshnessBannerHTML(entries) + entries.map((entry) => {
     const badge = entry.badge ? `<span class="provider-card-badge">${escapeHTML(entry.badge)}</span>` : '';
     const promo = entry.promoHtml || '';
+    const freshnessAttr = ` data-freshness="${escapeHTML(entry.freshness ? entry.freshness.state : 'unknown')}"`;
+    const freshnessChip = freshnessChipHTML(entry.freshness);
     if (entry.summaryOnly) {
       return `<section class="provider-card homepage-harness-card" data-card-key="${entry.cardKey}" data-provider="api-integrations" role="button" tabindex="0">
         <header class="provider-card-header"><div class="provider-card-title"><span>${escapeHTML(entry.title)}</span></div><span class="homepage-harness-open">Open &rarr;</span></header>
@@ -6929,17 +7038,20 @@ function renderAllProvidersView() {
           <span>${escapeHTML(entry.title)}</span>
           ${badge}${promo}
         </div>
-        <span class="homepage-harness-open">Open &rarr;</span>
+        <div class="homepage-harness-header-meta">
+          ${freshnessChip}
+          <span class="homepage-harness-open">Open &rarr;</span>
+        </div>
       </header>`;
     if (Array.isArray(entry.accountsGroup)) {
-      return `<section class="provider-card homepage-harness-card" data-card-key="${entry.cardKey}" data-provider="${entry.provider}" role="button" tabindex="0">
+      return `<section class="provider-card homepage-harness-card" data-card-key="${entry.cardKey}" data-provider="${entry.provider}"${freshnessAttr} role="button" tabindex="0">
       ${cardHeader}
       <div class="provider-card-body">
         <div class="homepage-harness-accounts">${renderHomepageAccountsHTML(entry.provider, entry.accountsGroup)}</div>
       </div>
     </section>`;
     }
-    return `<section class="provider-card homepage-harness-card" data-card-key="${entry.cardKey}" data-provider="${entry.provider}" role="button" tabindex="0">
+    return `<section class="provider-card homepage-harness-card" data-card-key="${entry.cardKey}" data-provider="${entry.provider}"${freshnessAttr} role="button" tabindex="0">
       ${cardHeader}
       <div class="provider-card-body">
         <div class="homepage-harness-metrics">${renderHomepageMetricsHTML(entry.quotas)}</div>

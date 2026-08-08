@@ -1,12 +1,19 @@
 # mise task runner - https://mise.jdx.dev
 # Docker build + push to the private registry.
 #
-#   mise run docker:login       # docker login to the registry
 #   mise run docker:build       # build local image (onwatch:latest + :VERSION)
 #   mise run docker:push        # tag + push to the registry
 #   mise run docker:release     # multi-arch buildx build + push in one step
 #
 # Tasks run under POSIX sh. On Windows that is Git Bash's sh (on PATH with git).
+#
+# Local overrides: create mise.local.toml (gitignored). mise merges it over this
+# file at higher precedence - [env] and [settings] merge key-by-key, a [tasks.x]
+# block replaces that whole task. Example:
+#
+#   [env]
+#   REGISTRY = "your-registry.example.ts.net"
+#   DOCKERFILE = "Dockerfile"
 
 [env]
 # REGISTRY lives in .env (gitignored) so the private host stays out of the
@@ -18,15 +25,6 @@ IMAGE_NAME = "onwatch"
 PLATFORMS = "linux/amd64,linux/arm64"
 # Plain "Dockerfile" is upstream's distroless image and has no provider CLIs.
 DOCKERFILE = "Dockerfile.with-user-env"
-
-[tasks."docker:login"]
-description = "Log in to the private registry"
-shell = "sh -c"
-run = '''
-set -eu
-: "${REGISTRY:?not set - add REGISTRY=your-registry.example.ts.net to .env}"
-docker login "${REGISTRY}"
-'''
 
 [tasks."docker:build"]
 description = "Build the onWatch Docker image for the local platform"

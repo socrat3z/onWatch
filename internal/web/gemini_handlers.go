@@ -36,6 +36,7 @@ func (h *Handler) buildGeminiCurrent() map[string]interface{} {
 	}
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 	if latest.Tier != "" {
 		response["tier"] = latest.Tier
 	}
