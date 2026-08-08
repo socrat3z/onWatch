@@ -642,6 +642,9 @@ func (s *Store) createTables() error {
 			usage_monthly REAL NOT NULL DEFAULT 0,
 			credit_limit REAL,
 			limit_remaining REAL,
+			account_credits REAL,
+			account_usage REAL,
+			account_balance REAL,
 			is_free_tier INTEGER NOT NULL DEFAULT 0,
 			rate_limit_requests INTEGER NOT NULL DEFAULT 0,
 			rate_limit_interval TEXT NOT NULL DEFAULT ''
@@ -1118,6 +1121,16 @@ func (s *Store) migrateSchema() error {
 			if !strings.Contains(err.Error(), "duplicate column name") &&
 				!strings.Contains(err.Error(), "no such table") {
 				return fmt.Errorf("failed to add weekly column to minimax_model_values: %w", err)
+			}
+		}
+	}
+
+	// Store account-wide OpenRouter credits separately from per-key limits.
+	for _, col := range []string{"account_credits REAL", "account_usage REAL", "account_balance REAL"} {
+		if _, err := s.db.Exec(`ALTER TABLE openrouter_snapshots ADD COLUMN ` + col); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column name") &&
+				!strings.Contains(err.Error(), "no such table") {
+				return fmt.Errorf("failed to add OpenRouter account credits column: %w", err)
 			}
 		}
 	}

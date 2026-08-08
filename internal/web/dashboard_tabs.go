@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	settingDashboardProvidersOrder  = "dashboard_providers_order"
-	settingDashboardProviderLabels  = "dashboard_provider_labels"
-	maxDashboardProviderLabelRunes  = 48
+	settingDashboardProvidersOrder = "dashboard_providers_order"
+	settingDashboardProviderLabels = "dashboard_provider_labels"
+	maxDashboardProviderLabelRunes = 48
 )
 
 // defaultProviderTabLabel returns the built-in dashboard tab title for a provider key.
@@ -49,7 +49,7 @@ func defaultProviderTabLabel(key string) string {
 	case "api-integrations":
 		return "API Integrations"
 	case "both":
-		return "All"
+		return "Home"
 	default:
 		if key == "" {
 			return ""
@@ -157,6 +157,17 @@ func orderDashboardProviders(available, preferred []string) []string {
 	out := make([]string, 0, len(regular)+len(orderedSpecials))
 	out = append(out, regular...)
 	out = append(out, orderedSpecials...)
+	// The combined current-status view is the dashboard homepage, so keep it
+	// first even when an older saved tab order placed "both" last.
+	for i, key := range out {
+		if key == "both" {
+			withoutHome := make([]string, 0, len(out)-1)
+			withoutHome = append(withoutHome, out[:i]...)
+			withoutHome = append(withoutHome, out[i+1:]...)
+			out = append([]string{"both"}, withoutHome...)
+			break
+		}
+	}
 	return out
 }
 

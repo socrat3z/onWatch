@@ -28,6 +28,18 @@ func (s *Store) InsertOpenRouterSnapshot(snapshot *api.OpenRouterSnapshot) (int6
 	if snapshot.LimitRemaining != nil {
 		limitRemainingVal = *snapshot.LimitRemaining
 	}
+	var accountCreditsVal interface{}
+	if snapshot.AccountCredits != nil {
+		accountCreditsVal = *snapshot.AccountCredits
+	}
+	var accountUsageVal interface{}
+	if snapshot.AccountUsage != nil {
+		accountUsageVal = *snapshot.AccountUsage
+	}
+	var accountBalanceVal interface{}
+	if snapshot.AccountBalance != nil {
+		accountBalanceVal = *snapshot.AccountBalance
+	}
 
 	isFreeTier := 0
 	if snapshot.IsFreeTier {
@@ -37,8 +49,9 @@ func (s *Store) InsertOpenRouterSnapshot(snapshot *api.OpenRouterSnapshot) (int6
 	result, err := s.db.Exec(
 		`INSERT INTO openrouter_snapshots
 		(captured_at, label, usage, usage_daily, usage_weekly, usage_monthly,
-		 credit_limit, limit_remaining, is_free_tier, rate_limit_requests, rate_limit_interval)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 credit_limit, limit_remaining, account_credits, account_usage, account_balance,
+		 is_free_tier, rate_limit_requests, rate_limit_interval)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		snapshot.CapturedAt.Format(time.RFC3339Nano),
 		snapshot.Label,
 		snapshot.Usage,
@@ -47,6 +60,9 @@ func (s *Store) InsertOpenRouterSnapshot(snapshot *api.OpenRouterSnapshot) (int6
 		snapshot.UsageMonthly,
 		limitVal,
 		limitRemainingVal,
+		accountCreditsVal,
+		accountUsageVal,
+		accountBalanceVal,
 		isFreeTier,
 		snapshot.RateLimitRequests,
 		snapshot.RateLimitInterval,
@@ -67,17 +83,18 @@ func (s *Store) InsertOpenRouterSnapshot(snapshot *api.OpenRouterSnapshot) (int6
 func (s *Store) QueryLatestOpenRouter() (*api.OpenRouterSnapshot, error) {
 	var snapshot api.OpenRouterSnapshot
 	var capturedAt string
-	var creditLimit, limitRemaining sql.NullFloat64
+	var creditLimit, limitRemaining, accountCredits, accountUsage, accountBalance sql.NullFloat64
 	var isFreeTier int
 
 	err := s.db.QueryRow(
 		`SELECT id, captured_at, label, usage, usage_daily, usage_weekly, usage_monthly,
-		 credit_limit, limit_remaining, is_free_tier, rate_limit_requests, rate_limit_interval
+		 credit_limit, limit_remaining, account_credits, account_usage, account_balance,
+		 is_free_tier, rate_limit_requests, rate_limit_interval
 		FROM openrouter_snapshots ORDER BY captured_at DESC LIMIT 1`,
 	).Scan(
 		&snapshot.ID, &capturedAt, &snapshot.Label,
 		&snapshot.Usage, &snapshot.UsageDaily, &snapshot.UsageWeekly, &snapshot.UsageMonthly,
-		&creditLimit, &limitRemaining, &isFreeTier,
+		&creditLimit, &limitRemaining, &accountCredits, &accountUsage, &accountBalance, &isFreeTier,
 		&snapshot.RateLimitRequests, &snapshot.RateLimitInterval,
 	)
 
@@ -95,6 +112,15 @@ func (s *Store) QueryLatestOpenRouter() (*api.OpenRouterSnapshot, error) {
 	if limitRemaining.Valid {
 		snapshot.LimitRemaining = &limitRemaining.Float64
 	}
+	if accountCredits.Valid {
+		snapshot.AccountCredits = &accountCredits.Float64
+	}
+	if accountUsage.Valid {
+		snapshot.AccountUsage = &accountUsage.Float64
+	}
+	if accountBalance.Valid {
+		snapshot.AccountBalance = &accountBalance.Float64
+	}
 	snapshot.IsFreeTier = isFreeTier != 0
 
 	return &snapshot, nil
@@ -103,17 +129,20 @@ func (s *Store) QueryLatestOpenRouter() (*api.OpenRouterSnapshot, error) {
 // QueryOpenRouterRange returns OpenRouter snapshots within a time range with optional limit.
 func (s *Store) QueryOpenRouterRange(start, end time.Time, limit ...int) ([]*api.OpenRouterSnapshot, error) {
 	query := `SELECT id, captured_at, label, usage, usage_daily, usage_weekly, usage_monthly,
-		 credit_limit, limit_remaining, is_free_tier, rate_limit_requests, rate_limit_interval
+		 credit_limit, limit_remaining, account_credits, account_usage, account_balance,
+		 is_free_tier, rate_limit_requests, rate_limit_interval
 		FROM openrouter_snapshots
 		WHERE captured_at BETWEEN ? AND ?
 		ORDER BY captured_at ASC`
 	args := []interface{}{start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano)}
 	if len(limit) > 0 && limit[0] > 0 {
 		query = `SELECT id, captured_at, label, usage, usage_daily, usage_weekly, usage_monthly,
-			 credit_limit, limit_remaining, is_free_tier, rate_limit_requests, rate_limit_interval
+			 credit_limit, limit_remaining, account_credits, account_usage, account_balance,
+			 is_free_tier, rate_limit_requests, rate_limit_interval
 			FROM (
 				SELECT id, captured_at, label, usage, usage_daily, usage_weekly, usage_monthly,
-					 credit_limit, limit_remaining, is_free_tier, rate_limit_requests, rate_limit_interval
+					 credit_limit, limit_remaining, account_credits, account_usage, account_balance,
+					 is_free_tier, rate_limit_requests, rate_limit_interval
 				FROM openrouter_snapshots
 				WHERE captured_at BETWEEN ? AND ?
 				ORDER BY captured_at DESC
@@ -132,13 +161,13 @@ func (s *Store) QueryOpenRouterRange(start, end time.Time, limit ...int) ([]*api
 	for rows.Next() {
 		var snapshot api.OpenRouterSnapshot
 		var capturedAt string
-		var creditLimit, limitRemaining sql.NullFloat64
+		var creditLimit, limitRemaining, accountCredits, accountUsage, accountBalance sql.NullFloat64
 		var isFreeTier int
 
 		err := rows.Scan(
 			&snapshot.ID, &capturedAt, &snapshot.Label,
 			&snapshot.Usage, &snapshot.UsageDaily, &snapshot.UsageWeekly, &snapshot.UsageMonthly,
-			&creditLimit, &limitRemaining, &isFreeTier,
+			&creditLimit, &limitRemaining, &accountCredits, &accountUsage, &accountBalance, &isFreeTier,
 			&snapshot.RateLimitRequests, &snapshot.RateLimitInterval,
 		)
 		if err != nil {
@@ -151,6 +180,15 @@ func (s *Store) QueryOpenRouterRange(start, end time.Time, limit ...int) ([]*api
 		}
 		if limitRemaining.Valid {
 			snapshot.LimitRemaining = &limitRemaining.Float64
+		}
+		if accountCredits.Valid {
+			snapshot.AccountCredits = &accountCredits.Float64
+		}
+		if accountUsage.Valid {
+			snapshot.AccountUsage = &accountUsage.Float64
+		}
+		if accountBalance.Valid {
+			snapshot.AccountBalance = &accountBalance.Float64
 		}
 		snapshot.IsFreeTier = isFreeTier != 0
 

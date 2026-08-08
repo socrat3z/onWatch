@@ -370,7 +370,7 @@ CLI flags override environment variables.
 
 ## API Endpoints
 
-All endpoints require authentication (session cookie or Basic Auth). Append `?provider=synthetic|zai|anthropic|codex|copilot|minimax|gemini|cursor|antigravity|both` to select the provider.
+All endpoints require authentication (session cookie or Basic Auth). Append `?provider=synthetic|zai|anthropic|codex|copilot|minimax|gemini|cursor|antigravity|openrouter|deepseek|both` to select the provider. See [HTTP API](docs/HTTP_API.md) for response fields and scripting examples, including the balance-based providers (DeepSeek, Moonshot, OpenRouter).
 
 | Endpoint                        | Method      | Description                                    |
 | ------------------------------- | ----------- | ---------------------------------------------- |

@@ -13,20 +13,36 @@ func (h *Handler) currentDeepSeek(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, h.buildDeepSeekCurrent())
 }
 
+// deepSeekDefaultCurrency returns the currency reported by the most recent
+// DeepSeek balance response. CNY is retained only as the no-data fallback.
+func (h *Handler) deepSeekDefaultCurrency() string {
+	if h.store != nil {
+		if latest, err := h.store.QueryLatestDeepSeek(); err == nil && latest != nil && latest.Currency != "" {
+			return latest.Currency
+		}
+	}
+
+	return "CNY"
+}
+
 // buildDeepSeekCurrent builds the DeepSeek current balance response map.
 func (h *Handler) buildDeepSeekCurrent() map[string]interface{} {
-	now := time.Now().UTC()
+	// Without a stored snapshot every amount stays null so the dashboard can
+	// render "--" instead of an invented healthy zero balance.
 	response := map[string]interface{}{
-		"capturedAt": now.Format(time.RFC3339),
+		"capturedAt":        nil,
+		"snapshotAvailable": false,
 		"balance": map[string]interface{}{
-			"name":        "Balance",
-			"description": "DeepSeek API balance",
-			"available":   true,
-			"currency":    "",
-			"total":       0.0,
-			"granted":     0.0,
-			"toppedUp":    0.0,
-			"rate":        0.0,
+			"name":              "Balance",
+			"description":       "DeepSeek API balance",
+			"snapshotAvailable": false,
+			"status":            "unknown",
+			"available":         nil,
+			"currency":          "",
+			"total":             nil,
+			"granted":           nil,
+			"toppedUp":          nil,
+			"rate":              nil,
 		},
 	}
 
@@ -39,22 +55,24 @@ func (h *Handler) buildDeepSeekCurrent() map[string]interface{} {
 
 		if latest != nil {
 			response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
-			
+			response["snapshotAvailable"] = true
+
 			status := "healthy"
 			if latest.TotalBalance == 0 {
 				status = "exhausted"
 			}
-			
+
 			balance := map[string]interface{}{
-				"name":        "Balance",
-				"description": "DeepSeek API balance",
-				"available":   latest.IsAvailable,
-				"currency":    latest.Currency,
-				"total":       latest.TotalBalance,
-				"granted":     latest.GrantedBalance,
-				"toppedUp":    latest.ToppedUpBalance,
-				"rate":        0.0,
-				"status":      status,
+				"name":              "Balance",
+				"description":       "DeepSeek API balance",
+				"snapshotAvailable": true,
+				"available":         latest.IsAvailable,
+				"currency":          latest.Currency,
+				"total":             latest.TotalBalance,
+				"granted":           latest.GrantedBalance,
+				"toppedUp":          latest.ToppedUpBalance,
+				"rate":              0.0,
+				"status":            status,
 			}
 
 			// Enrich with tracker data
@@ -134,7 +152,7 @@ func (h *Handler) cyclesDeepSeek(w http.ResponseWriter, r *http.Request) {
 	quotaType := "balance"
 	currency := r.URL.Query().Get("currency")
 	if currency == "" {
-		currency = "CNY" // Default
+		currency = h.deepSeekDefaultCurrency()
 	}
 	response := make([]map[string]interface{}, 0)
 
@@ -185,7 +203,7 @@ func deepseekCycleToMap(cycle *store.DeepSeekResetCycle) map[string]interface{} 
 func (h *Handler) summaryDeepSeek(w http.ResponseWriter, r *http.Request) {
 	currency := r.URL.Query().Get("currency")
 	if currency == "" {
-		currency = "CNY"
+		currency = h.deepSeekDefaultCurrency()
 	}
 	respondJSON(w, http.StatusOK, h.buildDeepSeekSummaryMap(currency))
 }
@@ -246,7 +264,7 @@ func (h *Handler) insightsDeepSeek(w http.ResponseWriter, r *http.Request, range
 	hidden := h.getHiddenInsightKeys()
 	currency := r.URL.Query().Get("currency")
 	if currency == "" {
-		currency = "CNY"
+		currency = h.deepSeekDefaultCurrency()
 	}
 	respondJSON(w, http.StatusOK, h.buildDeepSeekInsights(currency, hidden))
 }
@@ -268,7 +286,7 @@ func (h *Handler) buildDeepSeekInsights(currency string, hidden map[string]bool)
 		})
 		return resp
 	}
-	
+
 	if latest.Currency != currency {
 		// Only reporting for currently tracked currency
 		return resp
@@ -306,7 +324,7 @@ func (h *Handler) buildDeepSeekInsights(currency string, hidden map[string]bool)
 			}
 		}
 	}
-	
+
 	if !latest.IsAvailable {
 		resp.Insights = append(resp.Insights, insightItem{
 			Type: "warning", Severity: "high",
@@ -328,7 +346,7 @@ func (h *Handler) cycleOverviewDeepSeek(w http.ResponseWriter, r *http.Request) 
 	quotaType := "balance"
 	currency := r.URL.Query().Get("currency")
 	if currency == "" {
-		currency = "CNY"
+		currency = h.deepSeekDefaultCurrency()
 	}
 	var cycles []map[string]interface{}
 

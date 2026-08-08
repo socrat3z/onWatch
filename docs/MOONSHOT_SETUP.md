@@ -14,6 +14,9 @@ onWatch polls `GET https://api.moonshot.ai/v1/users/me/balance` and renders thre
 
 Trends show the balance **drop rate** over time so you can see how fast credits are being consumed.
 
+To retrieve the current or historical balance programmatically through
+onWatch, see [HTTP API](HTTP_API.md#moonshot-current-balance).
+
 ## Setup
 
 1. Create an API key in the [Moonshot platform console](https://platform.moonshot.ai/).

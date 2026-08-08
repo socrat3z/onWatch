@@ -1,0 +1,89 @@
+# mise task runner - https://mise.jdx.dev
+# Docker build + push to the private registry.
+#
+#   mise run docker:login       # docker login to the registry
+#   mise run docker:build       # build local image (onwatch:latest + :VERSION)
+#   mise run docker:push        # tag + push to the registry
+#   mise run docker:release     # multi-arch buildx build + push in one step
+#
+# Tasks run under POSIX sh. On Windows that is Git Bash's sh (on PATH with git).
+
+[env]
+# REGISTRY lives in .env (gitignored) so the private host stays out of the
+# public fork. Set it there as: REGISTRY=your-registry.example.ts.net
+# mise redacts values loaded this way from task output.
+_.file = { path = ".env", redact = true }
+
+IMAGE_NAME = "onwatch"
+PLATFORMS = "linux/amd64,linux/arm64"
+# Plain "Dockerfile" is upstream's distroless image and has no provider CLIs.
+DOCKERFILE = "Dockerfile.with-user-env"
+
+[tasks."docker:login"]
+description = "Log in to the private registry"
+shell = "sh -c"
+run = '''
+set -eu
+: "${REGISTRY:?not set - add REGISTRY=your-registry.example.ts.net to .env}"
+docker login "${REGISTRY}"
+'''
+
+[tasks."docker:build"]
+description = "Build the onWatch Docker image for the local platform"
+shell = "sh -c"
+run = '''
+set -eu
+VERSION=$(cat VERSION)
+BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+SHA=$(git rev-parse --short HEAD)
+echo "Building ${IMAGE_NAME}:${VERSION} from ${DOCKERFILE}"
+docker build \
+  -f "${DOCKERFILE}" \
+  --build-arg VERSION="${VERSION}" \
+  --build-arg BUILD_TIME="${BUILD_TIME}" \
+  -t "${IMAGE_NAME}:${VERSION}" \
+  -t "${IMAGE_NAME}:${VERSION}-${SHA}" \
+  -t "${IMAGE_NAME}:latest" \
+  .
+echo "built ${IMAGE_NAME}:${VERSION}, :${VERSION}-${SHA} and :latest"
+'''
+
+[tasks."docker:push"]
+description = "Tag the local image and push it to the private registry"
+# depends = ["docker:build"]
+shell = "sh -c"
+run = '''
+set -eu
+: "${REGISTRY:?not set - add REGISTRY=your-registry.example.ts.net to .env}"
+VERSION=$(cat VERSION)
+SHA=$(git rev-parse --short HEAD)
+for tag in "${VERSION}" "${VERSION}-${SHA}" latest; do
+  docker tag "${IMAGE_NAME}:${tag}" "${REGISTRY}/${IMAGE_NAME}:${tag}"
+  docker push "${REGISTRY}/${IMAGE_NAME}:${tag}"
+done
+echo "pushed ${REGISTRY}/${IMAGE_NAME}:${VERSION}-${SHA} and :latest"
+'''
+
+[tasks."docker:release"]
+description = "Multi-arch build and push straight to the private registry (buildx)"
+shell = "sh -c"
+run = '''
+set -eu
+: "${REGISTRY:?not set - add REGISTRY=your-registry.example.ts.net to .env}"
+VERSION=$(cat VERSION)
+BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+SHA=$(git rev-parse --short HEAD)
+docker buildx inspect onwatch >/dev/null 2>&1 || docker buildx create --name onwatch
+docker buildx build \
+  --builder onwatch \
+  -f "${DOCKERFILE}" \
+  --platform "${PLATFORMS}" \
+  --build-arg VERSION="${VERSION}" \
+  --build-arg BUILD_TIME="${BUILD_TIME}" \
+  -t "${REGISTRY}/${IMAGE_NAME}:${VERSION}" \
+  -t "${REGISTRY}/${IMAGE_NAME}:${VERSION}-${SHA}" \
+  -t "${REGISTRY}/${IMAGE_NAME}:latest" \
+  --push \
+  .
+echo "pushed ${REGISTRY}/${IMAGE_NAME}:${VERSION}-${SHA} (${PLATFORMS})"
+'''

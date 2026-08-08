@@ -532,9 +532,15 @@ func (c *AntigravityClient) discoverPortsMacOS(ctx context.Context, pid int) ([]
 	return parsePortsFromLsof(string(output)), nil
 }
 
-// discoverPortsLinux uses ss or netstat to find listening ports.
+// discoverPortsLinux resolves listening ports from procfs first, falling back
+// to ss and netstat. The procfs path needs no external binaries, so it is the
+// only one that works in slim container images (see Dockerfile runtime stage).
 func (c *AntigravityClient) discoverPortsLinux(ctx context.Context, pid int) ([]int, error) {
-	// Try ss first
+	if ports, err := discoverPortsProc("/proc", pid); err == nil && len(ports) > 0 {
+		return ports, nil
+	}
+
+	// Try ss next
 	cmd := exec.CommandContext(ctx, "ss", "-tlnp")
 	output, err := cmd.Output()
 	if err == nil {

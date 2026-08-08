@@ -14,6 +14,9 @@ onWatch polls `GET https://api.deepseek.com/user/balance` and renders three bala
 
 Trends show the balance **drop rate** over time so you can see how fast credits are being consumed.
 
+To retrieve the current or historical balance programmatically through
+onWatch, see [HTTP API](HTTP_API.md#deepseek-current-balance).
+
 ## Setup
 
 1. Create an API key in the [DeepSeek platform console](https://platform.deepseek.com/api_keys).

@@ -23,7 +23,26 @@ type OpenRouterAuthKeyData struct {
 
 // OpenRouterAuthKeyResponse is the top-level response from GET /api/v1/auth/key.
 type OpenRouterAuthKeyResponse struct {
-	Data OpenRouterAuthKeyData `json:"data"`
+	Data           OpenRouterAuthKeyData  `json:"data"`
+	AccountCredits *OpenRouterCreditsData `json:"-"`
+}
+
+// OpenRouterCreditsData is the account-wide credit data returned by
+// GET /api/v1/credits. Unlike an API key's limit_remaining value, this is
+// the user's purchased-credit pool and usage across the account.
+type OpenRouterCreditsData struct {
+	TotalCredits float64 `json:"total_credits"`
+	TotalUsage   float64 `json:"total_usage"`
+}
+
+// Balance returns the current account-wide credit balance.
+func (d OpenRouterCreditsData) Balance() float64 {
+	return d.TotalCredits - d.TotalUsage
+}
+
+// OpenRouterCreditsResponse is the response from GET /api/v1/credits.
+type OpenRouterCreditsResponse struct {
+	Data OpenRouterCreditsData `json:"data"`
 }
 
 // OpenRouterSnapshot is the storage representation (flat, for SQLite).
@@ -37,6 +56,9 @@ type OpenRouterSnapshot struct {
 	UsageMonthly      float64
 	Limit             *float64
 	LimitRemaining    *float64
+	AccountCredits    *float64
+	AccountUsage      *float64
+	AccountBalance    *float64
 	IsFreeTier        bool
 	RateLimitRequests int
 	RateLimitInterval string
@@ -57,8 +79,25 @@ func (r *OpenRouterAuthKeyResponse) ToSnapshot(capturedAt time.Time) *OpenRouter
 		RateLimitRequests: r.Data.RateLimit.Requests,
 		RateLimitInterval: r.Data.RateLimit.Interval,
 	}
+	if r.AccountCredits != nil {
+		totalCredits := r.AccountCredits.TotalCredits
+		accountUsage := r.AccountCredits.TotalUsage
+		accountBalance := r.AccountCredits.Balance()
+		snapshot.AccountCredits = &totalCredits
+		snapshot.AccountUsage = &accountUsage
+		snapshot.AccountBalance = &accountBalance
+	}
 
 	return snapshot
+}
+
+// ParseOpenRouterCreditsResponse parses an OpenRouter account credits response.
+func ParseOpenRouterCreditsResponse(data []byte) (*OpenRouterCreditsResponse, error) {
+	var resp OpenRouterCreditsResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // ParseOpenRouterResponse parses an OpenRouter API response from JSON bytes.

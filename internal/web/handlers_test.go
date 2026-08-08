@@ -1657,6 +1657,13 @@ func TestHandler_Dashboard_WithMultipleProviders_ShowsSelector(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d", rr.Code)
 	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `id="all-providers-container"`) {
+		t.Error("expected the root dashboard to render the all-harness homepage")
+	}
+	if !strings.Contains(body, `data-provider="both" role="tab" aria-selected="true"`) {
+		t.Error("expected the Home tab to be selected on the root dashboard")
+	}
 }
 
 func TestHandler_Dashboard_PreservesProviderQueryParam(t *testing.T) {

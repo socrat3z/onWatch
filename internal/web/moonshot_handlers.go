@@ -15,16 +15,20 @@ func (h *Handler) currentMoonshot(w http.ResponseWriter, r *http.Request) {
 
 // buildMoonshotCurrent builds the Moonshot current balance response map.
 func (h *Handler) buildMoonshotCurrent() map[string]interface{} {
-	now := time.Now().UTC()
+	// Without a stored snapshot every amount stays null so the dashboard can
+	// render "--" instead of an invented healthy zero balance.
 	response := map[string]interface{}{
-		"capturedAt": now.Format(time.RFC3339),
+		"capturedAt":        nil,
+		"snapshotAvailable": false,
 		"balance": map[string]interface{}{
-			"name":        "Balance",
-			"description": "Moonshot Kimi API balance",
-			"available":   0.0,
-			"voucher":     0.0,
-			"cash":        0.0,
-			"rate":        0.0,
+			"name":              "Balance",
+			"description":       "Moonshot Kimi API balance",
+			"snapshotAvailable": false,
+			"status":            "unknown",
+			"available":         nil,
+			"voucher":           nil,
+			"cash":              nil,
+			"rate":              nil,
 		},
 	}
 
@@ -37,20 +41,22 @@ func (h *Handler) buildMoonshotCurrent() map[string]interface{} {
 
 		if latest != nil {
 			response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
-			
+			response["snapshotAvailable"] = true
+
 			status := "healthy"
 			if latest.AvailableBalance == 0 {
 				status = "exhausted"
 			}
-			
+
 			balance := map[string]interface{}{
-				"name":        "Balance",
-				"description": "Moonshot Kimi API balance",
-				"available":   latest.AvailableBalance,
-				"voucher":     latest.VoucherBalance,
-				"cash":        latest.CashBalance,
-				"rate":        0.0,
-				"status":      status,
+				"name":              "Balance",
+				"description":       "Moonshot Kimi API balance",
+				"snapshotAvailable": true,
+				"available":         latest.AvailableBalance,
+				"voucher":           latest.VoucherBalance,
+				"cash":              latest.CashBalance,
+				"rate":              0.0,
+				"status":            status,
 			}
 
 			// Enrich with tracker data

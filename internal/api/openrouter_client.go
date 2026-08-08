@@ -12,10 +12,10 @@ import (
 
 // Custom errors for OpenRouter API failures.
 var (
-	ErrOpenRouterUnauthorized  = errors.New("openrouter: unauthorized - invalid API key")
-	ErrOpenRouterRateLimited   = errors.New("openrouter: rate limited")
-	ErrOpenRouterServerError   = errors.New("openrouter: server error")
-	ErrOpenRouterNetworkError  = errors.New("openrouter: network error")
+	ErrOpenRouterUnauthorized    = errors.New("openrouter: unauthorized - invalid API key")
+	ErrOpenRouterRateLimited     = errors.New("openrouter: rate limited")
+	ErrOpenRouterServerError     = errors.New("openrouter: server error")
+	ErrOpenRouterNetworkError    = errors.New("openrouter: network error")
 	ErrOpenRouterInvalidResponse = errors.New("openrouter: invalid response")
 )
 
@@ -79,7 +79,7 @@ func (c *OpenRouterClient) FetchUsage(ctx context.Context) (*OpenRouterAuthKeyRe
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	url := c.baseURL + "/api/v1/auth/key"
+	url := c.baseURL + "/api/v1/key"
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("openrouter: creating request: %w", err)
@@ -140,6 +140,15 @@ func (c *OpenRouterClient) FetchUsage(ctx context.Context) (*OpenRouterAuthKeyRe
 		return nil, fmt.Errorf("%w: %v", ErrOpenRouterInvalidResponse, err)
 	}
 
+	// Account credits require a management key. A normal inference key commonly
+	// receives 403 here, which must not prevent key-level usage from being stored.
+	creditsResp, creditsErr := c.fetchAccountCredits(reqCtx)
+	if creditsErr != nil {
+		c.logger.Debug("OpenRouter account balance unavailable", "error", creditsErr)
+	} else {
+		authKeyResp.AccountCredits = &creditsResp.Data
+	}
+
 	// Log usage info
 	c.logger.Debug("OpenRouter usage fetched successfully",
 		"usage", authKeyResp.Data.Usage,
@@ -149,6 +158,39 @@ func (c *OpenRouterClient) FetchUsage(ctx context.Context) (*OpenRouterAuthKeyRe
 	)
 
 	return authKeyResp, nil
+}
+
+func (c *OpenRouterClient) fetchAccountCredits(ctx context.Context) (*OpenRouterCreditsResponse, error) {
+	url := c.baseURL + "/api/v1/credits"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("openrouter: creating credits request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("User-Agent", "onwatch/1.0")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: fetching account credits: %v", ErrOpenRouterNetworkError, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if err != nil {
+		return nil, fmt.Errorf("%w: reading credits body: %v", ErrOpenRouterInvalidResponse, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("openrouter: account credits unavailable: status %d", resp.StatusCode)
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("%w: empty credits response body", ErrOpenRouterInvalidResponse)
+	}
+	creditsResp, err := ParseOpenRouterCreditsResponse(body)
+	if err != nil {
+		return nil, fmt.Errorf("%w: credits: %v", ErrOpenRouterInvalidResponse, err)
+	}
+	return creditsResp, nil
 }
 
 // redactOpenRouterAPIKey masks the API key for logging.

@@ -11,7 +11,7 @@ func TestOrderDashboardProviders(t *testing.T) {
 	t.Parallel()
 	available := []string{"anthropic", "zai", "codex", "both"}
 	got := orderDashboardProviders(available, []string{"zai", "missing", "anthropic", "zai"})
-	want := []string{"zai", "anthropic", "codex", "both"}
+	want := []string{"both", "zai", "anthropic", "codex"}
 	if len(got) != len(want) {
 		t.Fatalf("len=%d want %d: %v", len(got), len(want), got)
 	}
@@ -28,8 +28,8 @@ func TestOrderDashboardProviders_NewProviderBeforeBoth(t *testing.T) {
 	available := []string{"anthropic", "zai", "codex", "antigravity", "gemini", "grok", "both"}
 	preferred := []string{"codex", "anthropic", "zai", "antigravity", "gemini", "both"}
 	got := orderDashboardProviders(available, preferred)
-	// grok must not land after both
-	want := []string{"codex", "anthropic", "zai", "antigravity", "gemini", "grok", "both"}
+	// Home is always first and grok remains among the provider drill-down tabs.
+	want := []string{"both", "codex", "anthropic", "zai", "antigravity", "gemini", "grok"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v want %v", got, want)
 	}
@@ -111,7 +111,7 @@ func TestDashboardTabSettingsRoundTrip(t *testing.T) {
 
 func TestDefaultProviderTabLabel(t *testing.T) {
 	t.Parallel()
-	if defaultProviderTabLabel("both") != "All" {
+	if defaultProviderTabLabel("both") != "Home" {
 		t.Fatal(defaultProviderTabLabel("both"))
 	}
 	if defaultProviderTabLabel("api-integrations") != "API Integrations" {

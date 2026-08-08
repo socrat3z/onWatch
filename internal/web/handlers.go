@@ -2953,10 +2953,10 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				entry := map[string]interface{}{
-					"capturedAt": s.CapturedAt.Format(time.RFC3339),
+					"capturedAt":        s.CapturedAt.Format(time.RFC3339),
 					"available_balance": s.AvailableBalance,
-					"voucher_balance": s.VoucherBalance,
-					"cash_balance": s.CashBalance,
+					"voucher_balance":   s.VoucherBalance,
+					"cash_balance":      s.CashBalance,
 				}
 				msData = append(msData, entry)
 			}
@@ -3235,19 +3235,28 @@ func (h *Handler) currentOpenRouter(w http.ResponseWriter, r *http.Request) {
 
 // buildOpenRouterCurrent builds the OpenRouter current credits response map.
 func (h *Handler) buildOpenRouterCurrent() map[string]interface{} {
-	now := time.Now().UTC()
+	// Without a stored snapshot every amount stays null so the dashboard can
+	// render "--" instead of an invented healthy zero usage.
 	response := map[string]interface{}{
-		"capturedAt": now.Format(time.RFC3339),
+		"capturedAt":        nil,
+		"snapshotAvailable": false,
 		"credits": map[string]interface{}{
-			"name":        "Credits",
-			"description": "OpenRouter API credits usage",
-			"usage":       0.0,
-			"limit":       nil,
-			"remaining":   nil,
-			"percent":     0.0,
-			"isFreeTier":  false,
-			"rate":        0.0,
-			"projected":   0.0,
+			"name":              "Credits",
+			"description":       "OpenRouter API credits usage",
+			"snapshotAvailable": false,
+			"usage":             nil,
+			"usageDaily":        nil,
+			"limit":             nil,
+			"remaining":         nil,
+			"keyLimitRemaining": nil,
+			"balance":           nil,
+			"totalCredits":      nil,
+			"accountUsage":      nil,
+			"balanceAvailable":  false,
+			"percent":           nil,
+			"isFreeTier":        false,
+			"rate":              nil,
+			"projected":         nil,
 		},
 	}
 
@@ -3260,17 +3269,24 @@ func (h *Handler) buildOpenRouterCurrent() map[string]interface{} {
 
 		if latest != nil {
 			response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+			response["snapshotAvailable"] = true
 			credits := map[string]interface{}{
-				"name":        "Credits",
-				"description": "OpenRouter API credits usage",
-				"usage":       latest.Usage,
-				"usageDaily":  latest.UsageDaily,
-				"limit":       nil,
-				"remaining":   nil,
-				"percent":     0.0,
-				"isFreeTier":  latest.IsFreeTier,
-				"rate":        0.0,
-				"projected":   0.0,
+				"name":              "Credits",
+				"description":       "OpenRouter API credits usage",
+				"snapshotAvailable": true,
+				"usage":             latest.Usage,
+				"usageDaily":        latest.UsageDaily,
+				"limit":             nil,
+				"remaining":         nil,
+				"keyLimitRemaining": nil,
+				"balance":           nil,
+				"totalCredits":      nil,
+				"accountUsage":      nil,
+				"balanceAvailable":  latest.AccountBalance != nil,
+				"percent":           0.0,
+				"isFreeTier":        latest.IsFreeTier,
+				"rate":              0.0,
+				"projected":         0.0,
 			}
 			if latest.Limit != nil && *latest.Limit > 0 {
 				credits["limit"] = *latest.Limit
@@ -3278,6 +3294,16 @@ func (h *Handler) buildOpenRouterCurrent() map[string]interface{} {
 			}
 			if latest.LimitRemaining != nil {
 				credits["remaining"] = *latest.LimitRemaining
+				credits["keyLimitRemaining"] = *latest.LimitRemaining
+			}
+			if latest.AccountBalance != nil {
+				credits["balance"] = *latest.AccountBalance
+			}
+			if latest.AccountCredits != nil {
+				credits["totalCredits"] = *latest.AccountCredits
+			}
+			if latest.AccountUsage != nil {
+				credits["accountUsage"] = *latest.AccountUsage
 			}
 
 			// Enrich with tracker data
@@ -3338,6 +3364,15 @@ func (h *Handler) historyOpenRouter(w http.ResponseWriter, r *http.Request) {
 			"capturedAt": snapshot.CapturedAt.Format(time.RFC3339),
 			"usage":      snapshot.Usage,
 			"usageDaily": snapshot.UsageDaily,
+		}
+		if snapshot.AccountBalance != nil {
+			entry["balance"] = *snapshot.AccountBalance
+		}
+		if snapshot.AccountCredits != nil {
+			entry["totalCredits"] = *snapshot.AccountCredits
+		}
+		if snapshot.AccountUsage != nil {
+			entry["accountUsage"] = *snapshot.AccountUsage
 		}
 		if snapshot.Limit != nil && *snapshot.Limit > 0 {
 			entry["percent"] = (snapshot.Usage / *snapshot.Limit) * 100
@@ -3883,11 +3918,8 @@ func (h *Handler) cyclesBoth(w http.ResponseWriter, r *http.Request) {
 	if h.config.HasProvider("deepseek") {
 		quotaType := "balance"
 		var dsCycles []map[string]interface{}
-		
-		// Use CNY as default if not specified elsewhere. DeepSeek could use USD, 
-		// but tracking one primary currency for UI is sufficient for summary.
-		currency := "CNY"
-		
+		currency := h.deepSeekDefaultCurrency()
+
 		if active, err := h.store.QueryActiveDeepSeekCycle(quotaType, currency); err == nil && active != nil {
 			dsCycles = append(dsCycles, deepseekCycleToMap(active))
 		}
@@ -4130,8 +4162,7 @@ func (h *Handler) summaryBoth(w http.ResponseWriter, r *http.Request) {
 		response["moonshot"] = h.buildMoonshotSummaryMap()
 	}
 	if h.config.HasProvider("deepseek") {
-		// DeepSeek could use either currency. Use CNY by default for summary view unless we know better
-		response["deepseek"] = h.buildDeepSeekSummaryMap("CNY")
+		response["deepseek"] = h.buildDeepSeekSummaryMap(h.deepSeekDefaultCurrency())
 	}
 	if h.config.HasProvider("anthropic") {
 		response["anthropic"] = h.buildAnthropicSummaryMap()
@@ -4991,8 +5022,7 @@ func (h *Handler) insightsBoth(w http.ResponseWriter, r *http.Request, rangeDur 
 		response["moonshot"] = h.buildMoonshotInsights(hidden)
 	}
 	if h.config.HasProvider("deepseek") && providerTelemetryEnabled(visibility, "deepseek") {
-		// Use CNY for deepseek overall insights if not explicitly asked
-		response["deepseek"] = h.buildDeepSeekInsights("CNY", hidden)
+		response["deepseek"] = h.buildDeepSeekInsights(h.deepSeekDefaultCurrency(), hidden)
 	}
 	if h.config.HasProvider("gemini") && providerTelemetryEnabled(visibility, "gemini") {
 		response["gemini"] = insightsResponse{Stats: []insightStat{}, Insights: []insightItem{}}
@@ -7687,7 +7717,7 @@ func (h *Handler) cycleOverviewBoth(w http.ResponseWriter, r *http.Request) {
 			"cycles":     orCycles,
 		}
 	}
-	
+
 	if h.config.HasProvider("moonshot") {
 		quotaType := "balance"
 		var msCycles []map[string]interface{}
@@ -7709,7 +7739,7 @@ func (h *Handler) cycleOverviewBoth(w http.ResponseWriter, r *http.Request) {
 
 	if h.config.HasProvider("deepseek") {
 		quotaType := "balance"
-		currency := "CNY" // Could be made dynamic
+		currency := h.deepSeekDefaultCurrency()
 		var dsCycles []map[string]interface{}
 		if active, err := h.store.QueryActiveDeepSeekCycle(quotaType, currency); err == nil && active != nil {
 			dsCycles = append(dsCycles, deepseekCycleToMap(active))

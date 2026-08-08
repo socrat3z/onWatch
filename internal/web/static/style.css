@@ -541,6 +541,11 @@ button, input, select { font-family: inherit; }
   letter-spacing: -0.02em;
   margin-bottom: 0;
 }
+.welcome-subtitle {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 14px;
+}
 
 /* ═══════════════════════════════════════════
    7. QUOTA CARDS (KPI STYLE)
@@ -581,10 +586,122 @@ button, input, select { font-family: inherit; }
 
 /* All Providers View */
 .all-providers-view {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  align-items: start;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+
+.homepage-harness-card {
+  cursor: pointer;
+  transition: transform var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.homepage-harness-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-focus);
+  box-shadow: var(--shadow-card-hover);
+}
+
+.homepage-harness-card:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.homepage-harness-card .provider-card-header {
+  padding: 9px 12px;
+}
+
+.homepage-harness-card .provider-card-title {
+  font-size: 13px;
+}
+
+.homepage-harness-card .provider-card-body {
+  padding: 8px 12px 10px;
+}
+
+.homepage-harness-open {
+  flex-shrink: 0;
+  color: var(--accent-teal-text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.homepage-harness-metrics,
+.homepage-harness-accounts {
   display: flex;
   flex-direction: column;
-  gap: var(--layout-gap);
-  margin-bottom: 28px;
+  gap: 7px;
+}
+
+.homepage-harness-account + .homepage-harness-account {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-light);
+}
+
+.homepage-harness-account-name {
+  margin-bottom: 5px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.homepage-harness-metric {
+  min-width: 0;
+}
+
+.homepage-harness-metric-top,
+.homepage-harness-metric:not(:has(.homepage-harness-metric-top)) {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.homepage-harness-label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.homepage-harness-value {
+  flex-shrink: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.homepage-harness-track {
+  height: 3px;
+  margin-top: 3px;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: var(--surface-inset);
+}
+
+.homepage-harness-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--status-healthy);
+}
+
+.homepage-harness-track > span[data-status="warning"] { background: var(--status-warning); }
+.homepage-harness-track > span[data-status="danger"],
+.homepage-harness-track > span[data-status="critical"] { background: var(--status-critical); }
+
+.homepage-harness-empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 .provider-card {
@@ -1228,6 +1345,11 @@ button, input, select { font-family: inherit; }
 .status-badge[data-status="critical"] {
   background: var(--status-critical-bg);
   color: var(--status-critical-text);
+}
+/* No snapshot stored yet - neutral, so an empty poll never reads as healthy. */
+.status-badge[data-status="unknown"] {
+  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+  color: var(--text-muted);
 }
 .status-icon { width: 12px; height: 12px; }
 
@@ -3656,6 +3778,27 @@ body.accounts-overview-mode #sessions-section {
   border-radius: var(--radius-full);
   padding: 3px 10px;
   text-transform: capitalize;
+}
+
+.account-overview-balance {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--surface-card-alt);
+  color: var(--text-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.account-overview-balance strong {
+  color: var(--text-primary);
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
 }
 
 .account-overview-quotas {

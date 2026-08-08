@@ -64,6 +64,10 @@ function getCurrentProvider() {
   if (minimaxGrid) return 'minimax';
   const openrouterGrid = document.getElementById('quota-grid-openrouter');
   if (openrouterGrid) return 'openrouter';
+  const moonshotGrid = document.getElementById('quota-grid-moonshot');
+  if (moonshotGrid) return 'moonshot';
+  const deepseekGrid = document.getElementById('quota-grid-deepseek');
+  if (deepseekGrid) return 'deepseek';
   const geminiGrid = document.getElementById('quota-grid-gemini');
   if (geminiGrid) return 'gemini';
   const cursorGrid = document.getElementById('quota-grid-cursor');
@@ -833,7 +837,8 @@ const statusConfig = {
   healthy: { label: 'Healthy', icon: 'M20 6L9 17l-5-5' },
   warning: { label: 'Warning', icon: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01' },
   danger: { label: 'Danger', icon: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01' },
-  critical: { label: 'Critical', icon: 'M12 9v4M12 17h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z' }
+  critical: { label: 'Critical', icon: 'M12 9v4M12 17h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z' },
+  unknown: { label: 'No data', icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20M8 12h8' }
 };
 
 const quotaNames = {
@@ -4071,11 +4076,17 @@ async function fetchCurrent() {
       } else if (provider === 'openrouter') {
         if (data.credits) {
           const container = document.getElementById('quota-grid-openrouter');
-          if (container && container.children.length === 0) {
-            renderOpenRouterCard(data.credits, 'quota-grid-openrouter');
-          } else {
-            updateOpenRouterCard(data.credits);
-          }
+          if (container) container.innerHTML = renderProviderKPIHTML(normalizeBothQuotas('openrouter', data), 'openrouter');
+        }
+      } else if (provider === 'deepseek') {
+        if (data.balance) {
+          const container = document.getElementById('quota-grid-deepseek');
+          if (container) container.innerHTML = renderProviderKPIHTML(normalizeBothQuotas('deepseek', data), 'deepseek');
+        }
+      } else if (provider === 'moonshot') {
+        if (data.balance) {
+          const container = document.getElementById('quota-grid-moonshot');
+          if (container) container.innerHTML = renderProviderKPIHTML(normalizeBothQuotas('moonshot', data), 'moonshot');
         }
       } else if (provider === 'grok') {
         const container = document.getElementById('quota-grid-grok');
@@ -4244,6 +4255,9 @@ function accountOverviewCardHTML(provider, account, idx) {
   const accountName = account.accountName || account.name || `Account ${accountId}`;
   const badge = provider === 'codex' && account.planType ? formatCodexPlan(account.planType) : '';
   const rows = accountOverviewQuotas(provider, account);
+  const balanceHTML = provider === 'codex' && account.creditsBalance != null
+    ? `<div class="account-overview-balance"><span>Credits Balance</span><strong>${escapeHTML(Number(account.creditsBalance).toFixed(2))}</strong></div>`
+    : '';
   const quotaHTML = rows.length === 0
     ? '<p class="empty-state">No quota data yet.</p>'
     : rows.map(r => {
@@ -4269,6 +4283,7 @@ function accountOverviewCardHTML(provider, account, idx) {
       <span class="account-overview-name">${escapeHTML(accountName)}</span>
       ${badge ? `<span class="account-overview-badge">${escapeHTML(badge)}</span>` : ''}
     </header>
+    ${balanceHTML}
     <div class="account-overview-quotas">${quotaHTML}</div>
     <span class="account-overview-cta">View details &rarr;</span>
   </article>`;
@@ -4572,6 +4587,7 @@ const insightIcons = {
 
 async function fetchDeepInsights() {
   const provider = getCurrentProvider();
+  if (provider === 'both') return;
   if (provider === 'api-integrations') {
     renderAPIIntegrationsInsights();
     return;
@@ -5273,6 +5289,7 @@ function updateChartTheme() {
 }
 
 async function fetchHistory(range) {
+  if (getCurrentProvider() === 'both') return;
   if (range === undefined) {
     const activeBtn = document.querySelector('.range-btn[data-range].active');
     range = activeBtn ? activeBtn.dataset.range : '6h';
@@ -5779,6 +5796,8 @@ const bothProviderNames = {
   codex: 'Codex',
   antigravity: 'Antigravity',
   minimax: 'MiniMax',
+  openrouter: 'OpenRouter',
+  deepseek: 'DeepSeek',
   gemini: 'Gemini',
   cursor: 'Cursor',
   grok: 'Grok',
@@ -5853,6 +5872,76 @@ function isProviderTelemetryEnabled(provider, accountID) {
 function normalizeBothQuotas(provider, payload) {
   if (!payload) return [];
 
+  // Balance providers report snapshotAvailable: false until the poller has
+  // stored real data. Treat that as "no data" instead of a zero balance.
+  const hasSnapshot = payload.snapshotAvailable !== false;
+  const noDataLabel = 'Waiting for first poll';
+
+  if (provider === 'deepseek' && payload.balance) {
+    const balance = payload.balance;
+    const currency = balance.currency || '';
+    const usable = hasSnapshot && balance.available !== false;
+    const status = !hasSnapshot ? 'unknown' : (balance.status === 'exhausted' ? 'critical' : (balance.status || 'healthy'));
+    const subStatus = hasSnapshot ? 'healthy' : 'unknown';
+    return [
+      { name: 'total_balance', displayName: 'Total Balance', kind: 'balance', value: balance.total, currency, available: usable, status, cardLabel: hasSnapshot ? 'Available balance' : noDataLabel },
+      { name: 'granted_balance', displayName: 'Granted', kind: 'balance', value: balance.granted, currency, available: usable, status: subStatus, cardLabel: hasSnapshot ? 'Promotional credits' : noDataLabel },
+      { name: 'topped_up_balance', displayName: 'Topped Up', kind: 'balance', value: balance.toppedUp, currency, available: usable, status: subStatus, cardLabel: hasSnapshot ? 'Purchased credits' : noDataLabel },
+    ];
+  }
+
+  if (provider === 'openrouter' && payload.credits) {
+    const credits = payload.credits;
+    const quotas = [{
+      name: 'account_balance',
+      displayName: 'Account Balance',
+      kind: 'balance',
+      value: credits.balance,
+      currency: 'USD',
+      available: hasSnapshot && credits.balanceAvailable === true && credits.balance != null,
+      status: !hasSnapshot ? 'unknown' : (credits.balance != null && credits.balance <= 0 ? 'critical' : 'healthy'),
+      cardLabel: !hasSnapshot
+        ? noDataLabel
+        : (credits.balanceAvailable ? 'Purchased credits remaining' : 'Requires an OpenRouter management key'),
+    }];
+    if (hasSnapshot && credits.limit != null && credits.limit > 0) {
+      quotas.push({
+        name: 'key_limit',
+        displayName: 'Key Limit',
+        cardPercent: credits.percent || 0,
+        used: credits.usage || 0,
+        total: credits.limit,
+        status: getQuotaStatus(credits.percent || 0),
+        cardLabel: credits.keyLimitRemaining != null
+          ? `$${Number(credits.keyLimitRemaining).toFixed(4)} remaining`
+          : 'API key spending cap',
+      });
+    } else {
+      quotas.push({
+        name: 'key_usage',
+        displayName: 'Key Usage',
+        kind: 'balance',
+        value: hasSnapshot ? (credits.usage || 0) : null,
+        currency: 'USD',
+        available: hasSnapshot,
+        status: hasSnapshot ? 'healthy' : 'unknown',
+        cardLabel: hasSnapshot ? 'No key limit configured' : noDataLabel,
+      });
+    }
+    return quotas;
+  }
+
+  if (provider === 'moonshot' && payload.balance) {
+    const balance = payload.balance;
+    const status = !hasSnapshot ? 'unknown' : (balance.status === 'exhausted' ? 'critical' : (balance.status || 'healthy'));
+    const subStatus = hasSnapshot ? 'healthy' : 'unknown';
+    return [
+      { name: 'available_balance', displayName: 'Available Balance', kind: 'balance', value: balance.available, currency: '', available: hasSnapshot, status, cardLabel: hasSnapshot ? 'Current spendable balance' : noDataLabel },
+      { name: 'voucher_balance', displayName: 'Voucher Balance', kind: 'balance', value: balance.voucher, currency: '', available: hasSnapshot, status: subStatus, cardLabel: hasSnapshot ? 'Promotional credits' : noDataLabel },
+      { name: 'cash_balance', displayName: 'Cash Balance', kind: 'balance', value: balance.cash, currency: '', available: hasSnapshot, status: subStatus, cardLabel: hasSnapshot ? 'Purchased balance' : noDataLabel },
+    ];
+  }
+
   if (provider === 'synthetic') {
     const map = [
       { key: 'subscription', label: 'Subscription' },
@@ -5867,7 +5956,9 @@ function normalizeBothQuotas(provider, payload) {
           name: key,
           displayName: label,
           cardPercent: item.percent ?? 0,
-          cardLabel: 'Utilization',
+          used: item.usage,
+          total: item.limit,
+          cardLabel: item.limit > 0 ? `${formatNumber(Math.max(0, item.limit - item.usage))} remaining` : 'Utilization',
           status: item.status || 'healthy',
           timeUntilResetSeconds: item.timeUntilResetSeconds || 0,
           resetsAt: item.renewsAt || '',
@@ -5890,7 +5981,9 @@ function normalizeBothQuotas(provider, payload) {
           name: key,
           displayName: label,
           cardPercent: item.percent ?? 0,
-          cardLabel: 'Utilization',
+          used: item.usage,
+          total: item.limit,
+          cardLabel: item.limit > 0 ? `${formatNumber(Math.max(0, item.limit - item.usage))} remaining` : 'Utilization',
           status: item.status || 'healthy',
           timeUntilResetSeconds: item.timeUntilResetSeconds || 0,
           resetsAt: item.renewsAt || '',
@@ -5903,7 +5996,7 @@ function normalizeBothQuotas(provider, payload) {
   const rawQuotas = provider === 'codex'
     ? filterCodexQuotasForPlan(payload.quotas, payload.planType || State.codexPlanType)
     : sortQuotaEntriesForProvider(payload.quotas, provider);
-  return rawQuotas.map((quota) => {
+  const normalized = rawQuotas.map((quota) => {
     const percent = quota.cardPercent != null
       ? quota.cardPercent
       : (quota.usagePercent != null
@@ -5912,6 +6005,8 @@ function normalizeBothQuotas(provider, payload) {
     return {
       ...quota,
       cardPercent: percent,
+      used: quota.used ?? quota.usage ?? (quota.entitlement != null && quota.remaining != null ? quota.entitlement - quota.remaining : undefined),
+      total: quota.total ?? quota.limit ?? quota.entitlement,
       displayName: quota.displayName
         || codexDisplayNames[quota.name]
         || anthropicDisplayNames[quota.name]
@@ -5925,6 +6020,19 @@ function normalizeBothQuotas(provider, payload) {
       resetsAt: quota.resetsAt || quota.renewsAt || quota.resets_at || quota.resetAt || '',
     };
   });
+  if (provider === 'codex' && payload.creditsBalance != null) {
+    normalized.unshift({
+      name: 'credits_balance',
+      displayName: 'Credits Balance',
+      kind: 'balance',
+      value: payload.creditsBalance,
+      currency: 'credits',
+      available: true,
+      status: Number(payload.creditsBalance) <= 0 ? 'critical' : 'healthy',
+      cardLabel: 'Current account credits',
+    });
+  }
+  return normalized;
 }
 
 function buildAllProviderEntries() {
@@ -6139,6 +6247,23 @@ function renderProviderKPIHTML(quotas, provider) {
     return '<p class="insight-text">No KPI data available yet.</p>';
   }
   return quotas.map((quota) => {
+    if (quota.kind === 'balance') {
+      const status = quota.status || 'healthy';
+      const statusCfg = statusConfig[status] || statusConfig.healthy;
+      const displayName = quota.displayName || quota.name || 'Balance';
+      const numericValue = Number(quota.value);
+      const valueText = quota.available === false || !Number.isFinite(numericValue)
+        ? '--'
+        : (quota.currency === 'USD' ? `$${numericValue.toFixed(4)}` : `${numericValue.toFixed(2)} ${quota.currency || ''}`.trim());
+      const availabilityText = status === 'unknown'
+        ? statusCfg.label
+        : (quota.available === false ? 'Unavailable' : statusCfg.label);
+      return `<article class="quota-card provider-kpi-card balance-kpi-card" data-quota="${escapeHTML(quota.name || '')}">
+        <header class="card-header"><div class="quota-title-block"><h2 class="quota-title">${escapeHTML(displayName)}</h2></div></header>
+        <div class="progress-stats balance-stats"><span class="usage-percent">${escapeHTML(valueText)}</span><span class="usage-fraction">${escapeHTML(quota.cardLabel || 'Current balance')}</span></div>
+        <footer class="card-footer"><span class="status-badge" data-status="${status}"><svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${statusCfg.icon}"/></svg>${escapeHTML(availabilityText)}</span></footer>
+      </article>`;
+    }
     const percent = Number(quota.cardPercent ?? 0);
     const status = quota.status || 'healthy';
     const statusCfg = statusConfig[status] || statusConfig.healthy;
@@ -6728,12 +6853,58 @@ function destroyProviderCardCharts() {
   State.providerCharts = {};
 }
 
+function renderHomepageMetricsHTML(quotas) {
+  if (!Array.isArray(quotas) || quotas.length === 0) {
+    return '<p class="homepage-harness-empty">Waiting for current data...</p>';
+  }
+  return quotas.map((quota) => {
+    const label = quota.displayName || quota.name || 'Limit';
+    const status = quota.status || 'healthy';
+    if (quota.kind === 'balance') {
+      const numericValue = Number(quota.value);
+      const value = quota.available === false || !Number.isFinite(numericValue)
+        ? '--'
+        : (quota.currency === 'USD'
+          ? `$${numericValue.toFixed(4)}`
+          : `${numericValue.toFixed(2)} ${quota.currency || ''}`.trim());
+      return `<div class="homepage-harness-metric" data-status="${escapeHTML(status)}">
+        <span class="homepage-harness-label">${escapeHTML(label)}</span>
+        <strong class="homepage-harness-value">${escapeHTML(value)}</strong>
+      </div>`;
+    }
+
+    const percent = Math.max(0, Math.min(100, Number(quota.cardPercent ?? 0)));
+    const hasCounts = Number.isFinite(Number(quota.used)) && Number.isFinite(Number(quota.total)) && Number(quota.total) > 0;
+    const value = hasCounts
+      ? `${formatNumber(Number(quota.used))} / ${formatNumber(Number(quota.total))}`
+      : `${percent.toFixed(1)}%`;
+    return `<div class="homepage-harness-metric" data-status="${escapeHTML(status)}">
+      <div class="homepage-harness-metric-top">
+        <span class="homepage-harness-label">${escapeHTML(label)}</span>
+        <strong class="homepage-harness-value">${escapeHTML(value)}</strong>
+      </div>
+      <div class="homepage-harness-track"><span style="width:${percent.toFixed(1)}%" data-status="${escapeHTML(status)}"></span></div>
+    </div>`;
+  }).join('');
+}
+
+function renderHomepageAccountsHTML(provider, accounts) {
+  return (Array.isArray(accounts) ? accounts : []).map((account, idx) => {
+    const accountId = account.accountId || account.id || idx + 1;
+    const accountName = account.accountName || account.name || `Account ${accountId}`;
+    const quotas = normalizeBothQuotas(provider, account);
+    return `<div class="homepage-harness-account" data-account-id="${escapeHTML(accountId)}">
+      <div class="homepage-harness-account-name">${escapeHTML(accountName)}</div>
+      ${renderHomepageMetricsHTML(quotas)}
+    </div>`;
+  }).join('');
+}
+
 function renderAllProvidersView() {
   const container = document.getElementById('all-providers-container');
   if (!container) return;
 
   const entries = buildAllProviderEntries();
-  const collapsedState = loadProviderCardCollapseState();
   destroyProviderCardCharts();
 
   if (entries.length === 0) {
@@ -6742,63 +6913,43 @@ function renderAllProvidersView() {
   }
 
   container.innerHTML = entries.map((entry) => {
-    const collapsed = Boolean(collapsedState[entry.cardKey]);
     const badge = entry.badge ? `<span class="provider-card-badge">${escapeHTML(entry.badge)}</span>` : '';
     const promo = entry.promoHtml || '';
-    const hasChartData = Array.isArray(entry.historyRows) && entry.historyRows.length > 0;
-    const chartSection = hasChartData
-      ? `<div class="provider-chart">
-          <canvas id="provider-chart-${entry.cardKey}"></canvas>
-        </div>`
-      : `<div class="provider-chart provider-chart-empty">
-          <p class="insight-text">Collecting data...</p>
-        </div>`;
     if (entry.summaryOnly) {
-      return renderAPIIntegrationsSummaryCard(entry, collapsed);
+      return `<section class="provider-card homepage-harness-card" data-card-key="${entry.cardKey}" data-provider="api-integrations" role="button" tabindex="0">
+        <header class="provider-card-header"><div class="provider-card-title"><span>${escapeHTML(entry.title)}</span></div><span class="homepage-harness-open">Open &rarr;</span></header>
+        <div class="provider-card-body"><div class="homepage-harness-metrics">
+          <div class="homepage-harness-metric"><span class="homepage-harness-label">Integrations</span><strong class="homepage-harness-value">${formatNumber(Number(entry.summary?.integrationCount || 0))}</strong></div>
+          <div class="homepage-harness-metric"><span class="homepage-harness-label">Requests</span><strong class="homepage-harness-value">${formatNumber(Number(entry.summary?.requestCount || 0))}</strong></div>
+        </div></div>
+      </section>`;
     }
     const cardHeader = `<header class="provider-card-header">
         <div class="provider-card-title">
           <span>${escapeHTML(entry.title)}</span>
           ${badge}${promo}
         </div>
-        <button class="provider-card-collapse-btn" type="button" data-card-key="${entry.cardKey}" aria-expanded="${collapsed ? 'false' : 'true'}" aria-label="${collapsed ? 'Expand' : 'Collapse'} ${escapeHTML(entry.title)}">
-          <svg class="provider-card-collapse-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="m9 6 6 6-6 6"/>
-          </svg>
-        </button>
+        <span class="homepage-harness-open">Open &rarr;</span>
       </header>`;
     if (Array.isArray(entry.accountsGroup)) {
-      const cards = entry.accountsGroup
-        .map((account, idx) => accountOverviewCardHTML(entry.provider, account, idx))
-        .join('');
-      return `<section class="provider-card ${collapsed ? 'collapsed' : ''}" data-card-key="${entry.cardKey}" data-provider="${entry.provider}">
+      return `<section class="provider-card homepage-harness-card" data-card-key="${entry.cardKey}" data-provider="${entry.provider}" role="button" tabindex="0">
       ${cardHeader}
       <div class="provider-card-body">
-        <div class="accounts-overview-grid">${cards}</div>
+        <div class="homepage-harness-accounts">${renderHomepageAccountsHTML(entry.provider, entry.accountsGroup)}</div>
       </div>
     </section>`;
     }
-    return `<section class="provider-card ${collapsed ? 'collapsed' : ''}" data-card-key="${entry.cardKey}" data-provider="${entry.provider}">
+    return `<section class="provider-card homepage-harness-card" data-card-key="${entry.cardKey}" data-provider="${entry.provider}" role="button" tabindex="0">
       ${cardHeader}
       <div class="provider-card-body">
-        <div class="provider-kpis">${renderProviderKPIHTML(entry.quotas, entry.provider)}</div>
-        ${(() => {
-          const insightsHTML = renderProviderInsightsHTML(entry.provider, entry.insights);
-          return insightsHTML ? `<div class="provider-insights">${insightsHTML}</div>` : '';
-        })()}
-        ${chartSection}
+        <div class="homepage-harness-metrics">${renderHomepageMetricsHTML(entry.quotas)}</div>
       </div>
     </section>`;
   }).join('');
 
-  // Grouped multi-account cards in the All view navigate to the provider tab,
-  // pinning the clicked account as the active selection.
-  container.querySelectorAll('.accounts-overview-grid .account-overview-card').forEach((card) => {
+  container.querySelectorAll('.homepage-harness-card').forEach((card) => {
     const provider = card.dataset.provider;
-    const accountId = parseInt(card.dataset.accountId, 10);
     const go = () => {
-      if (provider === 'minimax') saveMiniMaxAccount(accountId);
-      else saveCodexAccount(accountId);
       saveDefaultProvider(provider);
       window.location.href = `${BASE_PATH}/?provider=${provider}`;
     };
@@ -6806,54 +6957,6 @@ function renderAllProvidersView() {
     card.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
     });
-  });
-
-  container.querySelectorAll('.provider-card-collapse-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const cardKey = btn.dataset.cardKey;
-      const card = container.querySelector(`.provider-card[data-card-key="${cardKey}"]`);
-      if (!card) return;
-      card.classList.toggle('collapsed');
-      const collapsed = card.classList.contains('collapsed');
-      btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-      const title = card.querySelector('.provider-card-title span')?.textContent || 'provider card';
-      btn.setAttribute('aria-label', `${collapsed ? 'Expand' : 'Collapse'} ${title}`);
-      collapsedState[cardKey] = collapsed;
-      saveProviderCardCollapseState(collapsedState);
-    });
-  });
-
-  container.querySelectorAll('.provider-card[data-api-integrations-link="true"]').forEach((card) => {
-    card.addEventListener('click', (event) => {
-      if (event.target.closest('.provider-card-collapse-btn')) return;
-      saveDefaultProvider('api-integrations');
-      window.location.href = '/?provider=api-integrations';
-    });
-  });
-
-  const chartRange = State.currentRange || '6h';
-  const colors = getThemeColors();
-  entries.forEach((entry) => {
-    const chartHost = container.querySelector(`.provider-card[data-card-key="${entry.cardKey}"] .provider-chart`);
-    const canvas = container.querySelector(`#provider-chart-${entry.cardKey}`);
-    const rows = Array.isArray(entry.historyRows) ? entry.historyRows : [];
-    if (!chartHost || !canvas) return;
-
-    const datasets = buildProviderCardDatasets(entry.provider, rows, chartRange);
-    if (!datasets.length) {
-      chartHost.classList.add('provider-chart-empty');
-      chartHost.innerHTML = '<p class="insight-text">Collecting data...</p>';
-      return;
-    }
-
-    chartHost.classList.remove('provider-chart-empty');
-
-    const chart = new Chart(canvas, {
-      type: 'line',
-      data: { datasets },
-      options: buildChartOptions(colors, computeYMax(datasets), chartRange)
-    });
-    State.providerCharts[entry.cardKey] = chart;
   });
 }
 
@@ -9850,7 +9953,7 @@ const DEFAULT_PROVIDER_TAB_LABELS = {
   kimi: 'Kimi',
   opencode: 'OpenCode',
   'api-integrations': 'API Integrations',
-  both: 'All',
+  both: 'Home',
 };
 
 function defaultProviderTabLabel(key) {
@@ -9879,7 +9982,7 @@ function mergeDashboardProviderOrder(preferred, available) {
   (Array.isArray(preferred) ? preferred : []).forEach(pushKey);
   // Newly available providers (e.g. Grok) join before special tabs.
   avail.forEach(pushKey);
-  const specialOrder = ['api-integrations', 'both'];
+  const specialOrder = ['both', 'api-integrations'];
   const orderedSpecials = [];
   specialOrder.forEach((k) => {
     if (specials.includes(k)) orderedSpecials.push(k);
@@ -9887,7 +9990,9 @@ function mergeDashboardProviderOrder(preferred, available) {
   specials.forEach((k) => {
     if (!orderedSpecials.includes(k)) orderedSpecials.push(k);
   });
-  return regular.concat(orderedSpecials);
+  const home = orderedSpecials.filter((key) => key === 'both');
+  const trailingSpecials = orderedSpecials.filter((key) => key !== 'both');
+  return home.concat(regular, trailingSpecials);
 }
 
 async function fetchDashboardTabOrderProviders() {
@@ -11894,22 +11999,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       State.providerSettings = d.provider_settings || {};
     }
   } catch (_) { /* non-critical: badges simply won't render until settings load */ }
-  // Redirect to saved default provider if no explicit provider in URL
-  // Only when multiple providers are available (tabs exist)
-  const urlParams = new URLSearchParams(window.location.search);
-  const providerTabs = document.getElementById('provider-tabs');
-  if (!urlParams.has('provider') && providerTabs) {
-    const savedProvider = loadDefaultProvider();
-    if (savedProvider) {
-      const availableProviders = [...providerTabs.querySelectorAll('.provider-tab')].map(t => t.dataset.provider);
-      // Only redirect if saved provider is available and different from server default
-      if (availableProviders.includes(savedProvider) && savedProvider !== availableProviders[0]) {
-        window.location.href = `${BASE_PATH}/?provider=${savedProvider}`;
-        return;
-      }
-    }
-  }
-
   // Load persisted state (localStorage only - no API calls before auth check)
   loadHiddenQuotas();
   loadCodexAccount();
