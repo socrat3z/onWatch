@@ -140,6 +140,38 @@ Set `CODEX_HOME` to your custom Codex directory so onWatch reads `CODEX_HOME/aut
 
 ---
 
+## Docker with the containerized CLI
+
+The default image is distroless and has no `codex` CLI, so a container-only login
+needs the `with-user-env` image. It bundles the Codex CLI purely so you can run the
+OAuth flow inside the container - polling still just reads `auth.json`.
+
+```bash
+# in .env
+COMPOSE_FILE=docker-compose.yml:docker-compose.override-with-user-env.yml
+```
+
+```bash
+docker compose build onwatch
+docker compose --profile login run --rm codex-login          # device-code login
+docker compose --profile login run --rm codex-login codex login status
+docker compose up -d
+```
+
+The `codex-login` service gets the `codex-auth` volume and nothing else - no
+`.env`, no `/data`, and no other provider's tokens.
+
+**See [with-user-env Image](WITH_USER_ENV.md)** for the full guide, including
+[the Codex login flow](WITH_USER_ENV.md#codex), [what the `codex-auth` volume
+holds](WITH_USER_ENV.md#what-codex-auth-actually-holds), and
+[the trust boundary](WITH_USER_ENV.md#the-trust-boundary).
+
+For a second account, log in again and save it as a profile - see
+[Multi-Account Support](#multi-account-support-v21112) below. Profiles live in
+`/data/codex-profiles/`, not in the auth volume.
+
+---
+
 ## Multi-Account Support (v2.11.12+)
 
 Track multiple ChatGPT/Codex accounts simultaneously. Each account's quota data is stored and displayed separately.

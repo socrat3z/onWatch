@@ -18,22 +18,121 @@ services:
     build:
       dockerfile: Dockerfile.with-user-env
 
-    # Persist Antigravity CLI settings and encrypted keyring sessions.
-    # Authenticate once with: docker compose run --rm onwatch agy
-    # Deleting either volume requires authenticating again.
+    # One volume per credential store, and nothing else - no source tree, no
+    # host paths, no shared HOME. Each holds only what its CLI needs to stay
+    # logged in, and deleting one means authenticating that provider again.
+    # docs/CODEX_SETUP.md lists exactly what lands in codex-auth.
+    #
+    # The daemon still inherits ./onwatch-data:/data and env_file: .env from
+    # docker-compose.yml. That is the daemon's own trust boundary; the login
+    # services below deliberately have neither.
     volumes:
       - antigravity-profile:/home/nonroot/.gemini
       - antigravity-keyring:/home/nonroot/.local/share/keyrings
+      - codex-auth:/home/nonroot/.codex
+      - claude-auth:/home/nonroot/.claude
 
-    # Upstream budgets 64M for a single Go process. This image also runs the
-    # embedded CLI, a D-Bus session, and gnome-keyring.
+    # Upstream budgets 64M for a single Go process. This image needs more for one
+    # specific reason: with ANTIGRAVITY_SOURCE=cli the daemon spawns the 190M agy
+    # binary in-process and keeps it warm for 5 minutes
+    # (agyDefaultWarmTTL, internal/api/antigravity_cli.go). Measured 2026-08-10 on
+    # linux/amd64 with agy 1.1.11:
+    #
+    #   idle container (onwatch + dbus + gnome-keyring)   9.4 MiB
+    #   peak RSS of a single one-shot `agy --version`     134 MB
+    #
+    # A warm agy session is larger than that one-shot figure, so 512M is the
+    # ceiling. If you do not use ANTIGRAVITY_SOURCE=cli, no agy process ever
+    # starts here and you can safely drop this to 128M.
+    # See docs/WITH_USER_ENV.md#measured-resource-budget.
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 512M
         reservations:
-          memory: 64M
+          memory: 32M
+
+  # ---------------------------------------------------------------------------
+  # One-shot login services.
+  #
+  # These are NOT derived from the onwatch service. Each declares only the
+  # credential volume and environment its own provider needs, so a login never
+  # sees .env, /data/onwatch.db, another provider's tokens, or the published
+  # port. Verify that after any edit:
+  #
+  #   docker compose config
+  #
+  # They reuse the image the onwatch service builds, so build it once first:
+  #
+  #   docker compose build onwatch
+  #
+  # Then run the login you need. Each exits when the flow completes:
+  #
+  #   docker compose --profile login run --rm agy-login
+  #   docker compose --profile login run --rm codex-login
+  #   docker compose --profile login run --rm claude-login
+  #
+  # To check or clear a login, override the command with any other allowlisted
+  # one, for example:
+  #
+  #   docker compose --profile login run --rm codex-login codex login status
+  #   docker compose --profile login run --rm claude-login claude auth status
+  # ---------------------------------------------------------------------------
+
+  # Antigravity authenticates on first run rather than through a subcommand:
+  # complete the printed URL/code flow, then exit the CLI. It needs the keyring
+  # volume because its OAuth session lives in the Secret Service, not a file.
+  agy-login:
+    image: onwatch:latest
+    profiles: ["login"]
+    restart: "no"
+    command: ["agy"]
+    environment:
+      HOME: /home/nonroot
+      XDG_RUNTIME_DIR: /tmp/onwatch-runtime
+      AGY_CLI_DISABLE_AUTO_UPDATE: "true"
+    volumes:
+      - antigravity-profile:/home/nonroot/.gemini
+      - antigravity-keyring:/home/nonroot/.local/share/keyrings
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  codex-login:
+    image: onwatch:latest
+    profiles: ["login"]
+    restart: "no"
+    command: ["codex", "login", "--device-auth"]
+    environment:
+      HOME: /home/nonroot
+      CODEX_HOME: /home/nonroot/.codex
+    volumes:
+      - codex-auth:/home/nonroot/.codex
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  claude-login:
+    image: onwatch:latest
+    profiles: ["login"]
+    restart: "no"
+    command: ["claude", "auth", "login"]
+    environment:
+      HOME: /home/nonroot
+      DISABLE_AUTOUPDATER: "1"
+      DISABLE_TELEMETRY: "1"
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    volumes:
+      - claude-auth:/home/nonroot/.claude
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
 volumes:
   antigravity-profile:
   antigravity-keyring:
+  codex-auth:
+  claude-auth:

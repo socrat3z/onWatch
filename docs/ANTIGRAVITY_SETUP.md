@@ -129,41 +129,31 @@ You'll see quota cards for each model, including:
 The default image is distroless and has no `agy` CLI, so this needs the
 `with-user-env` image, which adds the CLI, D-Bus, and GNOME Keyring. With it,
 Antigravity polling runs entirely in the container - no host IDE or language
-server required. See [Fork image: with-user-env](../README.md#fork-image-with-user-env)
-for what the image contains.
+server required.
 
-1. Point Compose at the override file, in your `.env`:
+```bash
+# in .env
+COMPOSE_FILE=docker-compose.yml:docker-compose.override-with-user-env.yml
+ANTIGRAVITY_ENABLED=true
+ANTIGRAVITY_SOURCE=cli
+```
 
-   ```bash
-   COMPOSE_FILE=docker-compose.yml:docker-compose.override-with-user-env.yml
-   ```
+```bash
+docker compose build onwatch
+docker compose --profile login run --rm agy-login   # authenticate, then exit the CLI
+docker compose up -d
+```
 
-   Without this, `docker compose` builds the stock image and step 3 fails with
-   `executable file not found: agy`.
+Antigravity has no login subcommand - it authenticates on first run. Copy the
+printed authorization URL into a browser, sign in, paste the returned code back
+into the terminal, then exit the CLI. The `agy-login` service gets only the two
+Antigravity volumes - no `.env`, no `/data`, and no other provider's tokens.
 
-2. Enable the CLI source in the same `.env`:
-
-   ```bash
-   ANTIGRAVITY_ENABLED=true
-   ANTIGRAVITY_SOURCE=cli
-   ```
-
-3. Authenticate interactively once. Complete the browser or displayed URL/code
-   OAuth flow, then exit the CLI:
-
-   ```bash
-   docker compose run --rm onwatch agy
-   ```
-
-4. Start onWatch:
-
-   ```bash
-   docker compose up -d
-   ```
-
-Compose persists the CLI profile and encrypted keyring in named volumes
-(`antigravity-profile`, `antigravity-keyring`). Removing either means
-authenticating again.
+**See [with-user-env Image](WITH_USER_ENV.md)** for the full guide, including
+[the Antigravity login flow](WITH_USER_ENV.md#antigravity), [the volume
+reference](WITH_USER_ENV.md#volume-reference), and [the measured resource
+budget](WITH_USER_ENV.md#measured-resource-budget) - which matters here, because
+`ANTIGRAVITY_SOURCE=cli` makes the daemon spawn a warm `agy` subprocess.
 
 ### Host Language Server Fallback
 

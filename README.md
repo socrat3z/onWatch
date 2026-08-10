@@ -127,6 +127,7 @@ Provider setup guides:
 - [Antigravity Setup Guide](docs/ANTIGRAVITY_SETUP.md)
 - [Cursor Setup Guide](docs/CURSOR_SETUP.md)
 - [API Integration Setup Guide](docs/API_INTEGRATIONS_SETUP.md)
+- [with-user-env Image](docs/WITH_USER_ENV.md) - optional fork container with in-container OAuth logins
 
 ### Run
 
@@ -562,32 +563,20 @@ The `docker-compose.yml` includes memory limits (64M limit, 32M reservation), lo
 ### Fork image: with-user-env
 
 This fork adds an optional image that runs provider CLIs inside the container, for
-providers whose quota data needs an interactive OAuth login and a Secret Service
-keyring rather than a static API key. Antigravity is the first such provider.
+the providers whose quota data needs an interactive OAuth login rather than a
+static API key: Antigravity (`agy`), Codex (`codex`), and Anthropic (`claude`).
 
 The stock `Dockerfile` and `docker-compose.yml` above are untouched, so the default
-build is still upstream's distroless image. The variant lives in separate files:
-
-| File | Purpose |
-|------|---------|
-| `Dockerfile.with-user-env` | Debian-based runtime with the `agy` CLI, D-Bus, and gnome-keyring |
-| `docker-compose.override-with-user-env.yml` | Adds the profile/keyring volumes and raises the memory limit to 256M |
-| `docker-entrypoint-with-user-env.sh` | Starts a D-Bus session and keyring, then drops to the `nonroot` user |
-
-Build and run it by layering both compose files:
+build is still upstream's distroless image.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.override-with-user-env.yml up -d
+docker compose --profile login run --rm codex-login   # then authenticate per provider
 ```
 
-Set `COMPOSE_FILE` in your `.env` to make plain `docker compose` commands use it:
-
-```
-COMPOSE_FILE=docker-compose.yml:docker-compose.override-with-user-env.yml
-```
-
-See [Antigravity Setup](docs/ANTIGRAVITY_SETUP.md#docker-with-the-containerized-cli) for the
-one-time authentication step.
+**See [with-user-env Image](docs/WITH_USER_ENV.md)** for the complete guide: the
+per-provider login flows, the trust boundary, the command allowlist, the pinned-CLI
+update process, testing, and the measured resource budget.
 
 ### Troubleshooting
 

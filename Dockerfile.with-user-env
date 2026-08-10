@@ -68,16 +68,90 @@ ENV ONWATCH_DB_PATH=/data/onwatch.db \
 USER nonroot
 ENTRYPOINT ["/app/onwatch"]
 
-# Default runtime stage: includes the Antigravity CLI and its Linux Secret
-# Service dependencies. Antigravity currently publishes a glibc Linux binary,
-# so this stage intentionally uses Debian instead of distroless or Alpine.
+# CLI installer stage: fetches the pinned Codex and Claude Code release archives
+# straight from the npm registry, verifies each SHA-256, and stages the single
+# native binary a login needs. No package manager, no piped install script, and
+# no dependency lifecycle hook runs here, so a given commit always produces the
+# same runtime binaries. Nothing but the staged binaries reaches the final image.
+#
+# To bump a CLI, follow the checklist in docs/WITH_USER_ENV.md#updating-the-pinned-clis -
+# the version and both checksums change together in one reviewable commit.
+FROM debian:bookworm-slim AS cli-installer
+
+# Set by BuildKit. TARGETARCH picks the artifacts; BUILDARCH decides whether the
+# staged binaries can actually be executed for the version check.
+ARG TARGETARCH
+ARG BUILDARCH
+
+ARG CODEX_VERSION=0.147.0
+ARG CODEX_SHA256_AMD64=c969740cf8297e4c31905cd551efeb2c99af5080c12c236bdf825598b250139a
+ARG CODEX_SHA256_ARM64=4d09bf000597768dfa070b0e7c612f0fc258ac7fab364e570104ea625f918546
+
+ARG CLAUDE_VERSION=2.1.226
+ARG CLAUDE_SHA256_AMD64=d3cee95e86a432c8d7cb9496bc26ec3537808e1ea85e8207071cba3d34983d7f
+ARG CLAUDE_SHA256_ARM64=fbbb2610daff70d118c8dda8aeffee92b38f20aa464e758c3d09e3c83ab6ef56
+
+ARG NPM_REGISTRY=https://registry.npmjs.org
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Upstream layout, pinned above and verified by the `test` guards below:
+#   @openai/codex-linux-<x64|arm64>      -> vendor/<triple>/bin/codex  (static musl)
+#   @anthropic-ai/claude-code-linux-<x64|arm64> -> claude              (glibc)
+RUN set -eu; \
+    case "${TARGETARCH:-}" in \
+      amd64) npm_arch=linux-x64; \
+             codex_triple=x86_64-unknown-linux-musl; \
+             codex_sha="$CODEX_SHA256_AMD64"; \
+             claude_sha="$CLAUDE_SHA256_AMD64" ;; \
+      arm64) npm_arch=linux-arm64; \
+             codex_triple=aarch64-unknown-linux-musl; \
+             codex_sha="$CODEX_SHA256_ARM64"; \
+             claude_sha="$CLAUDE_SHA256_ARM64" ;; \
+      *) echo "unsupported TARGETARCH: '${TARGETARCH:-<unset>}' (want amd64 or arm64)" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /tmp/dl /tmp/codex /tmp/claude /opt/provider-cli/codex; \
+    curl -fsSL -o /tmp/dl/codex.tgz \
+      "$NPM_REGISTRY/@openai/codex/-/codex-${CODEX_VERSION}-${npm_arch}.tgz"; \
+    curl -fsSL -o /tmp/dl/claude.tgz \
+      "$NPM_REGISTRY/@anthropic-ai/claude-code-${npm_arch}/-/claude-code-${npm_arch}-${CLAUDE_VERSION}.tgz"; \
+    printf '%s  %s\n' "$codex_sha"  /tmp/dl/codex.tgz  | sha256sum -c -; \
+    printf '%s  %s\n' "$claude_sha" /tmp/dl/claude.tgz | sha256sum -c -; \
+    tar -xzf /tmp/dl/codex.tgz  -C /tmp/codex  --strip-components=1; \
+    tar -xzf /tmp/dl/claude.tgz -C /tmp/claude --strip-components=1; \
+    test -x "/tmp/codex/vendor/${codex_triple}/bin/codex"; \
+    test -x /tmp/claude/claude; \
+    cp -a "/tmp/codex/vendor/${codex_triple}/." /opt/provider-cli/codex/; \
+    cp -a /tmp/claude/claude /opt/provider-cli/claude; \
+    rm -f /opt/provider-cli/codex/bin/codex-code-mode-host; \
+    rm -rf /tmp/dl /tmp/codex /tmp/claude; \
+    if [ "${BUILDARCH:-}" = "${TARGETARCH:-}" ]; then \
+      /opt/provider-cli/codex/bin/codex --version; \
+      /opt/provider-cli/claude --version; \
+    else \
+      echo "cross-build for ${TARGETARCH}: skipping runtime version check"; \
+    fi
+
+# Default runtime stage: includes the Antigravity, Codex and Claude Code CLIs
+# plus the Linux Secret Service dependencies their logins use. These CLIs
+# publish glibc Linux binaries, so this stage intentionally uses Debian instead
+# of distroless or Alpine.
+#
+# The CLIs are here for exactly one purpose: the interactive OAuth login that
+# writes the token files onWatch reads. Nothing else in the image invokes them.
 FROM debian:bookworm-slim AS runtime
 
+# Unlike Codex and Claude Code, the Antigravity CLI publishes no versioned
+# artifact or checksum - its bootstrapper only ever fetches the current build,
+# so `agy` is the one input this image cannot pin. AGY_CLI_DISABLE_AUTO_UPDATE
+# below at least keeps the installed build fixed for the life of the image.
 ARG AGY_INSTALL_URL=https://antigravity.google/cli/install.sh
 
 ARG VERSION=dev
 LABEL maintainer="onllm-dev"
-LABEL description="onWatch - API quota tracker with containerized Antigravity CLI support"
+LABEL description="onWatch - API quota tracker with containerized Antigravity, Codex and Claude Code CLI logins"
 LABEL version="${VERSION:-dev}"
 
 RUN apt-get update && \
@@ -88,14 +162,21 @@ RUN apt-get update && \
         dbus \
         gnome-keyring \
         gosu \
+        libsecret-tools \
         tzdata && \
     rm -rf /var/lib/apt/lists/* && \
     curl -fsSL "$AGY_INSTALL_URL" | bash -s -- --dir /usr/local/bin
 
 RUN groupadd --gid 65532 nonroot && \
     useradd --uid 65532 --gid nonroot --create-home --home-dir /home/nonroot --shell /usr/sbin/nologin nonroot && \
-    mkdir -p /data /home/nonroot/.gemini /home/nonroot/.local/share/keyrings /tmp/onwatch-runtime && \
+    mkdir -p /data /home/nonroot/.gemini /home/nonroot/.codex /home/nonroot/.claude \
+        /home/nonroot/.local/share/keyrings /tmp/onwatch-runtime && \
     chown -R nonroot:nonroot /data /home/nonroot /tmp/onwatch-runtime
+
+# Read-only, root-owned: the CLIs live outside every writable volume.
+COPY --from=cli-installer /opt/provider-cli /opt/provider-cli
+RUN ln -s /opt/provider-cli/codex/bin/codex /usr/local/bin/codex && \
+    ln -s /opt/provider-cli/claude /usr/local/bin/claude
 
 WORKDIR /app
 COPY --from=builder /build/onwatch /app/onwatch
@@ -108,6 +189,10 @@ ENV ONWATCH_DB_PATH=/data/onwatch.db \
     ONWATCH_PORT=9211 \
     ONWATCH_LOG_LEVEL=info \
     AGY_CLI_DISABLE_AUTO_UPDATE=true \
+    CODEX_HOME=/home/nonroot/.codex \
+    DISABLE_AUTOUPDATER=1 \
+    DISABLE_TELEMETRY=1 \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     HOME=/home/nonroot \
     XDG_RUNTIME_DIR=/tmp/onwatch-runtime
 
