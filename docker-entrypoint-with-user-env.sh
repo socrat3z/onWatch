@@ -17,16 +17,43 @@ set -eu
 # logs out through the in-TUI /logout command, so bare `agy` is allowlisted.
 #
 # Validate the account before any privileged work or dry-run dispatch so a bad
-# alias can never create filesystem state.
-account="${ONWATCH_LOGIN_ACCOUNT:-default}"
+# alias can never create filesystem state. This account becomes $HOME for the
+# login CLI below, so it is checked against the exact same character set as
+# account.ValidateName (internal/account/account.go) - keep both in sync.
+#
+# A single glob cannot do this safely: `[a-z0-9][a-z0-9_-]*` only constrains
+# its first two characters - the trailing `*` matches any string, slashes and
+# dots included, once shell globbing (not regex) is in play. Path traversal
+# like `wo/../../etc` passes that check and becomes $HOME. Splitting into an
+# explicit reject-anything-outside-the-set pass plus a first-character/length
+# check closes that.
+# Single-dash expansion: only an *unset* ONWATCH_LOGIN_ACCOUNT falls back to
+# "default". An explicitly empty value is treated as invalid input below
+# rather than silently becoming "default".
+account="${ONWATCH_LOGIN_ACCOUNT-default}"
 case "$account" in
-  [a-z0-9][a-z0-9_-]* ) ;;
-  *) echo "onwatch: invalid login account '$account'" >&2; exit 64 ;;
+  '')
+    echo "onwatch: invalid login account '$account'" >&2
+    exit 64
+    ;;
 esac
 if [ "${#account}" -gt 32 ]; then
   echo "onwatch: invalid login account '$account'" >&2
   exit 64
 fi
+case "$account" in
+  *[!a-z0-9_-]*)
+    echo "onwatch: invalid login account '$account'" >&2
+    exit 64
+    ;;
+esac
+case "$account" in
+  [a-z0-9]*) ;;
+  *)
+    echo "onwatch: invalid login account '$account'" >&2
+    exit 64
+    ;;
+esac
 
 # Checked before any privileged work so scripts/test-entrypoint-dispatch.sh can
 # exercise it as an ordinary user with ONWATCH_ENTRYPOINT_DRY_RUN=1.

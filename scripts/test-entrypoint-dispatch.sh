@@ -67,8 +67,18 @@ expect_rejected agy plugin list
 
 echo "== account validation =="
 ONWATCH_LOGIN_ACCOUNT=work expect_ok "cli: codex login status" codex login status
+ONWATCH_LOGIN_ACCOUNT=personal_2 expect_ok "cli: claude auth login" claude auth login
+ONWATCH_LOGIN_ACCOUNT=a expect_ok "cli: agy" agy
 ONWATCH_LOGIN_ACCOUNT=../escape expect_rejected codex login status
 ONWATCH_LOGIN_ACCOUNT=UPPER expect_rejected claude auth login
+# wo/../../etc previously passed: the old glob [a-z0-9][a-z0-9_-]* only
+# constrains its first two characters, so a trailing path-traversal segment
+# slipped through and became $HOME for the login CLI.
+ONWATCH_LOGIN_ACCOUNT="wo/../../etc" expect_rejected codex login status
+ONWATCH_LOGIN_ACCOUNT="ab/cd" expect_rejected codex login status
+ONWATCH_LOGIN_ACCOUNT="a.b" expect_rejected codex login status
+ONWATCH_LOGIN_ACCOUNT="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" expect_rejected codex login status
+ONWATCH_LOGIN_ACCOUNT="" expect_rejected codex login status
 
 echo "== non-CLI arguments still reach the daemon =="
 expect_ok "onwatch: "                         # bare daemon start

@@ -173,6 +173,20 @@ func parseCodexAccountID(r *http.Request) int64 {
 	return accountID
 }
 
+// defaultProviderAccountID resolves a provider's default account for views that
+// are not account-aware yet, so no store query is left to pick whichever
+// account happened to poll last. Zero means "let the store resolve the default".
+func (h *Handler) defaultProviderAccountID(provider string) int64 {
+	if h.store == nil {
+		return 0
+	}
+	account, err := h.store.ResolveDefaultProviderAccount(provider)
+	if err != nil {
+		return 0
+	}
+	return account.ID
+}
+
 func (h *Handler) parseProviderAccountID(r *http.Request, provider string) (int64, error) {
 	value := strings.TrimSpace(r.URL.Query().Get("account"))
 	if value == "" {
@@ -2321,7 +2335,7 @@ func (h *Handler) currentBoth(w http.ResponseWriter, r *http.Request) {
 		response["zai"] = h.buildZaiCurrent()
 	}
 	if h.config.HasProvider("anthropic") && providerTelemetryEnabled(visibility, "anthropic") {
-		response["anthropic"] = h.buildAnthropicCurrent()
+		response["anthropic"] = h.buildAnthropicCurrent(h.defaultProviderAccountID("anthropic"))
 	}
 	if h.config.HasProvider("copilot") && providerTelemetryEnabled(visibility, "copilot") {
 		response["copilot"] = h.buildCopilotCurrent()
@@ -2346,7 +2360,7 @@ func (h *Handler) currentBoth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if h.config.HasProvider("antigravity") && providerTelemetryEnabled(visibility, "antigravity") {
-		response["antigravity"] = h.buildAntigravityCurrent()
+		response["antigravity"] = h.buildAntigravityCurrent(h.defaultProviderAccountID("antigravity"))
 	}
 	if h.config.HasProvider("minimax") && providerTelemetryEnabled(visibility, "minimax") {
 		minimaxAccounts := h.minimaxUsageAccounts()
@@ -4310,7 +4324,7 @@ func (h *Handler) buildAntigravitySummaryMap() map[string]interface{} {
 		return response
 	}
 
-	latest, err := h.store.QueryLatestAntigravity()
+	latest, err := h.store.QueryLatestAntigravity(h.defaultProviderAccountID("antigravity"))
 	if err != nil {
 		h.logger.Error("failed to query latest Antigravity snapshot", "error", err)
 		return response
@@ -5713,16 +5727,12 @@ func isAnthropicPeakHours(p *anthropicPromo, now time.Time) bool {
 
 // currentAnthropic returns Anthropic quota status.
 func (h *Handler) currentAnthropic(w http.ResponseWriter, r *http.Request) {
-	if strings.TrimSpace(r.URL.Query().Get("account")) != "" {
-		accountID, err := h.parseProviderAccountID(r, "anthropic")
-		if err != nil {
-			respondError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		respondJSON(w, http.StatusOK, h.buildAnthropicCurrentForAccount(accountID))
+	accountID, err := h.parseProviderAccountID(r, "anthropic")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	respondJSON(w, http.StatusOK, h.buildAnthropicCurrent())
+	respondJSON(w, http.StatusOK, h.buildAnthropicCurrent(accountID))
 }
 
 func (h *Handler) queryProviderSessionsByAccount(provider string, accountID int64) ([]*store.Session, error) {
@@ -5739,32 +5749,17 @@ func (h *Handler) queryProviderSessionsByAccount(provider string, accountID int6
 	return h.store.QuerySessionHistory(provider)
 }
 
+// buildAnthropicCurrentForAccount is kept as the account-explicit entry point;
+// it renders the same payload as the default view so a picker switch cannot
+// change which fields the dashboard receives.
 func (h *Handler) buildAnthropicCurrentForAccount(accountID int64) map[string]interface{} {
-	response := map[string]interface{}{"capturedAt": time.Now().UTC().Format(time.RFC3339), "quotas": []interface{}{}}
-	latest, err := h.store.QueryLatestAnthropic(accountID)
-	if err != nil || latest == nil {
-		return response
-	}
-	response["capturedAt"], response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339), latest.CapturedAt.Format(time.RFC3339)
-	quotas := make([]map[string]interface{}, 0, len(latest.Quotas))
-	for _, quota := range latest.Quotas {
-		item := map[string]interface{}{"name": quota.Name, "displayName": api.AnthropicDisplayName(quota.Name), "utilization": quota.Utilization, "status": anthropicUtilStatus(quota.Utilization), "source": "api", "lastUpdatedAt": latest.CapturedAt.Format(time.RFC3339), "ageSeconds": int64(time.Since(latest.CapturedAt).Seconds())}
-		if quota.ResetsAt != nil {
-			item["resetsAt"] = quota.ResetsAt.Format(time.RFC3339)
-			item["timeUntilReset"] = formatDuration(time.Until(*quota.ResetsAt))
-			item["timeUntilResetSeconds"] = int64(time.Until(*quota.ResetsAt).Seconds())
-		}
-		quotas = append(quotas, item)
-	}
-	response["quotas"] = quotas
-	applyDisplayModeToResponse(response, h.getDisplayMode("anthropic"))
-	return response
+	return h.buildAnthropicCurrent(accountID)
 }
 
 // buildAnthropicCurrent builds the Anthropic current quota response map.
 // Merges data from the latest snapshot (statusline or API) with per-quota
 // freshness information so the UI can show all quotas with age indicators.
-func (h *Handler) buildAnthropicCurrent() map[string]interface{} {
+func (h *Handler) buildAnthropicCurrent(accountID int64) map[string]interface{} {
 	now := time.Now().UTC()
 	response := map[string]interface{}{
 		"capturedAt": now.Format(time.RFC3339),
@@ -5781,11 +5776,11 @@ func (h *Handler) buildAnthropicCurrent() map[string]interface{} {
 	// Get per-quota latest values (merges statusline + API snapshots).
 	// This ensures we show Sonnet/extra_usage from older API polls alongside
 	// fresh five_hour/seven_day from statusline.
-	latestPerQuota, err := h.store.QueryAnthropicLatestPerQuota()
+	latestPerQuota, err := h.store.QueryAnthropicLatestPerQuota(accountID)
 	if err != nil {
 		h.logger.Error("failed to query latest per-quota Anthropic data", "error", err)
 		// Fall back to single-snapshot approach
-		return h.buildAnthropicCurrentFallback(response)
+		return h.buildAnthropicCurrentFallback(accountID, response)
 	}
 
 	if len(latestPerQuota) == 0 {
@@ -5847,8 +5842,8 @@ func (h *Handler) buildAnthropicCurrent() map[string]interface{} {
 
 // buildAnthropicCurrentFallback uses the single latest snapshot when per-quota
 // merge fails. This preserves the original behavior as a safety net.
-func (h *Handler) buildAnthropicCurrentFallback(response map[string]interface{}) map[string]interface{} {
-	latest, err := h.store.QueryLatestAnthropic()
+func (h *Handler) buildAnthropicCurrentFallback(accountID int64, response map[string]interface{}) map[string]interface{} {
+	latest, err := h.store.QueryLatestAnthropic(accountID)
 	if err != nil || latest == nil {
 		return response
 	}
@@ -6086,7 +6081,7 @@ func (h *Handler) summaryAnthropic(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) buildAnthropicSummaryMap() map[string]interface{} {
 	response := map[string]interface{}{}
 	if h.anthropicTracker != nil && h.store != nil {
-		latest, err := h.store.QueryLatestAnthropic()
+		latest, err := h.store.QueryLatestAnthropic(h.defaultProviderAccountID("anthropic"))
 		if err == nil && latest != nil {
 			for _, q := range latest.Quotas {
 				if summary, err := h.anthropicTracker.UsageSummary(q.Name); err == nil && summary != nil {
@@ -6133,7 +6128,7 @@ func (h *Handler) buildAnthropicInsights(hidden map[string]bool, rangeDur time.D
 	if h.store == nil {
 		return resp
 	}
-	latest, err := h.store.QueryLatestAnthropic()
+	latest, err := h.store.QueryLatestAnthropic(h.defaultProviderAccountID("anthropic"))
 	if err != nil || latest == nil {
 		resp.Insights = append(resp.Insights, insightItem{
 			Type: "info", Severity: "info",
@@ -8665,7 +8660,7 @@ func (h *Handler) buildAntigravityCurrentForAccount(accountID int64) map[string]
 }
 
 // buildAntigravityCurrent builds the Antigravity current quota response map.
-func (h *Handler) buildAntigravityCurrent() map[string]interface{} {
+func (h *Handler) buildAntigravityCurrent(accountID int64) map[string]interface{} {
 	now := time.Now().UTC()
 	response := map[string]interface{}{
 		"capturedAt": now.Format(time.RFC3339),
@@ -8677,7 +8672,7 @@ func (h *Handler) buildAntigravityCurrent() map[string]interface{} {
 		return response
 	}
 
-	latest, err := h.store.QueryLatestAntigravity()
+	latest, err := h.store.QueryLatestAntigravity(accountID)
 	if err != nil {
 		h.logger.Error("failed to query latest Antigravity snapshot", "error", err)
 		return response
@@ -8863,7 +8858,7 @@ func (h *Handler) buildAntigravityInsights(hidden map[string]bool, rangeDur time
 
 	now := time.Now().UTC()
 	rangeStart := now.Add(-rangeDur)
-	latest, err := h.store.QueryLatestAntigravity()
+	latest, err := h.store.QueryLatestAntigravity(h.defaultProviderAccountID("antigravity"))
 	if err != nil || latest == nil {
 		return resp
 	}

@@ -35,9 +35,74 @@ const (
 	agyMaxFailures      = 2
 )
 
-// agyPollSerial prevents several memory-heavy CLI homes from starting together.
+// agyPollSerial serializes polls so two accounts never launch or query agy at
+// the same time. It bounds concurrency only - resident memory is bounded
+// separately by the residency cap below.
 // It is process-wide because each account owns a distinct runner.
 var agyPollSerial = make(chan struct{}, 1)
+
+// agyMaxResidentSessions caps how many agy processes stay alive at once. Each
+// one costs roughly 190 MiB resident, so this cap - not the number of
+// configured accounts - determines the daemon's memory ceiling. With more
+// accounts than slots, a poll evicts another account's warm session instead of
+// adding a second process.
+const agyMaxResidentSessions = 1
+
+// agyResidencyMu guards agyResident. It is never held while taking a runner
+// lock, and admission runs only inside the agyPollSerial critical section, so a
+// runner can never be evicting while another runner evicts it.
+var (
+	agyResidencyMu sync.Mutex
+	agyResident    []*AntigravityCLIRunner
+)
+
+// agyAdmitResident registers r as holding a live agy process, evicting the
+// least recently admitted holders so the cap always holds.
+func agyAdmitResident(r *AntigravityCLIRunner) {
+	agyResidencyMu.Lock()
+	kept := agyResident[:0]
+	for _, other := range agyResident {
+		if other != r {
+			kept = append(kept, other)
+		}
+	}
+	agyResident = kept
+	var evict []*AntigravityCLIRunner
+	for len(agyResident) >= agyMaxResidentSessions {
+		evict = append(evict, agyResident[0])
+		agyResident = agyResident[1:]
+	}
+	agyResident = append(agyResident, r)
+	agyResidencyMu.Unlock()
+
+	for _, victim := range evict {
+		victim.evict()
+	}
+}
+
+// agyForgetResident releases r's slot once its process is gone.
+func agyForgetResident(r *AntigravityCLIRunner) {
+	agyResidencyMu.Lock()
+	defer agyResidencyMu.Unlock()
+	kept := agyResident[:0]
+	for _, other := range agyResident {
+		if other != r {
+			kept = append(kept, other)
+		}
+	}
+	agyResident = kept
+}
+
+// evict tears down a warm session that another account needs the slot for.
+func (r *AntigravityCLIRunner) evict() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sess == nil {
+		return
+	}
+	r.logger.Info("agy session evicted to stay within the resident process cap", "cap", agyMaxResidentSessions)
+	r.teardownLocked()
+}
 
 // agySession holds a live, managed agy process and its verified connection.
 type agySession struct {
@@ -60,12 +125,12 @@ type AntigravityCLIRunner struct {
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
 
-	mu          sync.Mutex
-	sess        *agySession
-	lastUsed    time.Time
-	failures    int
-	watchdog    sync.Once
-	env         []string
+	mu       sync.Mutex
+	sess     *agySession
+	lastUsed time.Time
+	failures int
+	watchdog sync.Once
+	env      []string
 }
 
 // NewAntigravityCLIRunner creates a runner. It does not launch agy until the
@@ -74,22 +139,48 @@ func NewAntigravityCLIRunner(logger *slog.Logger) *AntigravityCLIRunner {
 	return NewAntigravityCLIRunnerWithEnv(logger, nil)
 }
 
+// agyEnvAllowlist is every process environment variable agy is allowed to
+// inherit from the daemon. os.Environ() is deliberately never passed through:
+// the daemon's .env holds every configured provider's API key, and agy is a
+// third-party binary outside that trust boundary.
+var agyEnvAllowlist = []string{"PATH", "TERM", "LANG", "LC_ALL", "AGY_CLI_DISABLE_AUTO_UPDATE"}
+
+// buildAgyEnv resolves the allowlisted ambient variables and layers the
+// caller's account-specific overrides (HOME, XDG_RUNTIME_DIR, and any agy
+// tuning flags) on top, so an override always wins over the ambient value.
+func buildAgyEnv(env map[string]string) []string {
+	values := make(map[string]string, len(agyEnvAllowlist)+len(env))
+	for _, key := range agyEnvAllowlist {
+		if value, ok := os.LookupEnv(key); ok {
+			values[key] = value
+		}
+	}
+	for key, value := range env {
+		values[key] = value
+	}
+	result := make([]string, 0, len(values))
+	for key, value := range values {
+		result = append(result, key+"="+value)
+	}
+	return result
+}
+
 // NewAntigravityCLIRunnerWithEnv launches agy with an account-specific HOME.
-// The caller supplies only non-secret process environment values.
+// The caller supplies only non-secret process environment values; the
+// process environment otherwise comes solely from agyEnvAllowlist, never
+// os.Environ(), so no provider API key ever reaches the agy child.
 func NewAntigravityCLIRunnerWithEnv(logger *slog.Logger, env map[string]string) *AntigravityCLIRunner {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	baseEnv := os.Environ()
-	for key, value := range env { baseEnv = append(baseEnv, key+"="+value) }
 	return &AntigravityCLIRunner{
 		logger:     logger.With("component", "antigravity-cli"),
 		client:     NewAntigravityClient(logger),
 		warmTTL:    agyDefaultWarmTTL,
 		rootCtx:    ctx,
 		rootCancel: cancel,
-		env:        baseEnv,
+		env:        buildAgyEnv(env),
 	}
 }
 
@@ -140,7 +231,12 @@ func resolveAgyPath() (string, error) {
 
 // Fetch ensures a ready agy session and returns a CLI-sourced snapshot.
 func (r *AntigravityCLIRunner) Fetch(ctx context.Context) (*AntigravitySnapshot, error) {
-	select { case agyPollSerial <- struct{}{}: defer func() { <-agyPollSerial }(); case <-ctx.Done(): return nil, ctx.Err() }
+	select {
+	case agyPollSerial <- struct{}{}:
+		defer func() { <-agyPollSerial }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -217,6 +313,7 @@ func (r *AntigravityCLIRunner) ensureLocked(ctx context.Context) error {
 	}
 	sess.conn = conn
 	r.sess = sess
+	agyAdmitResident(r)
 	r.logger.Info("agy session ready", "pid", sess.cmd.Process.Pid, "port", conn.Port)
 	return nil
 }
@@ -345,6 +442,7 @@ func (r *AntigravityCLIRunner) teardownLocked() {
 	}
 	r.killSession(r.sess)
 	r.sess = nil
+	agyForgetResident(r)
 }
 
 func (r *AntigravityCLIRunner) killSession(sess *agySession) {

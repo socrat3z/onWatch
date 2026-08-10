@@ -735,8 +735,8 @@ func TestAnthropicStore_FiltersUnknownQuotaKeys(t *testing.T) {
 	// whitelists names via api.ActiveQuotaNames - the point of this test is
 	// to verify read-path behavior on legacy rows.
 	snapshotRes, err := s.db.Exec(
-		`INSERT INTO anthropic_snapshots (captured_at, raw_json, quota_count) VALUES (?, ?, ?)`,
-		now.Format(time.RFC3339Nano), `{}`, 2,
+		`INSERT INTO anthropic_snapshots (account_id, captured_at, raw_json, quota_count) VALUES (?, ?, ?, ?)`,
+		defaultAccountIDForTest(t, s, "anthropic"), now.Format(time.RFC3339Nano), `{}`, 2,
 	)
 	if err != nil {
 		t.Fatalf("insert snapshot: %v", err)

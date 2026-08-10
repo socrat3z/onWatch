@@ -29,6 +29,9 @@ type Source interface {
 }
 
 // ValidateName permits aliases that are safe as stable labels and path segments.
+// docker-entrypoint-with-user-env.sh validates ONWATCH_LOGIN_ACCOUNT against
+// this exact same character set before it becomes $HOME for a login CLI -
+// keep both in sync.
 func ValidateName(name string) error {
 	if !namePattern.MatchString(name) {
 		return fmt.Errorf("invalid account name %q: use 1-32 lowercase letters, numbers, hyphens, or underscores", name)

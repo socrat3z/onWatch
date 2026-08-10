@@ -34,7 +34,8 @@ func TestDroppedTable_QueryLatestAnthropic_QuotaValuesError(t *testing.T) {
 
 	// Insert a snapshot directly (bypassing quota values insert)
 	_, err := s.db.Exec(
-		`INSERT INTO anthropic_snapshots (captured_at, raw_json, quota_count) VALUES (?, '{}', 0)`,
+		`INSERT INTO anthropic_snapshots (account_id, captured_at, raw_json, quota_count) VALUES (?, ?, '{}', 0)`,
+		defaultAccountIDForTest(t, s, "anthropic"),
 		time.Now().UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
@@ -151,7 +152,8 @@ func TestDroppedTable_QueryLatestAntigravity_ModelValuesError(t *testing.T) {
 	defer s.Close()
 
 	_, err := s.db.Exec(
-		`INSERT INTO antigravity_snapshots (captured_at, model_count) VALUES (?, 0)`,
+		`INSERT INTO antigravity_snapshots (account_id, captured_at, model_count) VALUES (?, ?, 0)`,
+		defaultAccountIDForTest(t, s, "antigravity"),
 		time.Now().UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
@@ -191,7 +193,8 @@ func TestDroppedTable_QueryAntigravitySnapshotAtOrBefore_ModelValuesError(t *tes
 
 	now := time.Now().UTC()
 	_, err := s.db.Exec(
-		`INSERT INTO antigravity_snapshots (captured_at, model_count) VALUES (?, 0)`,
+		`INSERT INTO antigravity_snapshots (account_id, captured_at, model_count) VALUES (?, ?, 0)`,
+		defaultAccountIDForTest(t, s, "antigravity"),
 		now.Format(time.RFC3339Nano),
 	)
 	if err != nil {

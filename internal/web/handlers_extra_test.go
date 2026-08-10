@@ -8020,7 +8020,7 @@ func TestHandler_Current_Anthropic_WithTrackerData(t *testing.T) {
 	anthTracker := tracker.NewAnthropicTracker(s, nil)
 
 	// Process snapshots through tracker
-	latest, _ := s.QueryLatestAnthropic()
+	latest, _ := s.QueryLatestAnthropic(0)
 	if latest != nil {
 		anthTracker.Process(latest)
 	}

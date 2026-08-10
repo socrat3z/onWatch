@@ -283,7 +283,7 @@ func (h *Handler) buildMenubarProviders(settings *menubar.Settings, includeHidde
 		}
 	}
 	if h.config != nil && h.config.HasProvider("anthropic") && h.providerDashboardVisible("anthropic", visibility) {
-		payload := h.buildAnthropicCurrent()
+		payload := h.buildAnthropicCurrent(h.defaultProviderAccountID("anthropic"))
 		if card := normalizeProviderCard("anthropic", resolveProviderTabLabel("anthropic", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
 			if promoData, ok := payload["promo"]; ok && promoData != nil {
 				if p, ok := promoData.(*anthropicPromo); ok {
@@ -341,7 +341,7 @@ func (h *Handler) buildMenubarProviders(settings *menubar.Settings, includeHidde
 		}
 	}
 	if h.config != nil && h.config.HasProvider("antigravity") && h.providerDashboardVisible("antigravity", visibility) {
-		payload := h.buildAntigravityCurrent()
+		payload := h.buildAntigravityCurrent(h.defaultProviderAccountID("antigravity"))
 		if card := normalizeProviderCard("antigravity", resolveProviderTabLabel("antigravity", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
 			providers = append(providers, *card)
 			if captured := parseCapturedAt(payload); captured.After(latest) {

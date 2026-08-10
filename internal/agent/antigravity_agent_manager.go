@@ -14,9 +14,10 @@ import (
 	"github.com/onllm-dev/onwatch/v2/internal/tracker"
 )
 
-// AntigravityAgentManager runs one account home per alias. The CLI runner
-// serializes fetches process-wide, keeping multiple configured accounts within
-// the existing memory budget instead of warming several agy processes at once.
+// AntigravityAgentManager runs one account home per alias. Serializing fetches
+// bounds concurrency, not memory; the memory budget is held by the CLI runner's
+// resident-process cap (api.agyMaxResidentSessions), which evicts one account's
+// warm agy process when another account needs the slot.
 type AntigravityAgentManager struct {
 	store        *store.Store
 	interval     time.Duration

@@ -11078,7 +11078,7 @@ func TestIsAnthropicPeakHours_NilSafe(t *testing.T) {
 func TestBuildAnthropicCurrent_IncludesPromo(t *testing.T) {
 	t.Parallel()
 	h := NewHandler(nil, nil, nil, nil, createTestConfigWithSynthetic())
-	resp := h.buildAnthropicCurrent()
+	resp := h.buildAnthropicCurrent(0)
 	// Verify response structure is valid even without store.
 	if _, ok := resp["quotas"]; !ok {
 		t.Fatal("expected quotas key in response")

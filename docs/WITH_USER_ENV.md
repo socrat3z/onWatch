@@ -401,6 +401,35 @@ figure above, so the ceiling has to accommodate it.
 **If you do not use `ANTIGRAVITY_SOURCE=cli`, no `agy` process ever starts in the
 daemon and you can drop that limit to 128M.**
 
+### Multi-account residency cap
+
+Before **2026-08-10**, each configured Antigravity account owned its own
+`AntigravityCLIRunner`, and only fetches were serialized (`agyPollSerial`) - the
+warm-session TTL (5m) against a 120s poll interval meant every account's `agy`
+process stayed resident at once. Two accounts could plausibly exceed the 512M
+limit; nothing actually bounded memory by account count.
+
+`agyMaxResidentSessions` (`internal/api/antigravity_cli.go`) now caps the
+process-wide count of live `agy` sessions independent of how many accounts are
+configured. A poll that needs the slot evicts the least-recently-admitted
+session rather than starting a second process. Verified both by
+`TestAgyResidentSessionsAreCappedIndependentOfAccountCount` (unit-level, cap
+never exceeded across 5 runners) and against a live container:
+
+| Accounts configured | Live `agy` processes (docker exec ps) | Container RSS |
+|---|---|---|
+| 1 (default only) | 1 | 140 MiB |
+| 4 (default + 3 named) | 1 (the other 2 already exited `<defunct>`, evicted per the cap) | 131.6 MiB |
+
+Measured **2026-08-10** on the same build (`docker stats --no-stream onwatch`
+after each account's agent had a poll cycle). RSS does not grow with account
+count and stays well under the 512M limit, so no gating or limit change was
+needed. This did not require real Antigravity logins: any subdirectory under
+`AntigravityAuthRoot` registers as an account (`internal/account/antigravity_source.go`),
+so the extra accounts here have no real credentials and every fetch fails -
+which does not matter for this measurement, since the cap acts before a fetch
+ever succeeds.
+
 The 512M on each `*-login` service is a ceiling for the interactive TUIs and has
 **not** been profiled - those flows need a terminal, so they were not measured.
 Treat it as a ceiling, not a requirement.

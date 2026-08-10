@@ -104,13 +104,14 @@ func (s *Store) QueryLatestAntigravity(accountIDs ...int64) (*api.AntigravitySna
 	var promptCredits sql.NullFloat64
 	var monthlyCredits sql.NullInt64
 
-	query := `SELECT id, account_id, captured_at, email, plan_name, prompt_credits, monthly_credits, model_count, source FROM antigravity_snapshots`
-	args := []interface{}{}
-	if len(accountIDs) > 0 && accountIDs[0] > 0 {
-		query += ` WHERE account_id = ?`
-		args = append(args, accountIDs[0])
+	accountID, err := s.scopedProviderAccountID("antigravity", accountIDs)
+	if err != nil {
+		return nil, err
 	}
-	err := s.db.QueryRow(query+` ORDER BY captured_at DESC LIMIT 1`, args...).Scan(&snapshot.ID, &snapshot.AccountID, &capturedAt, &email, &planName, &promptCredits, &monthlyCredits, new(int), &source)
+	err = s.db.QueryRow(
+		`SELECT id, account_id, captured_at, email, plan_name, prompt_credits, monthly_credits, model_count, source FROM antigravity_snapshots WHERE account_id = ? ORDER BY captured_at DESC LIMIT 1`,
+		accountID,
+	).Scan(&snapshot.ID, &snapshot.AccountID, &capturedAt, &email, &planName, &promptCredits, &monthlyCredits, new(int), &source)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -171,17 +172,26 @@ func (s *Store) QueryLatestAntigravity(accountIDs ...int64) (*api.AntigravitySna
 
 // QueryAntigravityRange returns Antigravity snapshots within a time range.
 func (s *Store) QueryAntigravityRange(start, end time.Time, limit ...int) ([]*api.AntigravitySnapshot, error) {
-	// Order by ASC for chronological chart display (oldest to newest, left to right)
-	query := `SELECT id, captured_at, email, plan_name, prompt_credits, monthly_credits, model_count
-		FROM antigravity_snapshots
-		WHERE captured_at BETWEEN ? AND ? ORDER BY captured_at ASC`
+	return s.queryAntigravityRange(0, start, end, limit...)
+}
+
+// queryAntigravityRange applies the account filter inside the LIMIT so a limited
+// range spends its budget on one account instead of sharing it across all of them.
+func (s *Store) queryAntigravityRange(accountID int64, start, end time.Time, limit ...int) ([]*api.AntigravitySnapshot, error) {
+	const cols = `id, account_id, captured_at, email, plan_name, prompt_credits, monthly_credits, model_count`
+	where := `WHERE captured_at BETWEEN ? AND ?`
 	args := []interface{}{start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano)}
+	if accountID > 0 {
+		where += ` AND account_id = ?`
+		args = append(args, accountID)
+	}
+	// Order by ASC for chronological chart display (oldest to newest, left to right)
+	query := `SELECT ` + cols + ` FROM antigravity_snapshots ` + where + ` ORDER BY captured_at ASC`
 	if len(limit) > 0 && limit[0] > 0 {
-		query = `SELECT id, captured_at, email, plan_name, prompt_credits, monthly_credits, model_count
+		query = `SELECT ` + cols + `
 			FROM (
-				SELECT id, captured_at, email, plan_name, prompt_credits, monthly_credits, model_count
-				FROM antigravity_snapshots
-				WHERE captured_at BETWEEN ? AND ?
+				SELECT ` + cols + `
+				FROM antigravity_snapshots ` + where + `
 				ORDER BY captured_at DESC
 				LIMIT ?
 			) recent
@@ -203,7 +213,7 @@ func (s *Store) QueryAntigravityRange(start, end time.Time, limit ...int) ([]*ap
 		var promptCredits sql.NullFloat64
 		var monthlyCredits sql.NullInt64
 
-		if err := rows.Scan(&snap.ID, &capturedAt, &email, &planName, &promptCredits, &monthlyCredits, new(int)); err != nil {
+		if err := rows.Scan(&snap.ID, &snap.AccountID, &capturedAt, &email, &planName, &promptCredits, &monthlyCredits, new(int)); err != nil {
 			return nil, fmt.Errorf("failed to scan antigravity snapshot: %w", err)
 		}
 		snap.CapturedAt, _ = time.Parse(time.RFC3339Nano, capturedAt)
@@ -261,24 +271,11 @@ func (s *Store) QueryAntigravityRange(start, end time.Time, limit ...int) ([]*ap
 // continue to join through their parent snapshot, so no quota data can cross
 // an account boundary.
 func (s *Store) QueryAntigravityRangeForAccount(accountID int64, start, end time.Time, limit ...int) ([]*api.AntigravitySnapshot, error) {
-	var err error
-	accountID, err = s.scopedProviderAccountID("antigravity", []int64{accountID})
+	accountID, err := s.scopedProviderAccountID("antigravity", []int64{accountID})
 	if err != nil {
 		return nil, err
 	}
-	snapshots, err := s.QueryAntigravityRange(start, end, limit...)
-	if err != nil {
-		return nil, err
-	}
-	filtered := snapshots[:0]
-	for _, snapshot := range snapshots {
-		var id int64
-		if err := s.db.QueryRow(`SELECT account_id FROM antigravity_snapshots WHERE id = ?`, snapshot.ID).Scan(&id); err == nil && id == accountID {
-			snapshot.AccountID = id
-			filtered = append(filtered, snapshot)
-		}
-	}
-	return filtered, nil
+	return s.queryAntigravityRange(accountID, start, end, limit...)
 }
 
 // CreateAntigravityCycle creates a new Antigravity reset cycle.
@@ -382,9 +379,20 @@ func (s *Store) QueryActiveAntigravityCycle(modelID string, accountIDs ...int64)
 
 // QueryAntigravityCycleHistory returns completed cycles for an Antigravity model with optional limit.
 func (s *Store) QueryAntigravityCycleHistory(modelID string, limit ...int) ([]*AntigravityResetCycle, error) {
-	query := `SELECT id, model_id, cycle_start, cycle_end, reset_time, peak_usage, total_delta
-		FROM antigravity_reset_cycles WHERE model_id = ? AND cycle_end IS NOT NULL ORDER BY cycle_start DESC`
+	return s.queryAntigravityCycleHistory(0, modelID, limit...)
+}
+
+// queryAntigravityCycleHistory filters by account in SQL so the LIMIT bounds one
+// account's history rather than being consumed by other accounts' cycles.
+func (s *Store) queryAntigravityCycleHistory(accountID int64, modelID string, limit ...int) ([]*AntigravityResetCycle, error) {
+	query := `SELECT id, account_id, model_id, cycle_start, cycle_end, reset_time, peak_usage, total_delta
+		FROM antigravity_reset_cycles WHERE model_id = ? AND cycle_end IS NOT NULL`
 	args := []interface{}{modelID}
+	if accountID > 0 {
+		query += ` AND account_id = ?`
+		args = append(args, accountID)
+	}
+	query += ` ORDER BY cycle_start DESC`
 	if len(limit) > 0 && limit[0] > 0 {
 		query += ` LIMIT ?`
 		args = append(args, limit[0])
@@ -402,7 +410,7 @@ func (s *Store) QueryAntigravityCycleHistory(modelID string, limit ...int) ([]*A
 		var cycleStart, cycleEnd string
 		var resetTime sql.NullString
 
-		if err := rows.Scan(&cycle.ID, &cycle.ModelID, &cycleStart, &cycleEnd, &resetTime,
+		if err := rows.Scan(&cycle.ID, &cycle.AccountID, &cycle.ModelID, &cycleStart, &cycleEnd, &resetTime,
 			&cycle.PeakUsage, &cycle.TotalDelta); err != nil {
 			return nil, fmt.Errorf("failed to scan antigravity cycle: %w", err)
 		}
@@ -422,24 +430,11 @@ func (s *Store) QueryAntigravityCycleHistory(modelID string, limit ...int) ([]*A
 }
 
 func (s *Store) QueryAntigravityCycleHistoryForAccount(accountID int64, modelID string, limit ...int) ([]*AntigravityResetCycle, error) {
-	var err error
-	accountID, err = s.scopedProviderAccountID("antigravity", []int64{accountID})
+	accountID, err := s.scopedProviderAccountID("antigravity", []int64{accountID})
 	if err != nil {
 		return nil, err
 	}
-	cycles, err := s.QueryAntigravityCycleHistory(modelID, limit...)
-	if err != nil {
-		return nil, err
-	}
-	filtered := cycles[:0]
-	for _, cycle := range cycles {
-		var id int64
-		if err := s.db.QueryRow(`SELECT account_id FROM antigravity_reset_cycles WHERE id = ?`, cycle.ID).Scan(&id); err == nil && id == accountID {
-			cycle.AccountID = id
-			filtered = append(filtered, cycle)
-		}
-	}
-	return filtered, nil
+	return s.queryAntigravityCycleHistory(accountID, modelID, limit...)
 }
 
 // QueryAntigravityUsageSeries returns per-model usage points since a given time.

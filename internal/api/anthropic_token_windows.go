@@ -4,6 +4,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -21,17 +22,35 @@ func SetTestMode(enabled bool) {
 	testMode = enabled
 }
 
+// getCredentialsFilePath returns the path to the Claude credentials file.
+// Windows has no keychain, so this file is the only credential store. HOME is
+// checked first (unlike os.UserHomeDir, which reads USERPROFILE on Windows)
+// so tests can redirect it the same way the Unix build does.
+func getCredentialsFilePath() string {
+	home := os.Getenv("HOME")
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			home = ""
+		}
+	}
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".claude", ".credentials.json")
+}
+
 // detectAnthropicCredentialsPlatform tries to detect full OAuth credentials on Windows.
 func detectAnthropicCredentialsPlatform(logger *slog.Logger) *AnthropicCredentials {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
+	credPath := getCredentialsFilePath()
+	if credPath == "" {
 		return nil
 	}
-	credPath := filepath.Join(home, ".claude", ".credentials.json")
 	data, err := os.ReadFile(credPath)
 	if err != nil {
 		return nil
@@ -57,11 +76,10 @@ func detectAnthropicCredentialsPlatform(logger *slog.Logger) *AnthropicCredentia
 //
 // Related: https://github.com/onllm-dev/onWatch/issues/16
 func WriteAnthropicCredentials(accessToken, refreshToken string, expiresIn int) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
+	credPath := getCredentialsFilePath()
+	if credPath == "" {
+		return fmt.Errorf("failed to determine home directory")
 	}
-	credPath := filepath.Join(home, ".claude", ".credentials.json")
 	data, err := os.ReadFile(credPath)
 	if err != nil {
 		return err
@@ -109,11 +127,10 @@ func detectAnthropicTokenPlatform(logger *slog.Logger) string {
 		logger = slog.Default()
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
+	credPath := getCredentialsFilePath()
+	if credPath == "" {
 		return ""
 	}
-	credPath := filepath.Join(home, ".claude", ".credentials.json")
 	data, err := os.ReadFile(credPath)
 	if err != nil {
 		return ""

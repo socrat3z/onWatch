@@ -78,13 +78,14 @@ func (s *Store) QueryLatestAnthropic(accountIDs ...int64) (*api.AnthropicSnapsho
 	var snapshot api.AnthropicSnapshot
 	var capturedAt string
 
-	query := `SELECT id, account_id, captured_at, quota_count FROM anthropic_snapshots`
-	args := []interface{}{}
-	if len(accountIDs) > 0 && accountIDs[0] > 0 {
-		query += ` WHERE account_id = ?`
-		args = append(args, accountIDs[0])
+	accountID, err := s.scopedProviderAccountID("anthropic", accountIDs)
+	if err != nil {
+		return nil, err
 	}
-	err := s.db.QueryRow(query+` ORDER BY captured_at DESC LIMIT 1`, args...).Scan(&snapshot.ID, &snapshot.AccountID, &capturedAt, new(int))
+	err = s.db.QueryRow(
+		`SELECT id, account_id, captured_at, quota_count FROM anthropic_snapshots WHERE account_id = ? ORDER BY captured_at DESC LIMIT 1`,
+		accountID,
+	).Scan(&snapshot.ID, &snapshot.AccountID, &capturedAt, new(int))
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -128,24 +129,11 @@ func (s *Store) QueryLatestAnthropic(accountIDs ...int64) (*api.AnthropicSnapsho
 // QueryAnthropicRangeForAccount returns only the chosen account's history.
 // It keeps the legacy method intact while the dashboard transitions to account IDs.
 func (s *Store) QueryAnthropicRangeForAccount(accountID int64, start, end time.Time, limit ...int) ([]*api.AnthropicSnapshot, error) {
-	var err error
-	accountID, err = s.scopedProviderAccountID("anthropic", []int64{accountID})
+	accountID, err := s.scopedProviderAccountID("anthropic", []int64{accountID})
 	if err != nil {
 		return nil, err
 	}
-	snapshots, err := s.QueryAnthropicRange(start, end, limit...)
-	if err != nil {
-		return nil, err
-	}
-	filtered := snapshots[:0]
-	for _, snapshot := range snapshots {
-		var id int64
-		if err := s.db.QueryRow(`SELECT account_id FROM anthropic_snapshots WHERE id = ?`, snapshot.ID).Scan(&id); err == nil && id == accountID {
-			snapshot.AccountID = id
-			filtered = append(filtered, snapshot)
-		}
-	}
-	return filtered, nil
+	return s.queryAnthropicRange(accountID, start, end, limit...)
 }
 
 func (s *Store) QueryAnthropicUtilizationSeriesForAccount(accountID int64, quotaName string, since time.Time) ([]UtilizationPoint, error) {
@@ -174,15 +162,25 @@ func (s *Store) QueryAnthropicUtilizationSeriesForAccount(accountID int64, quota
 
 // QueryAnthropicRange returns Anthropic snapshots within a time range with optional limit.
 func (s *Store) QueryAnthropicRange(start, end time.Time, limit ...int) ([]*api.AnthropicSnapshot, error) {
-	query := `SELECT id, captured_at, quota_count FROM anthropic_snapshots
-		WHERE captured_at BETWEEN ? AND ? ORDER BY captured_at ASC`
+	return s.queryAnthropicRange(0, start, end, limit...)
+}
+
+// queryAnthropicRange applies the account filter inside the LIMIT so a limited
+// range spends its budget on one account instead of sharing it across all of them.
+func (s *Store) queryAnthropicRange(accountID int64, start, end time.Time, limit ...int) ([]*api.AnthropicSnapshot, error) {
+	const cols = `id, account_id, captured_at, quota_count`
+	where := `WHERE captured_at BETWEEN ? AND ?`
 	args := []interface{}{start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano)}
+	if accountID > 0 {
+		where += ` AND account_id = ?`
+		args = append(args, accountID)
+	}
+	query := `SELECT ` + cols + ` FROM anthropic_snapshots ` + where + ` ORDER BY captured_at ASC`
 	if len(limit) > 0 && limit[0] > 0 {
-		query = `SELECT id, captured_at, quota_count
+		query = `SELECT ` + cols + `
 			FROM (
-				SELECT id, captured_at, quota_count
-				FROM anthropic_snapshots
-				WHERE captured_at BETWEEN ? AND ?
+				SELECT ` + cols + `
+				FROM anthropic_snapshots ` + where + `
 				ORDER BY captured_at DESC
 				LIMIT ?
 			) recent
@@ -200,7 +198,7 @@ func (s *Store) QueryAnthropicRange(start, end time.Time, limit ...int) ([]*api.
 	for rows.Next() {
 		var snap api.AnthropicSnapshot
 		var capturedAt string
-		if err := rows.Scan(&snap.ID, &capturedAt, new(int)); err != nil {
+		if err := rows.Scan(&snap.ID, &snap.AccountID, &capturedAt, new(int)); err != nil {
 			return nil, fmt.Errorf("failed to scan anthropic snapshot: %w", err)
 		}
 		snap.CapturedAt, _ = time.Parse(time.RFC3339Nano, capturedAt)
@@ -344,9 +342,20 @@ func (s *Store) QueryActiveAnthropicCycle(quotaName string, accountIDs ...int64)
 
 // QueryAnthropicCycleHistory returns completed cycles for an Anthropic quota with optional limit.
 func (s *Store) QueryAnthropicCycleHistory(quotaName string, limit ...int) ([]*AnthropicResetCycle, error) {
-	query := `SELECT id, quota_name, cycle_start, cycle_end, resets_at, peak_utilization, total_delta
-		FROM anthropic_reset_cycles WHERE quota_name = ? AND cycle_end IS NOT NULL ORDER BY cycle_start DESC`
+	return s.queryAnthropicCycleHistory(0, quotaName, limit...)
+}
+
+// queryAnthropicCycleHistory filters by account in SQL so the LIMIT bounds one
+// account's history rather than being consumed by other accounts' cycles.
+func (s *Store) queryAnthropicCycleHistory(accountID int64, quotaName string, limit ...int) ([]*AnthropicResetCycle, error) {
+	query := `SELECT id, account_id, quota_name, cycle_start, cycle_end, resets_at, peak_utilization, total_delta
+		FROM anthropic_reset_cycles WHERE quota_name = ? AND cycle_end IS NOT NULL`
 	args := []interface{}{quotaName}
+	if accountID > 0 {
+		query += ` AND account_id = ?`
+		args = append(args, accountID)
+	}
+	query += ` ORDER BY cycle_start DESC`
 	if len(limit) > 0 && limit[0] > 0 {
 		query += ` LIMIT ?`
 		args = append(args, limit[0])
@@ -364,7 +373,7 @@ func (s *Store) QueryAnthropicCycleHistory(quotaName string, limit ...int) ([]*A
 		var cycleStart, cycleEnd string
 		var resetsAt sql.NullString
 
-		if err := rows.Scan(&cycle.ID, &cycle.QuotaName, &cycleStart, &cycleEnd, &resetsAt,
+		if err := rows.Scan(&cycle.ID, &cycle.AccountID, &cycle.QuotaName, &cycleStart, &cycleEnd, &resetsAt,
 			&cycle.PeakUtilization, &cycle.TotalDelta); err != nil {
 			return nil, fmt.Errorf("failed to scan anthropic cycle: %w", err)
 		}
@@ -384,24 +393,11 @@ func (s *Store) QueryAnthropicCycleHistory(quotaName string, limit ...int) ([]*A
 }
 
 func (s *Store) QueryAnthropicCycleHistoryForAccount(accountID int64, quotaName string, limit ...int) ([]*AnthropicResetCycle, error) {
-	var err error
-	accountID, err = s.scopedProviderAccountID("anthropic", []int64{accountID})
+	accountID, err := s.scopedProviderAccountID("anthropic", []int64{accountID})
 	if err != nil {
 		return nil, err
 	}
-	cycles, err := s.QueryAnthropicCycleHistory(quotaName, limit...)
-	if err != nil {
-		return nil, err
-	}
-	filtered := cycles[:0]
-	for _, cycle := range cycles {
-		var id int64
-		if err := s.db.QueryRow(`SELECT account_id FROM anthropic_reset_cycles WHERE id = ?`, cycle.ID).Scan(&id); err == nil && id == accountID {
-			cycle.AccountID = id
-			filtered = append(filtered, cycle)
-		}
-	}
-	return filtered, nil
+	return s.queryAnthropicCycleHistory(accountID, quotaName, limit...)
 }
 
 // QueryAnthropicCyclesSince returns completed cycles for a quota since a given time.
@@ -623,13 +619,19 @@ type AnthropicLatestQuota struct {
 
 // QueryAnthropicLatestPerQuota returns the most recent value for each distinct quota name.
 // Scans only the last 50 snapshots (bounded) and merges in Go - fast even on large DBs.
-func (s *Store) QueryAnthropicLatestPerQuota() ([]AnthropicLatestQuota, error) {
+func (s *Store) QueryAnthropicLatestPerQuota(accountIDs ...int64) ([]AnthropicLatestQuota, error) {
+	accountID, err := s.scopedProviderAccountID("anthropic", accountIDs)
+	if err != nil {
+		return nil, err
+	}
+	// The recent-snapshot window is scoped too, so a busy second account cannot
+	// push this account's quota rows out of the lookback.
 	rows, err := s.db.Query(`
 		SELECT qv.quota_name, qv.utilization, qv.resets_at, s.captured_at, s.raw_json
 		FROM anthropic_quota_values qv
 		JOIN anthropic_snapshots s ON s.id = qv.snapshot_id
-		WHERE s.id >= (SELECT MAX(id) - 50 FROM anthropic_snapshots)
-		ORDER BY s.captured_at DESC`)
+		WHERE s.account_id = ? AND s.id >= (SELECT MAX(id) - 50 FROM anthropic_snapshots WHERE account_id = ?)
+		ORDER BY s.captured_at DESC`, accountID, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query latest per-quota: %w", err)
 	}
