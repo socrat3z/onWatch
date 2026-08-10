@@ -7,6 +7,28 @@ API key: **Antigravity** (`agy`), **Codex** (`codex`), and **Anthropic** (`claud
 This is a fork-only addition. The stock `Dockerfile` and `docker-compose.yml` are
 untouched, so the default build is still upstream's distroless image.
 
+## Multiple accounts
+
+Each provider uses a root with one safe, stable credential folder per account.
+Choose a lowercase local name such as `work` or `personal`, then use it only for
+the one-shot login command:
+
+```bash
+docker compose --profile login run --rm -e ONWATCH_LOGIN_ACCOUNT=work codex-login
+docker compose --profile login run --rm -e ONWATCH_LOGIN_ACCOUNT=personal claude-login
+docker compose --profile login run --rm -e ONWATCH_LOGIN_ACCOUNT=work agy-login
+```
+
+Omit `ONWATCH_LOGIN_ACCOUNT` for `default`. Names allow lowercase letters,
+numbers, `_`, and `-`, up to 32 characters. The dashboard discovers accounts,
+offers a clear account picker, and lets users save a human-friendly display
+alias without renaming the credential folder. Removing a folder stops polling
+but retains its historical usage as a deleted account.
+
+Existing single-account volumes are copied to `default` on first start and the
+original files are retained as a recovery copy. SQLite data is migrated
+automatically; no manual database step is required.
+
 > **Everything about this image lives in this document.** The provider setup guides
 > ([Antigravity](ANTIGRAVITY_SETUP.md), [Codex](CODEX_SETUP.md)) cover host installs
 > and provider configuration and link back here for the container path.

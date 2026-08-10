@@ -90,6 +90,8 @@ function providerParam() {
     param += codexAccountParam();
   } else if (provider === 'minimax') {
     param += minimaxAccountParam();
+  } else if (provider === 'anthropic' || provider === 'antigravity') {
+    param += providerAccountParam(provider);
   }
   return param;
 }
@@ -177,6 +179,8 @@ const State = {
   overviewPageSize: 10,
   // Codex profile selection (multi-account beta)
   codexAccount: 1,
+  providerAccounts: { anthropic: [], antigravity: [] },
+  providerAccount: { anthropic: null, antigravity: null },
   codexProfiles: [],
   codexPlanType: '',
   codexQuotaNames: [],
@@ -618,6 +622,90 @@ function initMiniMaxAccountTabs() {
 function minimaxAccountParam() {
   if (!State.minimaxAccount || State.minimaxAccount === 'all') return '';
   return `&account=${encodeURIComponent(State.minimaxAccount)}`;
+}
+
+// ── Shared account picker (Anthropic + Antigravity) ───────────────────────
+function providerAccountParam(provider) {
+  const id = State.providerAccount[provider];
+  return id ? `&account=${encodeURIComponent(id)}` : '';
+}
+
+function providerAccountStorageKey(provider) { return `onwatch-${provider}-account`; }
+
+async function loadProviderAccounts(provider) {
+  try {
+    const res = await authFetch(`${API_BASE}/api/accounts?provider=${encodeURIComponent(provider)}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const accounts = (data.accounts || []).filter(a => !a.deletedAt);
+    State.providerAccounts[provider] = accounts;
+    const saved = parseInt(localStorage.getItem(providerAccountStorageKey(provider)), 10);
+    State.providerAccount[provider] = accounts.some(a => a.id === saved) ? saved : (accounts[0] || {}).id || null;
+    renderProviderAccountPicker();
+  } catch (_) { /* A single-account install does not need a visible picker. */ }
+}
+
+function renderProviderAccountPicker() {
+  const dropdown = document.getElementById('provider-account-dropdown');
+  const menu = document.getElementById('provider-account-menu');
+  const label = document.getElementById('provider-account-label');
+  const provider = getCurrentProvider();
+  if (!dropdown || !menu || !label) return;
+  const accounts = State.providerAccounts[provider] || [];
+  if ((provider !== 'anthropic' && provider !== 'antigravity') || accounts.length <= 1) { dropdown.style.display = 'none'; return; }
+  dropdown.style.display = '';
+  menu.innerHTML = '';
+  for (const account of accounts) {
+    const item = document.createElement('li');
+    const selected = account.id === State.providerAccount[provider];
+    item.className = 'codex-profile-item' + (selected ? ' active' : '');
+    item.textContent = account.alias || account.name;
+    item.setAttribute('role', 'option');
+    item.setAttribute('aria-selected', selected ? 'true' : 'false');
+    item.addEventListener('click', () => {
+      State.providerAccount[provider] = account.id;
+      localStorage.setItem(providerAccountStorageKey(provider), account.id);
+      renderProviderAccountPicker();
+      closeProviderAccountPicker();
+      refreshAll();
+    });
+    menu.appendChild(item);
+  }
+  const rename = document.createElement('li');
+  rename.className = 'codex-profile-item provider-account-alias-action';
+  rename.textContent = 'Edit display alias…';
+  rename.setAttribute('role', 'option');
+  rename.addEventListener('click', async () => {
+    const active = accounts.find(a => a.id === State.providerAccount[provider]);
+    if (!active) return;
+    const alias = window.prompt('Display alias (your credential folder name stays unchanged)', active.alias || active.name);
+    if (alias === null || !alias.trim() || alias.trim() === (active.alias || active.name)) return;
+    try {
+      const res = await authFetch(`${API_BASE}/api/accounts?provider=${encodeURIComponent(provider)}`, { method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({account_id: active.id, alias: alias.trim()}) });
+      if (!res.ok) throw new Error('Unable to save alias');
+      await loadProviderAccounts(provider);
+    } catch (_) { window.alert('Could not save that display alias. Use 1-64 characters.'); }
+    closeProviderAccountPicker();
+  });
+  menu.appendChild(rename);
+  const active = accounts.find(a => a.id === State.providerAccount[provider]);
+  label.textContent = (active && (active.alias || active.name)) || 'Account';
+}
+
+function closeProviderAccountPicker() {
+  const trigger = document.getElementById('provider-account-trigger');
+  const menu = document.getElementById('provider-account-menu');
+  if (trigger) trigger.setAttribute('aria-expanded', 'false');
+  if (menu) menu.classList.remove('open');
+}
+
+function initProviderAccountPicker() {
+  const trigger = document.getElementById('provider-account-trigger');
+  const menu = document.getElementById('provider-account-menu');
+  if (!trigger || !menu) return;
+  trigger.addEventListener('click', e => { e.stopPropagation(); const open = menu.classList.toggle('open'); trigger.setAttribute('aria-expanded', open ? 'true' : 'false'); });
+  document.addEventListener('click', e => { if (!e.target.closest('#provider-account-dropdown')) closeProviderAccountPicker(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeProviderAccountPicker(); });
 }
 
 // ── Insight Visibility (DB-persisted) ──
@@ -1568,7 +1656,7 @@ async function loadAnthropicModalChart(quotaName) {
 
 async function loadAnthropicModalCycles(quotaName) {
   try {
-    const res = await authFetch(`${API_BASE}/api/cycles?type=${quotaName}&provider=anthropic`);
+    const res = await authFetch(`${API_BASE}/api/cycles?type=${quotaName}&provider=anthropic${providerAccountParam('anthropic')}`);
     if (!res.ok) return;
     const cycles = await res.json();
     const tbody = document.getElementById('modal-cycles-tbody');
@@ -2535,7 +2623,7 @@ async function loadAntigravityModalChart(groupKey) {
 
 async function loadAntigravityModalCycles(groupKey) {
   try {
-    const res = await authFetch(`${API_BASE}/api/cycle-overview?groupBy=${groupKey}&provider=antigravity`);
+    const res = await authFetch(`${API_BASE}/api/cycle-overview?groupBy=${groupKey}&provider=antigravity${providerAccountParam('antigravity')}`);
     if (!res.ok) return;
     const data = await res.json();
     const tbody = document.getElementById('modal-cycles-tbody');
@@ -7451,7 +7539,7 @@ async function fetchCycles() {
     // Calculate limit based on range: 1 minute polling = rangeDays * 24 * 60 records
     // Cap at 50000 for performance (enough for ~35 days of 1-minute data)
     const dynamicLimit = Math.min(50000, rangeDays * 24 * 60);
-    const accountParam = provider === 'codex' ? codexAccountParam() : provider === 'minimax' ? minimaxAccountParam() : '';
+    const accountParam = provider === 'codex' ? codexAccountParam() : provider === 'minimax' ? minimaxAccountParam() : providerAccountParam(provider);
     const url = `/api/logging-history?provider=${provider}&limit=${dynamicLimit}&range=${rangeDays}${accountParam}`;
     try {
       const res = await authFetch(url);
@@ -12128,6 +12216,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateMiniMaxAccountTabsVisibility();
   }
   initMiniMaxAccountTabs();
+  initProviderAccountPicker();
+  if (getCurrentProvider() === 'anthropic' || getCurrentProvider() === 'antigravity') {
+    await loadProviderAccounts(getCurrentProvider());
+  }
   loadAPIIntegrationsPreferences();
 
   initTheme();

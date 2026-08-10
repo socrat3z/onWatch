@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/onllm-dev/onwatch/v2/internal/account"
 	"github.com/onllm-dev/onwatch/v2/internal/api"
 	"github.com/onllm-dev/onwatch/v2/internal/notify"
 	"github.com/onllm-dev/onwatch/v2/internal/store"
@@ -30,6 +31,10 @@ type CodexProfile struct {
 		IDToken      string `json:"id_token"`
 	} `json:"tokens"`
 	APIKey string `json:"api_key,omitempty"`
+	// SourcePath is set for a native CODEX_HOME-style auth.json. It is never
+	// serialized into legacy onWatch profile files.
+	SourcePath string `json:"-"`
+	Native     bool   `json:"-"`
 }
 
 // CodexAgentInstance represents a running agent for a specific profile.
@@ -58,6 +63,7 @@ type CodexAgentManager struct {
 
 	// For detecting new profiles
 	profilesDir      string
+	authRoot         string
 	scanInterval     time.Duration
 	lastScanProfiles map[string]time.Time // profile name -> modified time
 }
@@ -83,6 +89,11 @@ func NewCodexAgentManager(store *store.Store, tracker *tracker.CodexTracker, int
 func (m *CodexAgentManager) SetProfilesDir(dir string) {
 	m.profilesDir = dir
 }
+
+// SetAuthRoot enables discovery of native Codex homes laid out as
+// <root>/<alias>/auth.json. This is the format used by the container login
+// service and keeps refresh-token write-back inside the selected account home.
+func (m *CodexAgentManager) SetAuthRoot(root string) { m.authRoot = strings.TrimSpace(root) }
 
 // SetNotifier sets the notification engine for all agents.
 func (m *CodexAgentManager) SetNotifier(n *notify.NotificationEngine) {
@@ -170,36 +181,76 @@ func (m *CodexAgentManager) Run(ctx context.Context) error {
 
 // loadAndStartProfiles loads all profiles from disk and starts agents for each.
 func (m *CodexAgentManager) loadAndStartProfiles() error {
-	if m.profilesDir == "" {
+	if m.profilesDir == "" && m.authRoot == "" {
 		return fmt.Errorf("profiles directory not set")
 	}
 
-	entries, err := os.ReadDir(m.profilesDir)
-	if os.IsNotExist(err) {
-		return nil // No profiles directory yet
+	if m.profilesDir != "" {
+		entries, err := os.ReadDir(m.profilesDir)
+		if os.IsNotExist(err) {
+			return m.loadAndStartNativeAccounts() // No legacy profiles yet.
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read profiles directory: %w", err)
+		}
+
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+
+			profilePath := filepath.Join(m.profilesDir, entry.Name())
+			if err := m.loadAndStartProfile(profilePath); err != nil {
+				m.logger.Warn("failed to load profile", "path", profilePath, "error", err)
+				continue
+			}
+
+			// Track file modification time
+			if info, err := entry.Info(); err == nil {
+				profileName := strings.TrimSuffix(entry.Name(), ".json")
+				m.lastScanProfiles[profileName] = info.ModTime()
+			}
+		}
+
 	}
+	return m.loadAndStartNativeAccounts()
+}
+
+func (m *CodexAgentManager) loadAndStartNativeAccounts() error {
+	if m.authRoot == "" {
+		return nil
+	}
+	names, err := account.ListDirectories(m.authRoot)
 	if err != nil {
-		return fmt.Errorf("failed to read profiles directory: %w", err)
+		return fmt.Errorf("read Codex auth root: %w", err)
 	}
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-
-		profilePath := filepath.Join(m.profilesDir, entry.Name())
-		if err := m.loadAndStartProfile(profilePath); err != nil {
-			m.logger.Warn("failed to load profile", "path", profilePath, "error", err)
-			continue
-		}
-
-		// Track file modification time
-		if info, err := entry.Info(); err == nil {
-			profileName := strings.TrimSuffix(entry.Name(), ".json")
-			m.lastScanProfiles[profileName] = info.ModTime()
+	for _, name := range names {
+		if err := m.loadAndStartNativeAccount(name); err != nil {
+			m.logger.Warn("failed to load native Codex account", "account", name, "error", err)
 		}
 	}
+	return nil
+}
 
+func (m *CodexAgentManager) loadAndStartNativeAccount(name string) error {
+	if err := account.ValidateName(name); err != nil {
+		return err
+	}
+	authPath := filepath.Join(m.authRoot, name, "auth.json")
+	creds := api.ReadCodexCredentialsFile(authPath)
+	if creds == nil {
+		return fmt.Errorf("no usable auth.json")
+	}
+	profile := CodexProfile{Name: name, AccountID: creds.AccountID, UserID: creds.UserID, APIKey: creds.APIKey, SourcePath: authPath, Native: true}
+	profile.Tokens.AccessToken, profile.Tokens.RefreshToken, profile.Tokens.IDToken = creds.AccessToken, creds.RefreshToken, creds.IDToken
+	if err := m.loadAndStartProfileValue(profile); err != nil {
+		return err
+	}
+	if info, err := os.Stat(authPath); err == nil {
+		m.mu.Lock()
+		m.lastScanProfiles["native:"+name] = info.ModTime()
+		m.mu.Unlock()
+	}
 	return nil
 }
 
@@ -224,6 +275,7 @@ func (m *CodexAgentManager) loadAndStartProfile(path string) error {
 	if profile.UserID == "" {
 		profile.UserID = api.ParseIDTokenUserID(profile.Tokens.IDToken)
 	}
+	profile.SourcePath = path
 
 	// Check if we already have this profile running
 	m.mu.RLock()
@@ -234,6 +286,16 @@ func (m *CodexAgentManager) loadAndStartProfile(path string) error {
 		return nil // Already running
 	}
 
+	return m.loadAndStartProfileValue(profile)
+}
+
+func (m *CodexAgentManager) loadAndStartProfileValue(profile CodexProfile) error {
+	m.mu.RLock()
+	_, exists := m.instances[profile.Name]
+	m.mu.RUnlock()
+	if exists {
+		return nil
+	}
 	return m.startAgentForProfile(profile)
 }
 
@@ -472,13 +534,23 @@ func (m *CodexAgentManager) startAgentForProfile(profile CodexProfile) error {
 	// Named profiles are fully scoped to their profile JSON file and NEVER
 	// fall back to the global CODEX_HOME/auth.json at runtime. This prevents
 	// auth contamination between profiles (see issue #55).
-	profilePath := filepath.Join(m.profilesDir, profile.Name+".json")
-	isDefaultProfile := profile.Name == "default"
+	profilePath := profile.SourcePath
+	if profilePath == "" {
+		profilePath = filepath.Join(m.profilesDir, profile.Name+".json")
+	}
+	isDefaultProfile := profile.Name == "default" && !profile.Native
 
 	agent.SetTokenRefresh(func() string {
 		if isDefaultProfile {
 			if systemCreds := api.DetectCodexCredentials(m.logger); systemCreds != nil {
 				return systemCreds.AccessToken
+			}
+			return profile.Tokens.AccessToken
+		}
+
+		if profile.Native {
+			if nativeCreds := api.ReadCodexCredentialsFile(profilePath); nativeCreds != nil {
+				return nativeCreds.AccessToken
 			}
 			return profile.Tokens.AccessToken
 		}
@@ -518,6 +590,10 @@ func (m *CodexAgentManager) startAgentForProfile(profile CodexProfile) error {
 			return api.DetectCodexCredentials(m.logger)
 		}
 
+		if profile.Native {
+			return api.ReadCodexCredentialsFile(profilePath)
+		}
+
 		// Named profiles: prefer profile file, fall back to global auth.json
 		// only if account_id matches. Safe because refresh writes to profile file.
 		profileCreds := readCodexProfileCredentials(profilePath)
@@ -553,15 +629,25 @@ func (m *CodexAgentManager) startAgentForProfile(profile CodexProfile) error {
 			return api.WriteCredentialsBySource(source, accessToken, refreshToken, idToken, expiresIn)
 		}
 
-		// Named profiles: save refreshed tokens to the profile file only
-		if err := saveTokensToProfile(profilePath, accessToken, refreshToken, idToken, m.logger); err != nil {
+		// Named profiles save only to their own credential file.
+		var err error
+		if profile.Native {
+			err = api.WriteCodexCredentialsFile(profilePath, accessToken, refreshToken, idToken)
+		} else {
+			err = saveTokensToProfile(profilePath, accessToken, refreshToken, idToken, m.logger)
+		}
+		if err != nil {
 			return err
 		}
 
 		// Update scanner's last-known mod time so it doesn't restart this agent
 		if info, statErr := os.Stat(profilePath); statErr == nil {
 			m.mu.Lock()
-			m.lastScanProfiles[profile.Name] = info.ModTime()
+			key := profile.Name
+			if profile.Native {
+				key = "native:" + profile.Name
+			}
+			m.lastScanProfiles[key] = info.ModTime()
 			m.mu.Unlock()
 		}
 		return nil
@@ -666,48 +752,50 @@ func (m *CodexAgentManager) profileScanner() {
 
 // scanForProfileChanges checks for new or modified profiles.
 func (m *CodexAgentManager) scanForProfileChanges() {
-	if m.profilesDir == "" {
+	if m.profilesDir == "" && m.authRoot == "" {
 		return
 	}
 
-	entries, err := os.ReadDir(m.profilesDir)
-	if err != nil {
-		return
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
+	if m.profilesDir != "" {
+		entries, err := os.ReadDir(m.profilesDir)
+		if err != nil && !os.IsNotExist(err) {
+			return
 		}
 
-		profileName := strings.TrimSuffix(entry.Name(), ".json")
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-
-		m.mu.RLock()
-		lastMod, known := m.lastScanProfiles[profileName]
-		m.mu.RUnlock()
-		if !known || info.ModTime().After(lastMod) {
-			// New or modified profile
-			profilePath := filepath.Join(m.profilesDir, entry.Name())
-
-			if known {
-				// Profile was modified - stop old agent and restart
-				m.logger.Info("profile modified, restarting agent", "profile", profileName)
-				m.stopAgent(profileName)
-			} else {
-				m.logger.Info("new profile detected", "profile", profileName)
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
 			}
 
-			if err := m.loadAndStartProfile(profilePath); err != nil {
-				m.logger.Warn("failed to start agent for profile", "profile", profileName, "error", err)
+			profileName := strings.TrimSuffix(entry.Name(), ".json")
+			info, err := entry.Info()
+			if err != nil {
+				continue
 			}
 
-			m.mu.Lock()
-			m.lastScanProfiles[profileName] = info.ModTime()
-			m.mu.Unlock()
+			m.mu.RLock()
+			lastMod, known := m.lastScanProfiles[profileName]
+			m.mu.RUnlock()
+			if !known || info.ModTime().After(lastMod) {
+				// New or modified profile
+				profilePath := filepath.Join(m.profilesDir, entry.Name())
+
+				if known {
+					// Profile was modified - stop old agent and restart
+					m.logger.Info("profile modified, restarting agent", "profile", profileName)
+					m.stopAgent(profileName)
+				} else {
+					m.logger.Info("new profile detected", "profile", profileName)
+				}
+
+				if err := m.loadAndStartProfile(profilePath); err != nil {
+					m.logger.Warn("failed to start agent for profile", "profile", profileName, "error", err)
+				}
+
+				m.mu.Lock()
+				m.lastScanProfiles[profileName] = info.ModTime()
+				m.mu.Unlock()
+			}
 		}
 	}
 
@@ -722,6 +810,14 @@ func (m *CodexAgentManager) scanForProfileChanges() {
 	m.mu.RUnlock()
 
 	for _, name := range profileNames {
+		if m.authRoot != "" {
+			if _, err := os.Stat(filepath.Join(m.authRoot, name, "auth.json")); err == nil {
+				continue
+			}
+		}
+		if m.profilesDir == "" {
+			continue
+		}
 		profilePath := filepath.Join(m.profilesDir, name+".json")
 		if _, err := os.Stat(profilePath); os.IsNotExist(err) {
 			m.logger.Info("profile deleted, stopping agent", "profile", name)
@@ -735,6 +831,55 @@ func (m *CodexAgentManager) scanForProfileChanges() {
 					m.logger.Warn("failed to mark provider account deleted", "profile", name, "error", err)
 				}
 			}
+		}
+	}
+	m.scanForNativeAccountChanges()
+}
+
+func (m *CodexAgentManager) scanForNativeAccountChanges() {
+	if m.authRoot == "" {
+		return
+	}
+	names, err := account.ListDirectories(m.authRoot)
+	if err != nil {
+		return
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		seen[name] = true
+		path := filepath.Join(m.authRoot, name, "auth.json")
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		key := "native:" + name
+		m.mu.RLock()
+		last, known := m.lastScanProfiles[key]
+		m.mu.RUnlock()
+		if !known || info.ModTime().After(last) {
+			if known {
+				m.stopAgent(name)
+			}
+			if err := m.loadAndStartNativeAccount(name); err != nil {
+				m.logger.Warn("failed to reload native Codex account", "account", name, "error", err)
+			}
+		}
+	}
+	m.mu.RLock()
+	var missing []string
+	for key := range m.lastScanProfiles {
+		if strings.HasPrefix(key, "native:") && !seen[strings.TrimPrefix(key, "native:")] {
+			missing = append(missing, strings.TrimPrefix(key, "native:"))
+		}
+	}
+	m.mu.RUnlock()
+	for _, name := range missing {
+		m.stopAgent(name)
+		m.mu.Lock()
+		delete(m.lastScanProfiles, "native:"+name)
+		m.mu.Unlock()
+		if err := m.store.MarkProviderAccountDeleted("codex", name); err != nil {
+			m.logger.Warn("failed to mark removed native Codex account", "account", name, "error", err)
 		}
 	}
 }
@@ -768,6 +913,11 @@ func (m *CodexAgentManager) markOrphanedAccountsDeleted() {
 			profilePath := filepath.Join(m.profilesDir, acc.Name+".json")
 			if _, statErr := os.Stat(profilePath); statErr == nil {
 				continue // file exists on disk, just failed to load - don't mark deleted
+			}
+		}
+		if m.authRoot != "" {
+			if _, statErr := os.Stat(filepath.Join(m.authRoot, acc.Name, "auth.json")); statErr == nil {
+				continue // native account exists but its auth file failed to parse
 			}
 		}
 		m.logger.Info("marking orphaned Codex account as deleted", "name", acc.Name, "id", acc.ID)

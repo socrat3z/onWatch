@@ -341,6 +341,7 @@ func (s *Store) createTables() error {
 		-- Anthropic-specific tables
 		CREATE TABLE IF NOT EXISTS anthropic_snapshots (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id INTEGER NOT NULL DEFAULT 0,
 			captured_at TEXT NOT NULL,
 			raw_json TEXT NOT NULL DEFAULT '',
 			quota_count INTEGER NOT NULL DEFAULT 0
@@ -357,6 +358,7 @@ func (s *Store) createTables() error {
 
 		CREATE TABLE IF NOT EXISTS anthropic_reset_cycles (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id INTEGER NOT NULL DEFAULT 0,
 			quota_name TEXT NOT NULL,
 			cycle_start TEXT NOT NULL,
 			cycle_end TEXT,
@@ -484,6 +486,7 @@ func (s *Store) createTables() error {
 		-- Antigravity-specific tables
 		CREATE TABLE IF NOT EXISTS antigravity_snapshots (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id INTEGER NOT NULL DEFAULT 0,
 			captured_at TEXT NOT NULL,
 			email TEXT,
 			plan_name TEXT,
@@ -508,6 +511,7 @@ func (s *Store) createTables() error {
 
 		CREATE TABLE IF NOT EXISTS antigravity_reset_cycles (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id INTEGER NOT NULL DEFAULT 0,
 			model_id TEXT NOT NULL,
 			cycle_start TEXT NOT NULL,
 			cycle_end TEXT,
@@ -555,7 +559,7 @@ func (s *Store) createTables() error {
 		CREATE INDEX IF NOT EXISTS idx_antigravity_model_values_model_id ON antigravity_model_values(model_id);
 		CREATE INDEX IF NOT EXISTS idx_antigravity_model_values_model_snapshot ON antigravity_model_values(model_id, snapshot_id);
 		CREATE INDEX IF NOT EXISTS idx_antigravity_cycles_model_start ON antigravity_reset_cycles(model_id, cycle_start);
-		CREATE UNIQUE INDEX IF NOT EXISTS idx_antigravity_cycles_model_active_unique ON antigravity_reset_cycles(model_id) WHERE cycle_end IS NULL;
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_antigravity_cycles_model_active_unique ON antigravity_reset_cycles(account_id, model_id) WHERE cycle_end IS NULL;
 
 		-- MiniMax-specific tables
 		CREATE TABLE IF NOT EXISTS minimax_snapshots (
@@ -1032,6 +1036,39 @@ func (s *Store) migrateSchema() error {
 	`); err != nil {
 		if !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("failed to add external_id to provider_accounts: %w", err)
+		}
+	}
+
+	// Anthropic and Antigravity now share the same account-scoped persistence
+	// contract as Codex and MiniMax. Legacy rows are assigned to their provider's
+	// real default account ID atomically. The placeholder zero makes this safe on
+	// installations where account IDs are global and therefore non-deterministic.
+	for _, table := range []string{"anthropic_snapshots", "anthropic_reset_cycles", "antigravity_snapshots", "antigravity_reset_cycles"} {
+		if _, err := s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") && !strings.Contains(err.Error(), "no such table") {
+			return fmt.Errorf("failed to add account_id to %s: %w", table, err)
+		}
+	}
+	if err := s.backfillProviderAccount("anthropic", []string{"anthropic_snapshots", "anthropic_reset_cycles"}); err != nil {
+		return err
+	}
+	if err := s.backfillProviderAccount("antigravity", []string{"antigravity_snapshots", "antigravity_reset_cycles"}); err != nil {
+		return err
+	}
+	// The original Antigravity unique index did not include account_id, which
+	// would reject identical model names from two independent accounts.
+	if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_antigravity_cycles_model_active_unique`); err != nil {
+		return fmt.Errorf("failed to replace antigravity active-cycle index: %w", err)
+	}
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_anthropic_snapshots_account ON anthropic_snapshots(account_id, captured_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_anthropic_cycles_account ON anthropic_reset_cycles(account_id, quota_name, cycle_start DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_antigravity_snapshots_account ON antigravity_snapshots(account_id, captured_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_antigravity_cycles_account ON antigravity_reset_cycles(account_id, model_id, cycle_start DESC)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_antigravity_cycles_model_active_unique ON antigravity_reset_cycles(account_id, model_id) WHERE cycle_end IS NULL`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "no such table") {
+			return fmt.Errorf("failed to create multi-account index: %w", err)
 		}
 	}
 

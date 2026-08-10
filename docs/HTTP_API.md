@@ -1,5 +1,21 @@
 # HTTP API
 
+## Provider account aliases
+
+For discovered Anthropic and Antigravity accounts, use `GET /api/accounts?provider=anthropic`
+or `GET /api/accounts?provider=antigravity` to list account IDs, credential-folder
+names, display aliases, and deletion state. Update only the display label with:
+
+```http
+PATCH /api/accounts?provider=anthropic
+Content-Type: application/json
+
+{"account_id": 12, "alias": "Acme work"}
+```
+
+Aliases are non-secret metadata. They never move credential files or restore a
+deleted account, which keeps account discovery and historical telemetry safe.
+
 onWatch serves the same authenticated `/api/*` endpoints its dashboard uses, so
 anything the dashboard shows can be scripted. The full endpoint list lives in
 the [README](../README.md#api-endpoints); this document covers the read

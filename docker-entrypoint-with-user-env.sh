@@ -16,6 +16,18 @@ set -eu
 # Antigravity has no login subcommand: `agy` authenticates on first run and
 # logs out through the in-TUI /logout command, so bare `agy` is allowlisted.
 #
+# Validate the account before any privileged work or dry-run dispatch so a bad
+# alias can never create filesystem state.
+account="${ONWATCH_LOGIN_ACCOUNT:-default}"
+case "$account" in
+  [a-z0-9][a-z0-9_-]* ) ;;
+  *) echo "onwatch: invalid login account '$account'" >&2; exit 64 ;;
+esac
+if [ "${#account}" -gt 32 ]; then
+  echo "onwatch: invalid login account '$account'" >&2
+  exit 64
+fi
+
 # Checked before any privileged work so scripts/test-entrypoint-dispatch.sh can
 # exercise it as an ordinary user with ONWATCH_ENTRYPOINT_DRY_RUN=1.
 case "${1:-}" in
@@ -46,18 +58,34 @@ case "${1:-}" in
     ;;
 esac
 
+case "${1:-}" in
+  codex) target_home=/home/nonroot; target_codex_home="/auth/codex/$account" ;;
+  claude) target_home="/auth/claude/$account"; target_codex_home= ;;
+  agy) target_home="/auth/antigravity/$account"; target_codex_home= ;;
+  *) target_home=/home/nonroot; target_codex_home="/auth/codex/default" ;;
+esac
+
 # Named Docker volumes are initially root-owned. The Antigravity CLI writes its
 # profile, Codex writes auth.json, Claude Code writes .credentials.json, and
 # GNOME Keyring writes encrypted session state - all below HOME.
-mkdir -p /data /home/nonroot/.gemini /home/nonroot/.codex /home/nonroot/.claude \
-  /home/nonroot/.local/share/keyrings /tmp/onwatch-runtime
-chown -R nonroot:nonroot /data /home/nonroot /tmp/onwatch-runtime
+mkdir -p /data /auth/codex /auth/claude /auth/antigravity /tmp/onwatch-runtime/antigravity
+# Idempotent, non-overwriting migration from the former one-account volume
+# layouts. Old files remain available as a recovery copy until a later release.
+if [ -f /auth/codex/auth.json ] && [ ! -e /auth/codex/default/auth.json ]; then
+  mkdir -p /auth/codex/default
+  cp -a /auth/codex/auth.json /auth/codex/default/
+  if [ -f /auth/codex/config.toml ]; then cp -a /auth/codex/config.toml /auth/codex/default/; fi
+fi
+if [ -f /auth/claude/.credentials.json ] && [ ! -e /auth/claude/default/.claude/.credentials.json ]; then mkdir -p /auth/claude/default/.claude && cp -a /auth/claude/.credentials.json /auth/claude/default/.claude/; fi
+if [ -d /legacy/antigravity-profile ] && [ ! -d /auth/antigravity/default/.gemini ]; then mkdir -p /auth/antigravity/default && cp -a /legacy/antigravity-profile /auth/antigravity/default/.gemini; fi
+if [ -d /legacy/antigravity-keyring ] && [ ! -d /auth/antigravity/default/.local/share/keyrings ]; then mkdir -p /auth/antigravity/default/.local/share && cp -a /legacy/antigravity-keyring /auth/antigravity/default/.local/share/keyrings; fi
+chown -R nonroot:nonroot /data /auth /tmp/onwatch-runtime
 
 exec gosu nonroot sh -c '
   set -eu
 
-  export HOME=/home/nonroot
-  export XDG_RUNTIME_DIR=/tmp/onwatch-runtime
+  export HOME="'$target_home'"
+  export XDG_RUNTIME_DIR="/tmp/onwatch-runtime/antigravity/'$account'"
   mkdir -p "$XDG_RUNTIME_DIR"
   chmod 0700 "$XDG_RUNTIME_DIR"
 
@@ -73,7 +101,7 @@ exec gosu nonroot sh -c '
   # Seeding the config once turns off session history, so the auth volume
   # accumulates no transcripts. See docs/WITH_USER_ENV.md#volume-reference for the
   # full list of files this volume ends up holding.
-  export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+  export CODEX_HOME="'${target_codex_home:-/auth/codex/default}'"
   if [ ! -e "$CODEX_HOME/config.toml" ]; then
     mkdir -p "$CODEX_HOME"
     cat > "$CODEX_HOME/config.toml" <<CODEX_CONFIG

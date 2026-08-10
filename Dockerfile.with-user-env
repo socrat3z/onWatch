@@ -169,9 +169,8 @@ RUN apt-get update && \
 
 RUN groupadd --gid 65532 nonroot && \
     useradd --uid 65532 --gid nonroot --create-home --home-dir /home/nonroot --shell /usr/sbin/nologin nonroot && \
-    mkdir -p /data /home/nonroot/.gemini /home/nonroot/.codex /home/nonroot/.claude \
-        /home/nonroot/.local/share/keyrings /tmp/onwatch-runtime && \
-    chown -R nonroot:nonroot /data /home/nonroot /tmp/onwatch-runtime
+    mkdir -p /data /auth/codex /auth/claude /auth/antigravity /tmp/onwatch-runtime/antigravity && \
+    chown -R nonroot:nonroot /data /auth /home/nonroot /tmp/onwatch-runtime
 
 # Read-only, root-owned: the CLIs live outside every writable volume.
 COPY --from=cli-installer /opt/provider-cli /opt/provider-cli
@@ -189,7 +188,10 @@ ENV ONWATCH_DB_PATH=/data/onwatch.db \
     ONWATCH_PORT=9211 \
     ONWATCH_LOG_LEVEL=info \
     AGY_CLI_DISABLE_AUTO_UPDATE=true \
-    CODEX_HOME=/home/nonroot/.codex \
+	CODEX_AUTH_ROOT=/auth/codex \
+    ANTHROPIC_AUTH_ROOT=/auth/claude \
+    ANTIGRAVITY_AUTH_ROOT=/auth/antigravity \
+    CODEX_HOME=/auth/codex/default \
     DISABLE_AUTOUPDATER=1 \
     DISABLE_TELEMETRY=1 \
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \

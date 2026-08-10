@@ -65,6 +65,11 @@ expect_rejected agy --help
 expect_rejected agy install
 expect_rejected agy plugin list
 
+echo "== account validation =="
+ONWATCH_LOGIN_ACCOUNT=work expect_ok "cli: codex login status" codex login status
+ONWATCH_LOGIN_ACCOUNT=../escape expect_rejected codex login status
+ONWATCH_LOGIN_ACCOUNT=UPPER expect_rejected claude auth login
+
 echo "== non-CLI arguments still reach the daemon =="
 expect_ok "onwatch: "                         # bare daemon start
 expect_ok "onwatch: --version"                --version

@@ -313,27 +313,37 @@ func (m *Metrics) scrapeAPIIntegrations(s *store.Store, staleThreshold time.Dura
 
 func (m *Metrics) scrapeAnthropic(s *store.Store, staleThreshold time.Duration) {
 	method := "anthropic"
-
-	snap, err := s.QueryLatestAnthropic()
+	accounts, err := s.QueryProviderAccounts(method)
 	if err != nil {
 		m.scrapeErrorsTotal.WithLabelValues(method, "query_failed").Inc()
 		return
 	}
-	if snap == nil {
-		return
-	}
-
-	m.recordLastCycleAge(method, defaultAccountID, snap.CapturedAt, staleThreshold)
-
-	for _, v := range snap.Quotas {
-		labels := prometheus.Labels{
-			"provider":   method,
-			"quota_type": v.Name,
-			"account_id": defaultAccountID,
+	if len(accounts) == 0 {
+		defaultAccount, defaultErr := s.ResolveDefaultProviderAccount(method)
+		if defaultErr != nil {
+			m.scrapeErrorsTotal.WithLabelValues(method, "query_failed").Inc()
+			return
 		}
-		m.quotaUtilization.With(labels).Set(v.Utilization)
-		if v.ResetsAt != nil && !v.ResetsAt.IsZero() {
-			m.quotaResetTimestamp.With(labels).Set(float64(v.ResetsAt.Unix()))
+		accounts = []store.ProviderAccount{*defaultAccount}
+	}
+	for _, account := range accounts {
+		accountID := strconv.FormatInt(account.ID, 10)
+		m.accountInfo.WithLabelValues(method, accountID, store.ProviderAccountAlias(account)).Set(1)
+		snap, queryErr := s.QueryLatestAnthropic(account.ID)
+		if queryErr != nil {
+			m.scrapeErrorsTotal.WithLabelValues(method, "query_failed").Inc()
+			continue
+		}
+		if snap == nil {
+			continue
+		}
+		m.recordLastCycleAge(method, accountID, snap.CapturedAt, staleThreshold)
+		for _, v := range snap.Quotas {
+			labels := prometheus.Labels{"provider": method, "quota_type": v.Name, "account_id": accountID}
+			m.quotaUtilization.With(labels).Set(v.Utilization)
+			if v.ResetsAt != nil && !v.ResetsAt.IsZero() {
+				m.quotaResetTimestamp.With(labels).Set(float64(v.ResetsAt.Unix()))
+			}
 		}
 	}
 }
@@ -485,36 +495,41 @@ func (m *Metrics) scrapeMiniMax(s *store.Store, staleThreshold time.Duration) {
 
 func (m *Metrics) scrapeAntigravity(s *store.Store, staleThreshold time.Duration) {
 	method := "antigravity"
-
-	snap, err := s.QueryLatestAntigravity()
+	accounts, err := s.QueryProviderAccounts(method)
 	if err != nil {
 		m.scrapeErrorsTotal.WithLabelValues(method, "query_failed").Inc()
 		return
 	}
-	if snap == nil {
-		return
-	}
-
-	m.recordLastCycleAge(method, defaultAccountID, snap.CapturedAt, staleThreshold)
-
-	for _, v := range snap.Models {
-		labels := prometheus.Labels{
-			"provider":   method,
-			"quota_type": v.ModelID,
-			"account_id": defaultAccountID,
+	if len(accounts) == 0 {
+		defaultAccount, defaultErr := s.ResolveDefaultProviderAccount(method)
+		if defaultErr != nil {
+			m.scrapeErrorsTotal.WithLabelValues(method, "query_failed").Inc()
+			return
 		}
-		m.quotaUtilization.With(labels).Set(100 - v.RemainingPercent)
-		if v.ResetTime != nil && !v.ResetTime.IsZero() {
-			m.quotaResetTimestamp.With(labels).Set(float64(v.ResetTime.Unix()))
-		}
+		accounts = []store.ProviderAccount{*defaultAccount}
 	}
-
-	if snap.PromptCredits > 0 {
-		m.creditsBalance.With(prometheus.Labels{
-			"provider":   method,
-			"account_id": defaultAccountID,
-			"unit":       "prompt_credits",
-		}).Set(snap.PromptCredits)
+	for _, account := range accounts {
+		accountID := strconv.FormatInt(account.ID, 10)
+		m.accountInfo.WithLabelValues(method, accountID, store.ProviderAccountAlias(account)).Set(1)
+		snap, queryErr := s.QueryLatestAntigravity(account.ID)
+		if queryErr != nil {
+			m.scrapeErrorsTotal.WithLabelValues(method, "query_failed").Inc()
+			continue
+		}
+		if snap == nil {
+			continue
+		}
+		m.recordLastCycleAge(method, accountID, snap.CapturedAt, staleThreshold)
+		for _, v := range snap.Models {
+			labels := prometheus.Labels{"provider": method, "quota_type": v.ModelID, "account_id": accountID}
+			m.quotaUtilization.With(labels).Set(100 - v.RemainingPercent)
+			if v.ResetTime != nil && !v.ResetTime.IsZero() {
+				m.quotaResetTimestamp.With(labels).Set(float64(v.ResetTime.Unix()))
+			}
+		}
+		if snap.PromptCredits > 0 {
+			m.creditsBalance.With(prometheus.Labels{"provider": method, "account_id": accountID, "unit": "prompt_credits"}).Set(snap.PromptCredits)
+		}
 	}
 }
 

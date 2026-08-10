@@ -15,11 +15,19 @@ import (
 type AnthropicTracker struct {
 	store      *store.Store
 	logger     *slog.Logger
+	accountID  int64
 	lastValues map[string]float64 // quota_name -> last utilization %
 	lastResets map[string]string  // quota_name -> last resets_at string
 	hasLast    bool
 
 	onReset func(quotaName string) // called when a quota reset is detected
+}
+
+// NewAnthropicTrackerForAccount isolates reset-cycle state for one account.
+func NewAnthropicTrackerForAccount(store *store.Store, logger *slog.Logger, accountID int64) *AnthropicTracker {
+	t := NewAnthropicTracker(store, logger)
+	t.accountID = accountID
+	return t
 }
 
 // SetOnReset registers a callback that is invoked when a quota reset is detected.
@@ -75,18 +83,18 @@ func (t *AnthropicTracker) processQuota(quota api.AnthropicQuota, capturedAt tim
 	quotaName := quota.Name
 	currentUtil := quota.Utilization
 
-	cycle, err := t.store.QueryActiveAnthropicCycle(quotaName)
+	cycle, err := t.store.QueryActiveAnthropicCycle(quotaName, t.accountID)
 	if err != nil {
 		return fmt.Errorf("failed to query active cycle: %w", err)
 	}
 
 	if cycle == nil {
 		// First snapshot for this quota -- create new cycle
-		_, err := t.store.CreateAnthropicCycle(quotaName, capturedAt, quota.ResetsAt)
+		_, err := t.store.CreateAnthropicCycle(quotaName, capturedAt, quota.ResetsAt, t.accountID)
 		if err != nil {
 			return fmt.Errorf("failed to create cycle: %w", err)
 		}
-		if err := t.store.UpdateAnthropicCycle(quotaName, currentUtil, 0); err != nil {
+		if err := t.store.UpdateAnthropicCycle(quotaName, currentUtil, 0, t.accountID); err != nil {
 			return fmt.Errorf("failed to set initial peak: %w", err)
 		}
 		t.lastValues[quotaName] = currentUtil
@@ -156,15 +164,15 @@ func (t *AnthropicTracker) processQuota(quota api.AnthropicQuota, capturedAt tim
 		}
 
 		// Close old cycle at the actual reset time
-		if err := t.store.CloseAnthropicCycle(quotaName, cycleEndTime, cycle.PeakUtilization, cycle.TotalDelta); err != nil {
+		if err := t.store.CloseAnthropicCycle(quotaName, cycleEndTime, cycle.PeakUtilization, cycle.TotalDelta, t.accountID); err != nil {
 			return fmt.Errorf("failed to close cycle: %w", err)
 		}
 
 		// Create new cycle starting from capturedAt (when we actually detected it)
-		if _, err := t.store.CreateAnthropicCycle(quotaName, capturedAt, quota.ResetsAt); err != nil {
+		if _, err := t.store.CreateAnthropicCycle(quotaName, capturedAt, quota.ResetsAt, t.accountID); err != nil {
 			return fmt.Errorf("failed to create new cycle: %w", err)
 		}
-		if err := t.store.UpdateAnthropicCycle(quotaName, currentUtil, 0); err != nil {
+		if err := t.store.UpdateAnthropicCycle(quotaName, currentUtil, 0, t.accountID); err != nil {
 			return fmt.Errorf("failed to set initial peak: %w", err)
 		}
 
@@ -196,14 +204,14 @@ func (t *AnthropicTracker) processQuota(quota api.AnthropicQuota, capturedAt tim
 			if currentUtil > cycle.PeakUtilization {
 				cycle.PeakUtilization = currentUtil
 			}
-			if err := t.store.UpdateAnthropicCycle(quotaName, cycle.PeakUtilization, cycle.TotalDelta); err != nil {
+			if err := t.store.UpdateAnthropicCycle(quotaName, cycle.PeakUtilization, cycle.TotalDelta, t.accountID); err != nil {
 				return fmt.Errorf("failed to update cycle: %w", err)
 			}
 		} else {
 			// First time seeing this quota after tracker started -- update peak if higher
 			if currentUtil > cycle.PeakUtilization {
 				cycle.PeakUtilization = currentUtil
-				if err := t.store.UpdateAnthropicCycle(quotaName, cycle.PeakUtilization, cycle.TotalDelta); err != nil {
+				if err := t.store.UpdateAnthropicCycle(quotaName, cycle.PeakUtilization, cycle.TotalDelta, t.accountID); err != nil {
 					return fmt.Errorf("failed to update cycle: %w", err)
 				}
 			}
@@ -212,7 +220,7 @@ func (t *AnthropicTracker) processQuota(quota api.AnthropicQuota, capturedAt tim
 		// First snapshot after restart -- update peak if higher
 		if currentUtil > cycle.PeakUtilization {
 			cycle.PeakUtilization = currentUtil
-			if err := t.store.UpdateAnthropicCycle(quotaName, cycle.PeakUtilization, cycle.TotalDelta); err != nil {
+			if err := t.store.UpdateAnthropicCycle(quotaName, cycle.PeakUtilization, cycle.TotalDelta, t.accountID); err != nil {
 				return fmt.Errorf("failed to update cycle: %w", err)
 			}
 		}
@@ -227,12 +235,12 @@ func (t *AnthropicTracker) processQuota(quota api.AnthropicQuota, capturedAt tim
 
 // UsageSummary returns computed stats for a specific Anthropic quota.
 func (t *AnthropicTracker) UsageSummary(quotaName string) (*AnthropicSummary, error) {
-	activeCycle, err := t.store.QueryActiveAnthropicCycle(quotaName)
+	activeCycle, err := t.store.QueryActiveAnthropicCycle(quotaName, t.accountID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query active cycle: %w", err)
 	}
 
-	history, err := t.store.QueryAnthropicCycleHistory(quotaName)
+	history, err := t.store.QueryAnthropicCycleHistoryForAccount(t.accountID, quotaName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query cycle history: %w", err)
 	}
@@ -269,7 +277,7 @@ func (t *AnthropicTracker) UsageSummary(quotaName string) (*AnthropicSummary, er
 		}
 
 		// Get latest snapshot for current utilization
-		latest, err := t.store.QueryLatestAnthropic()
+		latest, err := t.store.QueryLatestAnthropic(t.accountID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to query latest: %w", err)
 		}

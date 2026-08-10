@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -87,4 +89,33 @@ func DetectAnthropicToken(logger *slog.Logger) string {
 // Returns nil if not found.
 func DetectAnthropicCredentials(logger *slog.Logger) *AnthropicCredentials {
 	return detectAnthropicCredentialsPlatform(logger)
+}
+
+// ReadAnthropicCredentialsFile reads one explicit Claude Code home. It is used
+// by named-account agents and deliberately bypasses ambient keychains so a
+// refresh for one alias cannot affect another alias.
+func ReadAnthropicCredentialsFile(path string) (*AnthropicCredentials, error) {
+	data, err := os.ReadFile(path)
+	if err != nil { return nil, err }
+	return parseFullClaudeCredentials(data)
+}
+
+// WriteAnthropicCredentialsFile atomically persists rotated credentials to one
+// explicit account file. It preserves any fields Claude Code owns.
+func WriteAnthropicCredentialsFile(path, accessToken, refreshToken string, expiresIn int) error {
+	data, err := os.ReadFile(path)
+	if err != nil { return err }
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil { return err }
+	oauth, _ := raw["claudeAiOauth"].(map[string]interface{})
+	if oauth == nil { oauth = make(map[string]interface{}); raw["claudeAiOauth"] = oauth }
+	oauth["accessToken"] = accessToken
+	oauth["refreshToken"] = refreshToken
+	oauth["expiresAt"] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
+	encoded, err := json.Marshal(raw)
+	if err != nil { return err }
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil { return err }
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, encoded, 0600); err != nil { return err }
+	return os.Rename(tmp, path)
 }

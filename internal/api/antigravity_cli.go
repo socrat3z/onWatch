@@ -35,6 +35,10 @@ const (
 	agyMaxFailures      = 2
 )
 
+// agyPollSerial prevents several memory-heavy CLI homes from starting together.
+// It is process-wide because each account owns a distinct runner.
+var agyPollSerial = make(chan struct{}, 1)
+
 // agySession holds a live, managed agy process and its verified connection.
 type agySession struct {
 	pty  pty.Pty
@@ -61,21 +65,31 @@ type AntigravityCLIRunner struct {
 	lastUsed    time.Time
 	failures    int
 	watchdog    sync.Once
+	env         []string
 }
 
 // NewAntigravityCLIRunner creates a runner. It does not launch agy until the
 // first Fetch call.
 func NewAntigravityCLIRunner(logger *slog.Logger) *AntigravityCLIRunner {
+	return NewAntigravityCLIRunnerWithEnv(logger, nil)
+}
+
+// NewAntigravityCLIRunnerWithEnv launches agy with an account-specific HOME.
+// The caller supplies only non-secret process environment values.
+func NewAntigravityCLIRunnerWithEnv(logger *slog.Logger, env map[string]string) *AntigravityCLIRunner {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	baseEnv := os.Environ()
+	for key, value := range env { baseEnv = append(baseEnv, key+"="+value) }
 	return &AntigravityCLIRunner{
 		logger:     logger.With("component", "antigravity-cli"),
 		client:     NewAntigravityClient(logger),
 		warmTTL:    agyDefaultWarmTTL,
 		rootCtx:    ctx,
 		rootCancel: cancel,
+		env:        baseEnv,
 	}
 }
 
@@ -126,6 +140,7 @@ func resolveAgyPath() (string, error) {
 
 // Fetch ensures a ready agy session and returns a CLI-sourced snapshot.
 func (r *AntigravityCLIRunner) Fetch(ctx context.Context) (*AntigravitySnapshot, error) {
+	select { case agyPollSerial <- struct{}{}: defer func() { <-agyPollSerial }(); case <-ctx.Done(): return nil, ctx.Err() }
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -213,7 +228,7 @@ func (r *AntigravityCLIRunner) launch(binPath string) (*agySession, error) {
 		return nil, fmt.Errorf("antigravity cli: open pty: %w", err)
 	}
 	cmd := p.CommandContext(r.rootCtx, binPath)
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = append(r.env, "TERM=xterm-256color")
 	if err := cmd.Start(); err != nil {
 		_ = p.Close()
 		return nil, fmt.Errorf("antigravity cli: start agy: %w", err)

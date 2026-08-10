@@ -3654,6 +3654,13 @@ select.settings-input {
   background: var(--surface-inset);
 }
 
+.provider-account-alias-action {
+  margin-top: 4px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--accent-teal);
+}
+
 /* Codex account sections for "both" view */
 .codex-accounts-container {
   display: flex;

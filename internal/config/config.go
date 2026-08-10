@@ -34,29 +34,32 @@ type Config struct {
 	AnthropicToken     string // ANTHROPIC_TOKEN or auto-detected
 	AnthropicAutoToken bool   // true if token was auto-detected
 	AnthropicSource    string // ANTHROPIC_SOURCE: "auto" (default), "statusline", "api"
+	AnthropicAuthRoot  string // ANTHROPIC_AUTH_ROOT: <alias> Claude Code homes
 
 	// Copilot provider configuration
 	CopilotToken string // COPILOT_TOKEN (GitHub PAT with copilot scope)
 
 	// Codex provider configuration
-	CodexToken         string // CODEX_TOKEN or auto-detected
-	CodexAutoToken     bool   // true if token was auto-detected
-	CodexAutoSource    string // "codex" | "opencode" when auto-detected (display/logging)
-	CodexHasProfiles   bool   // true if saved profiles exist (enables bootstrap without token)
-	OpenCodeEnabled    bool   // OPENCODE_ENABLED=true: track ChatGPT via OpenCode auth.json (feeds Codex)
+	CodexToken       string // CODEX_TOKEN or auto-detected
+	CodexAutoToken   bool   // true if token was auto-detected
+	CodexAutoSource  string // "codex" | "opencode" when auto-detected (display/logging)
+	CodexHasProfiles bool   // true if saved profiles exist (enables bootstrap without token)
+	CodexAuthRoot    string // CODEX_AUTH_ROOT: <alias> native Codex homes
+	OpenCodeEnabled  bool   // OPENCODE_ENABLED=true: track ChatGPT via OpenCode auth.json (feeds Codex)
 	// OpenCode Go provider configuration
 	OpenCodeGoWorkspaceID string // OPENCODE_GO_WORKSPACE_ID
 	OpenCodeGoAuthCookie  string // OPENCODE_GO_AUTH_COOKIE
-	CodexShowAvailable string // CODEX_SHOW_AVAILABLE: "usage" | "available", default "usage" (Codex-specific override)
-	CodexAutoStart5h   bool   // CODEX_AUTO_START_5H: auto-send a starter ping when the 5h window resets (Beta, default off)
-	CodexAutoStart7d   bool   // CODEX_AUTO_START_7D: auto-send a starter ping when the weekly window resets (Beta, default off)
-	DisplayMode        string // ONWATCH_DISPLAY_MODE: "usage" | "available", default "usage" (global, applies to all providers)
+	CodexShowAvailable    string // CODEX_SHOW_AVAILABLE: "usage" | "available", default "usage" (Codex-specific override)
+	CodexAutoStart5h      bool   // CODEX_AUTO_START_5H: auto-send a starter ping when the 5h window resets (Beta, default off)
+	CodexAutoStart7d      bool   // CODEX_AUTO_START_7D: auto-send a starter ping when the weekly window resets (Beta, default off)
+	DisplayMode           string // ONWATCH_DISPLAY_MODE: "usage" | "available", default "usage" (global, applies to all providers)
 
 	// Antigravity provider configuration (auto-detected from local process)
 	AntigravityBaseURL   string // ANTIGRAVITY_BASE_URL (for Docker)
 	AntigravityCSRFToken string // ANTIGRAVITY_CSRF_TOKEN (for Docker)
 	AntigravityEnabled   bool   // true if auto-detection should be attempted
 	AntigravitySource    string // ANTIGRAVITY_SOURCE: "ide" | "cli" | "both" (default "both")
+	AntigravityAuthRoot  string // ANTIGRAVITY_AUTH_ROOT: <alias> isolated CLI homes
 
 	// MiniMax provider configuration
 	MiniMaxAPIKey string // MINIMAX_API_KEY
@@ -67,7 +70,7 @@ type Config struct {
 
 	// Moonshot provider configuration
 	MoonshotAPIKey string // MOONSHOT_API_KEY
-	
+
 	// DeepSeek provider configuration
 	DeepSeekAPIKey string // DEEPSEEK_API_KEY
 
@@ -318,6 +321,7 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 
 	// Anthropic provider
 	cfg.AnthropicToken = os.Getenv("ANTHROPIC_TOKEN")
+	cfg.AnthropicAuthRoot = strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_ROOT"))
 	cfg.AnthropicSource = strings.ToLower(strings.TrimSpace(os.Getenv("ANTHROPIC_SOURCE")))
 	if cfg.AnthropicSource == "" {
 		cfg.AnthropicSource = "auto"
@@ -328,6 +332,7 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 
 	// Codex provider
 	cfg.CodexToken = strings.TrimSpace(os.Getenv("CODEX_TOKEN"))
+	cfg.CodexAuthRoot = strings.TrimSpace(os.Getenv("CODEX_AUTH_ROOT"))
 	cfg.CodexShowAvailable = strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_SHOW_AVAILABLE")))
 	if cfg.CodexShowAvailable == "" {
 		cfg.CodexShowAvailable = "usage"
@@ -354,8 +359,9 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 	// Antigravity provider (auto-detection, or manual via env vars for Docker)
 	cfg.AntigravityBaseURL = os.Getenv("ANTIGRAVITY_BASE_URL")
 	cfg.AntigravityCSRFToken = os.Getenv("ANTIGRAVITY_CSRF_TOKEN")
+	cfg.AntigravityAuthRoot = strings.TrimSpace(os.Getenv("ANTIGRAVITY_AUTH_ROOT"))
 	// Enable Antigravity if: (1) manual config provided, or (2) ANTIGRAVITY_ENABLED=true, or (3) auto-detect
-	if cfg.AntigravityBaseURL != "" || os.Getenv("ANTIGRAVITY_ENABLED") == "true" {
+	if cfg.AntigravityBaseURL != "" || cfg.AntigravityAuthRoot != "" || os.Getenv("ANTIGRAVITY_ENABLED") == "true" {
 		cfg.AntigravityEnabled = true
 	}
 	// Data source preference: "ide" | "cli" | "both" (default "both").
@@ -377,10 +383,10 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 
 	// OpenRouter provider
 	cfg.OpenRouterAPIKey = strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
-	
+
 	// Moonshot provider
 	cfg.MoonshotAPIKey = strings.TrimSpace(os.Getenv("MOONSHOT_API_KEY"))
-	
+
 	// DeepSeek provider
 	cfg.DeepSeekAPIKey = strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
 
@@ -680,7 +686,7 @@ func (c *Config) Validate() error {
 // AvailableProviders returns which providers are configured.
 func (c *Config) AvailableProviders() []string {
 	var providers []string
-	if c.AnthropicToken != "" {
+	if c.AnthropicToken != "" || c.AnthropicAuthRoot != "" {
 		providers = append(providers, "anthropic")
 	}
 	if c.SyntheticAPIKey != "" {
@@ -692,7 +698,7 @@ func (c *Config) AvailableProviders() []string {
 	if c.CopilotToken != "" {
 		providers = append(providers, "copilot")
 	}
-	if c.CodexToken != "" || c.CodexHasProfiles || c.OpenCodeEnabled {
+	if c.CodexToken != "" || c.CodexHasProfiles || c.CodexAuthRoot != "" || c.OpenCodeEnabled {
 		providers = append(providers, "codex")
 	}
 	if c.AntigravityEnabled {
@@ -736,11 +742,11 @@ func (c *Config) HasProvider(name string) bool {
 	case "zai":
 		return c.ZaiAPIKey != ""
 	case "anthropic":
-		return c.AnthropicToken != ""
+		return c.AnthropicToken != "" || c.AnthropicAuthRoot != ""
 	case "copilot":
 		return c.CopilotToken != ""
 	case "codex":
-		return c.CodexToken != "" || c.CodexHasProfiles || c.OpenCodeEnabled
+		return c.CodexToken != "" || c.CodexHasProfiles || c.CodexAuthRoot != "" || c.OpenCodeEnabled
 	case "antigravity":
 		return c.AntigravityEnabled
 	case "minimax":
@@ -774,7 +780,7 @@ func (c *Config) HasMultipleProviders() bool {
 	if c.ZaiAPIKey != "" {
 		count++
 	}
-	if c.AnthropicToken != "" {
+	if c.AnthropicToken != "" || c.AnthropicAuthRoot != "" {
 		count++
 	}
 	if c.CopilotToken != "" {
@@ -852,7 +858,7 @@ func (c *Config) String() string {
 	// Redact MiniMax token
 	minimaxDisplay := redactAPIKey(c.MiniMaxAPIKey, "")
 	fmt.Fprintf(&sb, "  MiniMaxAPIKey: %s,\n", minimaxDisplay)
-	
+
 	// Redact Moonshot token
 	moonshotDisplay := redactAPIKey(c.MoonshotAPIKey, "")
 	fmt.Fprintf(&sb, "  MoonshotAPIKey: %s,\n", moonshotDisplay)
@@ -860,7 +866,7 @@ func (c *Config) String() string {
 	// Redact DeepSeek token
 	deepseekDisplay := redactAPIKey(c.DeepSeekAPIKey, "")
 	fmt.Fprintf(&sb, "  DeepSeekAPIKey: %s,\n", deepseekDisplay)
-	
+
 	fmt.Fprintf(&sb, "  APIIntegrationsEnabled: %v,\n", c.APIIntegrationsEnabled)
 	fmt.Fprintf(&sb, "  APIIntegrationsDir: %s,\n", c.APIIntegrationsDir)
 	fmt.Fprintf(&sb, "  APIIntegrationsRetention: %v,\n", c.APIIntegrationsRetention)

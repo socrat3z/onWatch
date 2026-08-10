@@ -79,6 +79,47 @@ type MiniMaxAccountReloader interface {
 	Reload()
 }
 
+// ProviderAccounts exposes safe account presentation management. Credentials
+// are intentionally not accepted here - login and discovery remain the source
+// of truth for which accounts can poll.
+func (h *Handler) ProviderAccounts(w http.ResponseWriter, r *http.Request) {
+	provider := strings.TrimSpace(r.URL.Query().Get("provider"))
+	if provider != "anthropic" && provider != "antigravity" {
+		respondError(w, http.StatusBadRequest, "unsupported provider")
+		return
+	}
+	if r.Method == http.MethodGet {
+		accounts, err := h.store.QueryProviderAccounts(provider)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to query accounts")
+			return
+		}
+		response := make([]map[string]interface{}, 0, len(accounts))
+		for _, account := range accounts {
+			response = append(response, map[string]interface{}{"id": account.ID, "name": account.Name, "alias": store.ProviderAccountAlias(account), "deletedAt": account.DeletedAt})
+		}
+		respondJSON(w, http.StatusOK, map[string]interface{}{"accounts": response})
+		return
+	}
+	if r.Method != http.MethodPatch {
+		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var request struct {
+		AccountID int64  `json:"account_id"`
+		Alias     string `json:"alias"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&request); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid account request")
+		return
+	}
+	if err := h.store.UpdateProviderAccountAlias(provider, request.AccountID, request.Alias); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+}
+
 // Handler handles HTTP requests for the web dashboard
 type Handler struct {
 	store              *store.Store
@@ -130,6 +171,31 @@ func parseCodexAccountID(r *http.Request) int64 {
 		return DefaultCodexAccountID
 	}
 	return accountID
+}
+
+func (h *Handler) parseProviderAccountID(r *http.Request, provider string) (int64, error) {
+	value := strings.TrimSpace(r.URL.Query().Get("account"))
+	if value == "" {
+		if h.store == nil {
+			return 0, nil
+		}
+		account, err := h.store.ResolveDefaultProviderAccount(provider)
+		if err != nil {
+			// A healthy database is migrated with a default account. Let a
+			// storage failure surface from the data query as a server error.
+			return 0, nil
+		}
+		return account.ID, nil
+	}
+	id, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("invalid %s account", provider)
+	}
+	account, err := h.store.ResolveProviderAccount(provider, id)
+	if err != nil {
+		return 0, err
+	}
+	return account.ID, nil
 }
 
 // CodexProfile represents a saved Codex credential profile (mirrors agent.CodexProfile).
@@ -4536,6 +4602,13 @@ func (h *Handler) Sessions(w http.ResponseWriter, r *http.Request) {
 		sessions, queryErr = h.queryCodexSessionsByAccount(accountID)
 	} else if provider == "minimax" {
 		sessions, queryErr = h.queryMiniMaxSessions(h.parseMiniMaxAccountID(r))
+	} else if provider == "anthropic" || provider == "antigravity" {
+		accountID, accountErr := h.parseProviderAccountID(r, provider)
+		if accountErr != nil {
+			respondError(w, http.StatusBadRequest, accountErr.Error())
+			return
+		}
+		sessions, queryErr = h.queryProviderSessionsByAccount(provider, accountID)
 	} else {
 		sessions, queryErr = h.store.QuerySessionHistory(provider)
 	}
@@ -5640,7 +5713,52 @@ func isAnthropicPeakHours(p *anthropicPromo, now time.Time) bool {
 
 // currentAnthropic returns Anthropic quota status.
 func (h *Handler) currentAnthropic(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimSpace(r.URL.Query().Get("account")) != "" {
+		accountID, err := h.parseProviderAccountID(r, "anthropic")
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		respondJSON(w, http.StatusOK, h.buildAnthropicCurrentForAccount(accountID))
+		return
+	}
 	respondJSON(w, http.StatusOK, h.buildAnthropicCurrent())
+}
+
+func (h *Handler) queryProviderSessionsByAccount(provider string, accountID int64) ([]*store.Session, error) {
+	sessions, err := h.store.QuerySessionHistory(fmt.Sprintf("%s:%d", provider, accountID))
+	if err != nil || len(sessions) > 0 {
+		return sessions, err
+	}
+	// Legacy single-account sessions predate account identity and remain visible
+	// only for the provider's real default account.
+	defaultAccount, defaultErr := h.store.ResolveDefaultProviderAccount(provider)
+	if defaultErr != nil || defaultAccount.ID != accountID {
+		return sessions, defaultErr
+	}
+	return h.store.QuerySessionHistory(provider)
+}
+
+func (h *Handler) buildAnthropicCurrentForAccount(accountID int64) map[string]interface{} {
+	response := map[string]interface{}{"capturedAt": time.Now().UTC().Format(time.RFC3339), "quotas": []interface{}{}}
+	latest, err := h.store.QueryLatestAnthropic(accountID)
+	if err != nil || latest == nil {
+		return response
+	}
+	response["capturedAt"], response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339), latest.CapturedAt.Format(time.RFC3339)
+	quotas := make([]map[string]interface{}, 0, len(latest.Quotas))
+	for _, quota := range latest.Quotas {
+		item := map[string]interface{}{"name": quota.Name, "displayName": api.AnthropicDisplayName(quota.Name), "utilization": quota.Utilization, "status": anthropicUtilStatus(quota.Utilization), "source": "api", "lastUpdatedAt": latest.CapturedAt.Format(time.RFC3339), "ageSeconds": int64(time.Since(latest.CapturedAt).Seconds())}
+		if quota.ResetsAt != nil {
+			item["resetsAt"] = quota.ResetsAt.Format(time.RFC3339)
+			item["timeUntilReset"] = formatDuration(time.Until(*quota.ResetsAt))
+			item["timeUntilResetSeconds"] = int64(time.Until(*quota.ResetsAt).Seconds())
+		}
+		quotas = append(quotas, item)
+	}
+	response["quotas"] = quotas
+	applyDisplayModeToResponse(response, h.getDisplayMode("anthropic"))
+	return response
 }
 
 // buildAnthropicCurrent builds the Anthropic current quota response map.
@@ -5825,7 +5943,12 @@ func (h *Handler) historyAnthropic(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	start := now.Add(-duration)
-	snapshots, err := h.store.QueryAnthropicRange(start, now)
+	accountID, accountErr := h.parseProviderAccountID(r, "anthropic")
+	if accountErr != nil {
+		respondError(w, http.StatusBadRequest, accountErr.Error())
+		return
+	}
+	snapshots, err := h.store.QueryAnthropicRangeForAccount(accountID, start, now)
 	if err != nil {
 		h.logger.Error("failed to query Anthropic history", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query history")
@@ -5892,7 +6015,12 @@ func (h *Handler) cyclesAnthropic(w http.ResponseWriter, r *http.Request) {
 	rangeDur := parseInsightsRange(r.URL.Query().Get("range"))
 	since := time.Now().UTC().Add(-rangeDur)
 
-	points, err := h.store.QueryAnthropicUtilizationSeries(quotaName, since)
+	accountID, accountErr := h.parseProviderAccountID(r, "anthropic")
+	if accountErr != nil {
+		respondError(w, http.StatusBadRequest, accountErr.Error())
+		return
+	}
+	points, err := h.store.QueryAnthropicUtilizationSeriesForAccount(accountID, quotaName, since)
 	if err != nil {
 		h.logger.Error("failed to query Anthropic utilization series", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query cycles")
@@ -7552,7 +7680,12 @@ func (h *Handler) cycleOverviewAnthropic(w http.ResponseWriter, r *http.Request)
 	}
 
 	limit := parseCycleOverviewLimit(r)
-	rows, err := h.store.QueryAnthropicCycleOverview(groupBy, limit)
+	accountID, err := h.parseProviderAccountID(r, "anthropic")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rows, err := h.store.QueryAnthropicCycleOverview(groupBy, limit, accountID)
 	if err != nil {
 		h.logger.Error("failed to query Anthropic cycle overview", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query cycle overview")
@@ -8484,7 +8617,51 @@ func codexQuotaDisplayOrder(name string) int {
 
 // currentAntigravity returns current Antigravity quota status.
 func (h *Handler) currentAntigravity(w http.ResponseWriter, r *http.Request) {
-	respondJSON(w, http.StatusOK, h.buildAntigravityCurrent())
+	if h.store == nil {
+		respondJSON(w, http.StatusOK, map[string]interface{}{"capturedAt": time.Now().UTC().Format(time.RFC3339), "quotas": []interface{}{}, "pools": []interface{}{}})
+		return
+	}
+	accountID, err := h.parseProviderAccountID(r, "antigravity")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, h.buildAntigravityCurrentForAccount(accountID))
+}
+
+func (h *Handler) buildAntigravityCurrentForAccount(accountID int64) map[string]interface{} {
+	// The regular builder has the full presentation treatment; selecting an
+	// account changes only the underlying snapshot, never the quota semantics.
+	now := time.Now().UTC()
+	response := map[string]interface{}{"capturedAt": now.Format(time.RFC3339), "quotas": []interface{}{}, "pools": []interface{}{}}
+	latest, err := h.store.QueryLatestAntigravity(accountID)
+	if err != nil || latest == nil {
+		return response
+	}
+	response["capturedAt"], response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339), latest.CapturedAt.Format(time.RFC3339)
+	if latest.Email != "" {
+		response["email"] = latest.Email
+	}
+	if latest.PlanName != "" {
+		response["planName"] = latest.PlanName
+	}
+	if latest.Source != "" {
+		response["source"] = latest.Source
+	}
+	if latest.Source == api.AntigravitySourceCLI {
+		quotas := h.buildAntigravityCLIQuotas(latest.Models)
+		response["quotas"], response["pools"] = quotas, quotas
+		applyDisplayModeToResponse(response, h.getDisplayMode("antigravity"))
+		return response
+	}
+	groups := api.GroupAntigravityModelsByLogicalQuota(latest.Models)
+	quotas := make([]map[string]interface{}, 0, len(groups))
+	for _, group := range groups {
+		quotas = append(quotas, map[string]interface{}{"modelId": group.GroupKey, "quotaGroup": group.GroupKey, "label": group.DisplayName, "displayName": group.DisplayName, "remainingFraction": group.RemainingFraction, "remainingPercent": group.RemainingPercent, "usagePercent": group.UsagePercent, "isExhausted": group.IsExhausted, "status": antigravityUsageStatus(group.UsagePercent), "models": group.ModelIDs, "modelLabels": group.Labels, "color": group.Color})
+	}
+	response["quotas"], response["pools"] = quotas, quotas
+	applyDisplayModeToResponse(response, h.getDisplayMode("antigravity"))
+	return response
 }
 
 // buildAntigravityCurrent builds the Antigravity current quota response map.
@@ -8886,7 +9063,12 @@ func (h *Handler) historyAntigravity(w http.ResponseWriter, r *http.Request) {
 	end := time.Now().UTC()
 	start := end.Add(-duration)
 
-	snapshots, err := h.store.QueryAntigravityRange(start, end)
+	accountID, accountErr := h.parseProviderAccountID(r, "antigravity")
+	if accountErr != nil {
+		respondError(w, http.StatusBadRequest, accountErr.Error())
+		return
+	}
+	snapshots, err := h.store.QueryAntigravityRangeForAccount(accountID, start, end)
 	if err != nil {
 		h.logger.Error("failed to query antigravity history", "error", err)
 		respondJSON(w, http.StatusOK, map[string]interface{}{
@@ -9070,10 +9252,15 @@ func (h *Handler) cyclesAntigravity(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusOK, []interface{}{})
 		return
 	}
+	accountID, err := h.parseProviderAccountID(r, "antigravity")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	response := []map[string]interface{}{}
 
-	active, err := h.store.QueryActiveAntigravityCycle(modelID)
+	active, err := h.store.QueryActiveAntigravityCycle(modelID, accountID)
 	if err != nil {
 		h.logger.Error("failed to query active Antigravity cycle", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query cycles")
@@ -9083,7 +9270,7 @@ func (h *Handler) cyclesAntigravity(w http.ResponseWriter, r *http.Request) {
 		response = append(response, antigravityCycleToMap(active))
 	}
 
-	history, err := h.store.QueryAntigravityCycleHistory(modelID, 200)
+	history, err := h.store.QueryAntigravityCycleHistoryForAccount(accountID, modelID, 200)
 	if err != nil {
 		h.logger.Error("failed to query Antigravity cycle history", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query cycles")
@@ -11046,8 +11233,13 @@ func (h *Handler) cycleOverviewAntigravity(w http.ResponseWriter, r *http.Reques
 
 	groupBy := normalizeAntigravityGroupBy(r.URL.Query().Get("groupBy"))
 	limit := parseCycleOverviewLimit(r)
+	accountID, err := h.parseProviderAccountID(r, "antigravity")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
-	rows, err := h.store.QueryAntigravityCycleOverview(groupBy, limit)
+	rows, err := h.store.QueryAntigravityCycleOverview(groupBy, limit, accountID)
 	if err != nil {
 		h.logger.Error("failed to query Antigravity cycle overview", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query cycle overview")

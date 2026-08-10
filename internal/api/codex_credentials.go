@@ -167,6 +167,44 @@ func DetectCodexCredentials(logger *slog.Logger) *CodexCredentials {
 	return nil
 }
 
+// ReadCodexCredentialsFile reads credentials from an explicit Codex auth.json.
+// Account managers use this rather than mutating process-wide CODEX_HOME, so
+// each named account keeps its refresh token isolated from every other account.
+func ReadCodexCredentialsFile(authPath string) *CodexCredentials {
+	authPath = strings.TrimSpace(authPath)
+	if authPath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(authPath)
+	if err != nil {
+		return nil
+	}
+	var auth codexAuthFile
+	if err := json.Unmarshal(data, &auth); err != nil {
+		return nil
+	}
+	accessToken := strings.TrimSpace(auth.Tokens.AccessToken)
+	apiKey := strings.TrimSpace(auth.OpenAIAPIKey)
+	if accessToken == "" && apiKey == "" {
+		return nil
+	}
+	idToken := strings.TrimSpace(auth.Tokens.IDToken)
+	expiresAt := ParseIDTokenExpiry(accessToken)
+	if expiresAt.IsZero() {
+		expiresAt = ParseIDTokenExpiry(idToken)
+	}
+	var expiresIn time.Duration
+	if !expiresAt.IsZero() {
+		expiresIn = time.Until(expiresAt)
+	}
+	return &CodexCredentials{
+		AccessToken: accessToken, RefreshToken: strings.TrimSpace(auth.Tokens.RefreshToken),
+		IDToken: idToken, APIKey: apiKey, AccountID: strings.TrimSpace(auth.Tokens.AccountID),
+		UserID: ParseIDTokenUserID(idToken), ExpiresAt: expiresAt, ExpiresIn: expiresIn,
+		Source: CredentialSourceCodex, SourcePath: authPath,
+	}
+}
+
 // detectOpenCodeCredentials loads ChatGPT OAuth credentials from OpenCode's
 // auth.json. Returns nil if the file is absent, malformed, or has no token.
 func detectOpenCodeCredentials(logger *slog.Logger) *CodexCredentials {
@@ -275,6 +313,16 @@ func OpenCodeAuthPath() string {
 func WriteCodexCredentials(accessToken, refreshToken, idToken string, expiresIn int) error {
 	authPath := codexAuthPath()
 	if authPath == "" {
+		return os.ErrNotExist
+	}
+	return WriteCodexCredentialsFile(authPath, accessToken, refreshToken, idToken)
+}
+
+// WriteCodexCredentialsFile atomically updates an explicit Codex auth.json,
+// preserving fields owned by the Codex CLI. It is intentionally path-based so
+// a background account can never refresh the foreground account's credentials.
+func WriteCodexCredentialsFile(authPath, accessToken, refreshToken, idToken string) error {
+	if strings.TrimSpace(authPath) == "" {
 		return os.ErrNotExist
 	}
 

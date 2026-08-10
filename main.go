@@ -525,7 +525,7 @@ func run() error {
 		}
 	}
 
-	// If no global Codex token, check if saved profiles exist to bootstrap the provider.
+	// If no global Codex token, check local account sources to bootstrap the provider.
 	// This allows Docker containers to start Codex polling from saved profiles alone.
 	if !cfg.HasProvider("codex") {
 		profilesDir := codexProfilesDirWithDataDir(filepath.Dir(cfg.DBPath))
@@ -786,7 +786,7 @@ func run() error {
 	}
 
 	var anthropicClient *api.AnthropicClient
-	if cfg.HasProvider("anthropic") {
+	if cfg.HasProvider("anthropic") && cfg.AnthropicAuthRoot == "" {
 		anthropicClient = api.NewAnthropicClient(cfg.AnthropicToken, logger)
 		logger.Info("Anthropic API client configured")
 	}
@@ -808,7 +808,7 @@ func run() error {
 	}
 
 	var antigravityClient *api.AntigravityClient
-	if cfg.HasProvider("antigravity") {
+	if cfg.HasProvider("antigravity") && cfg.AntigravityAuthRoot == "" {
 		if cfg.AntigravityBaseURL != "" {
 			// Manual configuration (Docker mode)
 			conn := &api.AntigravityConnection{
@@ -930,6 +930,12 @@ func run() error {
 	}
 
 	var anthropicAg *agent.AnthropicAgent
+	var anthropicMgr *agent.AnthropicAgentManager
+	if cfg.AnthropicAuthRoot != "" {
+		anthropicMgr = agent.NewAnthropicAgentManager(db, cfg.PollInterval, logger)
+		anthropicMgr.SetAuthRoot(cfg.AnthropicAuthRoot)
+		logger.Info("Anthropic named account discovery configured", "root", cfg.AnthropicAuthRoot)
+	}
 	if anthropicClient != nil {
 		// Load provider settings from DB (overrides .env)
 		if db != nil {
@@ -1027,6 +1033,10 @@ func run() error {
 	if cfg.HasProvider("codex") {
 		codexMgr = agent.NewCodexAgentManager(db, codexTr, cfg.PollInterval, logger)
 		codexMgr.SetProfilesDir(codexProfilesDirWithDataDir(filepath.Dir(cfg.DBPath)))
+		if cfg.CodexAuthRoot != "" {
+			codexMgr.SetAuthRoot(cfg.CodexAuthRoot)
+			logger.Info("Codex native account discovery configured", "root", cfg.CodexAuthRoot)
+		}
 		// Override profiles dir from DB if configured via UI
 		if db != nil {
 			if provJSON, _ := db.GetSetting("provider_settings"); provJSON != "" {
@@ -1094,6 +1104,12 @@ func run() error {
 	}
 
 	var antigravityAg *agent.AntigravityAgent
+	var antigravityMgr *agent.AntigravityAgentManager
+	if cfg.AntigravityAuthRoot != "" {
+		antigravityMgr = agent.NewAntigravityAgentManager(db, cfg.PollInterval, logger)
+		antigravityMgr.SetAuthRoot(cfg.AntigravityAuthRoot)
+		logger.Info("Antigravity named account discovery configured", "root", cfg.AntigravityAuthRoot)
+	}
 	if antigravityClient != nil {
 		antigravitySm := agent.NewSessionManager(db, "antigravity", idleTimeout, logger)
 		antigravityAg = agent.NewAntigravityAgent(antigravityClient, db, antigravityTr, cfg.PollInterval, logger, antigravitySm)
@@ -1204,6 +1220,10 @@ func run() error {
 	if anthropicAg != nil {
 		anthropicAg.SetNotifier(notifier)
 	}
+	if anthropicMgr != nil {
+		anthropicMgr.SetNotifier(notifier)
+		anthropicMgr.SetAccountPollingCheck(func(accountID int64) bool { return isAccountPollingEnabled(db, "anthropic", accountID) })
+	}
 	if copilotAg != nil {
 		copilotAg.SetNotifier(notifier)
 	}
@@ -1212,6 +1232,10 @@ func run() error {
 	}
 	if antigravityAg != nil {
 		antigravityAg.SetNotifier(notifier)
+	}
+	if antigravityMgr != nil {
+		antigravityMgr.SetNotifier(notifier)
+		antigravityMgr.SetAccountPollingCheck(func(accountID int64) bool { return isAccountPollingEnabled(db, "antigravity", accountID) })
 	}
 	if minimaxMgr != nil {
 		minimaxMgr.SetNotifier(notifier)
@@ -1531,6 +1555,9 @@ func run() error {
 	if anthropicAg != nil {
 		agentMgr.RegisterFactory("anthropic", func() (agent.AgentRunner, error) { return anthropicAg, nil })
 	}
+	if anthropicMgr != nil {
+		agentMgr.RegisterFactory("anthropic", func() (agent.AgentRunner, error) { return anthropicMgr, nil })
+	}
 	if copilotAg != nil {
 		agentMgr.RegisterFactory("copilot", func() (agent.AgentRunner, error) { return copilotAg, nil })
 	}
@@ -1539,6 +1566,9 @@ func run() error {
 	}
 	if antigravityAg != nil {
 		agentMgr.RegisterFactory("antigravity", func() (agent.AgentRunner, error) { return antigravityAg, nil })
+	}
+	if antigravityMgr != nil {
+		agentMgr.RegisterFactory("antigravity", func() (agent.AgentRunner, error) { return antigravityMgr, nil })
 	}
 	if minimaxMgr != nil {
 		agentMgr.RegisterFactory("minimax", func() (agent.AgentRunner, error) { return minimaxMgr, nil })
@@ -2288,4 +2318,29 @@ func initEncryptionSalt(db *store.Store, logger *slog.Logger) error {
 	web.SetEncryptionSalt(salt)
 	logger.Info("Generated and stored new encryption salt")
 	return nil
+}
+
+// isAccountPollingEnabled mirrors the dashboard's provider visibility model for
+// dynamic account managers. A per-account setting always wins over the provider
+// toggle, so users can pause a work alias without losing its history.
+func isAccountPollingEnabled(db *store.Store, provider string, accountID int64) bool {
+	value, err := db.GetSetting("provider_visibility")
+	if err != nil || value == "" {
+		return true
+	}
+	var visibility map[string]interface{}
+	if json.Unmarshal([]byte(value), &visibility) != nil {
+		return true
+	}
+	if entry, ok := visibility[fmt.Sprintf("%s:%d", provider, accountID)].(map[string]interface{}); ok {
+		if enabled, exists := entry["polling"].(bool); exists {
+			return enabled
+		}
+	}
+	if entry, ok := visibility[provider].(map[string]interface{}); ok {
+		if enabled, exists := entry["polling"].(bool); exists {
+			return enabled
+		}
+	}
+	return true
 }

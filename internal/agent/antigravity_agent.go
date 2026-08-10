@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/onllm-dev/onwatch/v2/internal/api"
@@ -25,6 +27,9 @@ type AntigravityAgent struct {
 	notifier     *notify.NotificationEngine
 	pollingCheck func() bool
 	sourceCheck  func() string
+	accountID    int64
+	accountName  string
+	accountHome  string
 
 	// cliRunner manages a warm agy process for the CLI source. Created lazily
 	// the first time the CLI source is used.
@@ -63,6 +68,11 @@ func (a *AntigravityAgent) SetNotifier(n *notify.NotificationEngine) {
 // change takes effect without a daemon restart.
 func (a *AntigravityAgent) SetSourceCheck(fn func() string) {
 	a.sourceCheck = fn
+}
+
+// SetAccountContext isolates snapshots and managed CLI state for a named account.
+func (a *AntigravityAgent) SetAccountContext(accountID int64, accountName, accountHome string) {
+	a.accountID, a.accountName, a.accountHome = accountID, accountName, accountHome
 }
 
 // NewAntigravityAgent creates a new AntigravityAgent with the given dependencies.
@@ -172,6 +182,7 @@ func (a *AntigravityAgent) poll(ctx context.Context) {
 	}
 
 	// Store snapshot
+	snapshot.AccountID = a.accountID
 	if _, err := a.store.InsertAntigravitySnapshot(snapshot); err != nil {
 		a.logger.Error("Failed to insert Antigravity snapshot", "error", err)
 	}
@@ -189,6 +200,7 @@ func (a *AntigravityAgent) poll(ctx context.Context) {
 			a.notifier.Check(notify.QuotaStatus{
 				Provider:    "antigravity",
 				QuotaKey:    g.GroupKey,
+				AccountID:   fmt.Sprintf("%d", a.accountID),
 				Utilization: utilization,
 				Limit:       100, // Percentage-based
 			})
@@ -248,7 +260,12 @@ func (a *AntigravityAgent) fetchSnapshot(ctx context.Context, source string) (*a
 // fetchCLI launches/reuses a managed agy process and returns its snapshot.
 func (a *AntigravityAgent) fetchCLI(ctx context.Context) (*api.AntigravitySnapshot, error) {
 	if a.cliRunner == nil {
-		a.cliRunner = api.NewAntigravityCLIRunner(a.logger)
+		env := map[string]string{}
+		if a.accountHome != "" {
+			env["HOME"] = a.accountHome
+			env["XDG_RUNTIME_DIR"] = filepath.Join(os.TempDir(), "onwatch-runtime", "antigravity", a.accountName)
+		}
+		a.cliRunner = api.NewAntigravityCLIRunnerWithEnv(a.logger, env)
 	}
 	return a.cliRunner.Fetch(ctx)
 }

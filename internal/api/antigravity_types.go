@@ -282,6 +282,7 @@ func NormalizeAntigravitySource(s string) string {
 // AntigravitySnapshot represents a point-in-time capture of Antigravity quotas.
 type AntigravitySnapshot struct {
 	ID             int64
+	AccountID      int64
 	CapturedAt     time.Time
 	Email          string
 	PlanName       string
