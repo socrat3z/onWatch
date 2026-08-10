@@ -74,9 +74,16 @@ On `go.sum` changes, update `vendorHash` in `flake.nix` (run `nix build .#onwatc
 5. Add to `internal/web/handlers.go` endpoints
 6. Update dashboard JS in `internal/web/static/app.js`
 
-**API Docs:** See `docs/` for provider-specific setup (COPILOT_SETUP.md, CODEX_SETUP.md, ANTIGRAVITY_SETUP.md, GEMINI_SETUP.md, CURSOR_SETUP.md, KIMI_SETUP.md, GROK_SETUP.md, MOONSHOT_SETUP.md, DEEPSEEK_SETUP.md, OPENCODE_SETUP.md)
+**API Docs:** See `docs/` for provider-specific setup (WITH_USER_ENV.md for the fork container image, COPILOT_SETUP.md, CODEX_SETUP.md, ANTIGRAVITY_SETUP.md, GEMINI_SETUP.md, CURSOR_SETUP.md, KIMI_SETUP.md, GROK_SETUP.md, MOONSHOT_SETUP.md, DEEPSEEK_SETUP.md, OPENCODE_SETUP.md)
 
 **Containers:** `IsDockerEnvironment()` in `config.go` detects Docker/K8s. Containers run foreground only.
+
+**with-user-env image (fork-only):** `Dockerfile.with-user-env` + `docker-compose.override-with-user-env.yml` + `docker-entrypoint-with-user-env.sh` add the `agy`, `codex`, and `claude` CLIs for providers that need an interactive OAuth login. Rules when touching it:
+- The CLIs exist only to run a login, through the isolated one-shot `agy-login`/`codex-login`/`claude-login` services (`docker compose --profile login run --rm <svc>`). Those services get one credential volume each and deliberately no `env_file` and no `/data`. Polling reads the token files (`~/.gemini`, `~/.codex/auth.json`, `~/.claude/.credentials.json`), never the CLIs.
+- The entrypoint allowlists exact login commands and exits 64 for anything else. Changing the allowlist means changing `scripts/test-entrypoint-dispatch.sh` in the same commit.
+- Codex and Claude Code are pinned by version AND SHA-256 in the `cli-installer` stage, fetched as npm release tarballs and reduced to one native binary each. No package manager, install script, or lifecycle hook in that stage; Bun/Node/npm must never come back. (`agy` is the exception and is fetched by its unpinnable bootstrapper in the `runtime` stage - see the comment there.) `TARGETARCH` maps to an exact upstream path - no `find | head -1`. Keep `codex-code-mode-host` pruned. Bumping a version follows `docs/WITH_USER_ENV.md#updating-the-pinned-clis`.
+- One named volume per credential store, nothing else mounted. Adding a volume or a CLI needs a matching reason in `docs/WITH_USER_ENV.md`.
+- Daemon memory is 512M because `ANTIGRAVITY_SOURCE=cli` makes the daemon spawn the 190M `agy` binary and keep it warm; idle is 9.4 MiB. The 512M on the `*-login` services is an unmeasured TUI ceiling. Measurements and their date live in `docs/WITH_USER_ENV.md#measured-resource-budget` - update them there when bumping a pinned CLI.
 
 **Release process (all 3 steps required):**
 1. Update version in all 3 places:
