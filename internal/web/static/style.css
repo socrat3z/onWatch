@@ -585,12 +585,32 @@ button, input, select { font-family: inherit; }
 }
 
 /* All Providers View */
+/* The overview grid sits under the page title and subtitle, which need more
+   air than the 20px .welcome-banner gives every other page. */
+.welcome-banner + .all-providers-view {
+  margin-top: 16px;
+}
+
 .all-providers-view {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(var(--layout-card-min), 1fr));
   align-items: start;
-  gap: 12px;
+  gap: var(--layout-gap-sm);
   margin-bottom: 28px;
+}
+
+/* Masonry: layoutHomepageMasonry() measures each card and gives it a row span,
+   so a short card stops reserving the tallest card's height. Cards keep their
+   DOM sequence - the grid never reorders them. The class is only added once the
+   spans are set, so a JS failure falls back to the ragged grid above instead of
+   collapsing every card to a single row unit. */
+.all-providers-view.is-masonry {
+  grid-auto-rows: var(--homepage-masonry-row, 4px);
+  align-items: stretch;
+}
+
+.all-providers-view.is-masonry > .homepage-harness-card {
+  align-self: start;
 }
 
 .homepage-harness-card {
@@ -610,29 +630,57 @@ button, input, select { font-family: inherit; }
 }
 
 .homepage-harness-card .provider-card-header {
-  padding: 9px 12px;
+  padding: 12px 14px;
 }
 
 .homepage-harness-card .provider-card-title {
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .homepage-harness-card .provider-card-body {
-  padding: 8px 12px 10px;
+  padding: 12px 14px 14px;
+}
+
+/* Badges, account labels and the Anthropic off-peak promo used to share the
+   header line with the title, costing enough width to ellipsize every provider
+   name. They get their own wrapping line under the header instead. */
+.homepage-harness-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--surface-card-alt);
+  border-bottom: 1px solid var(--border-light);
+}
+
+.homepage-harness-chips .provider-card-account {
+  margin-left: 0;
 }
 
 .homepage-harness-open {
+  display: inline-flex;
   flex-shrink: 0;
+  align-items: center;
+  color: var(--text-muted);
+  transition: color var(--transition-fast);
+}
+
+.homepage-harness-open svg {
+  width: 15px;
+  height: 15px;
+}
+
+.homepage-harness-card:hover .homepage-harness-open,
+.homepage-harness-card:focus-visible .homepage-harness-open {
   color: var(--accent-teal-text);
-  font-size: 11px;
-  font-weight: 600;
 }
 
 .homepage-harness-metrics,
 .homepage-harness-accounts {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 10px;
 }
 
 /* Each profile is its own target - it opens that account, not the provider's
@@ -662,7 +710,7 @@ button, input, select { font-family: inherit; }
 }
 
 .homepage-harness-account-name {
-  margin-bottom: 5px;
+  margin-bottom: 8px;
   color: var(--text-secondary);
   font-size: 11px;
   font-weight: 700;
@@ -686,8 +734,8 @@ button, input, select { font-family: inherit; }
   min-width: 0;
   overflow: hidden;
   color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.3;
+  font-size: 12px;
+  line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -695,13 +743,14 @@ button, input, select { font-family: inherit; }
 .homepage-harness-value {
   flex-shrink: 0;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: 14px;
+  font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
 
 .homepage-harness-track {
-  height: 3px;
-  margin-top: 3px;
+  height: 4px;
+  margin-top: 5px;
   overflow: hidden;
   border-radius: var(--radius-full);
   background: var(--surface-inset);
@@ -721,7 +770,7 @@ button, input, select { font-family: inherit; }
 .homepage-harness-empty {
   margin: 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .provider-card {
@@ -2546,6 +2595,9 @@ button, input, select { font-family: inherit; }
   .quota-grid { grid-template-columns: 1fr; gap: 14px; }
   #quota-grid-minimax { grid-template-columns: 1fr; }
   .all-providers-view { gap: 14px; }
+  .homepage-harness-card .provider-card-header { padding: 14px 16px; }
+  .homepage-harness-card .provider-card-body { padding: 14px 16px 16px; }
+  .homepage-harness-chips { padding: 8px 16px; }
   .provider-card-header { padding: 14px 16px; }
   .provider-card-body { padding: 16px; }
   .provider-kpis { grid-template-columns: 1fr; }

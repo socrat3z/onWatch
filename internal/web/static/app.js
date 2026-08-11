@@ -7288,7 +7288,7 @@ function renderAllProvidersView() {
     const freshnessChip = freshnessChipHTML(entry.freshness);
     if (entry.summaryOnly) {
       return `<section class="provider-card homepage-harness-card" data-card-key="${entry.cardKey}" data-provider="api-integrations" role="button" tabindex="0">
-        <header class="provider-card-header"><div class="provider-card-title"><span>${escapeHTML(entry.title)}</span></div><span class="homepage-harness-open">Open &rarr;</span></header>
+        <header class="provider-card-header"><div class="provider-card-title"><span>${escapeHTML(entry.title)}</span></div><span class="homepage-harness-open" title="Open dashboard" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></span></header>
         <div class="provider-card-body"><div class="homepage-harness-metrics">
           <div class="homepage-harness-metric"><span class="homepage-harness-label">Integrations</span><strong class="homepage-harness-value">${formatNumber(Number(entry.summary?.integrationCount || 0))}</strong></div>
           <div class="homepage-harness-metric"><span class="homepage-harness-label">Requests</span><strong class="homepage-harness-value">${formatNumber(Number(entry.summary?.requestCount || 0))}</strong></div>
@@ -7298,16 +7298,19 @@ function renderAllProvidersView() {
     const accountChip = entry.accountLabel
       ? `<span class="provider-card-account" title="These numbers are for the ${escapeHTML(entry.accountLabel)} account">${escapeHTML(entry.accountLabel)}</span>`
       : '';
+    // Chips share no width with the title any more - crammed into the header
+    // line they ellipsized both the provider name and themselves.
+    const chips = `${accountChip}${badge}${promo}`;
+    const chipRow = chips ? `<div class="homepage-harness-chips">${chips}</div>` : '';
     const cardHeader = `<header class="provider-card-header">
         <div class="provider-card-title">
           <span>${escapeHTML(entry.title)}</span>
-          ${accountChip}${badge}${promo}
         </div>
         <div class="homepage-harness-header-meta">
           ${freshnessChip}
-          <span class="homepage-harness-open">Open &rarr;</span>
+          <span class="homepage-harness-open" title="Open dashboard" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></span>
         </div>
-      </header>`;
+      </header>${chipRow}`;
     if (Array.isArray(entry.accountsGroup)) {
       return `<section class="provider-card homepage-harness-card" data-card-key="${entry.cardKey}" data-provider="${entry.provider}"${freshnessAttr} role="button" tabindex="0">
       ${cardHeader}
@@ -7348,6 +7351,74 @@ function renderAllProvidersView() {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
     });
   });
+
+  layoutHomepageMasonry(container);
+  observeHomepageMasonry(container);
+}
+
+// Row height the spans are counted in. Small enough that a card rounds up by at
+// most a few pixels, large enough to keep the span numbers sane.
+const HOMEPAGE_MASONRY_ROW = 4;
+
+// Packs the harness cards so a short card stops reserving the tallest card's
+// height, without touching their sequence: each card keeps its grid position
+// and only its row span changes. Bails out on a single-column layout, where
+// there is nothing to pack.
+function layoutHomepageMasonry(container) {
+  if (!container) return;
+  const cards = Array.from(container.querySelectorAll('.homepage-harness-card'));
+  if (cards.length === 0) {
+    container.classList.remove('is-masonry');
+    return;
+  }
+
+  const styles = window.getComputedStyle(container);
+  const columns = styles.getPropertyValue('grid-template-columns').trim().split(/\s+/).filter(Boolean).length;
+  if (columns < 2) {
+    container.classList.remove('is-masonry');
+    cards.forEach((card) => { card.style.gridRowEnd = ''; });
+    return;
+  }
+
+  const gap = parseFloat(styles.getPropertyValue('row-gap')) || 0;
+  // Measure every card before writing any span back, so one card's new span
+  // cannot reflow the next card mid-measurement.
+  const heights = cards.map((card) => {
+    card.style.gridRowEnd = '';
+    return card.getBoundingClientRect().height;
+  });
+  // A hidden container measures every card at zero; spanning one row each would
+  // stack them all on top of each other once it is shown. Leave the plain grid
+  // in place - the resize observer re-runs this when the cards get a size.
+  if (!heights.some(height => height > 0)) {
+    container.classList.remove('is-masonry');
+    return;
+  }
+  cards.forEach((card, i) => {
+    const span = Math.max(1, Math.ceil((heights[i] + gap) / (HOMEPAGE_MASONRY_ROW + gap)));
+    card.style.gridRowEnd = `span ${span}`;
+  });
+  container.style.setProperty('--homepage-masonry-row', `${HOMEPAGE_MASONRY_ROW}px`);
+  container.classList.add('is-masonry');
+}
+
+// Card heights change on resize (labels wrap) and when a countdown chip grows,
+// so re-pack on both. One observer per container, replaced on re-render.
+function observeHomepageMasonry(container) {
+  if (!container || typeof ResizeObserver === 'undefined') return;
+  if (State.homepageMasonryObserver) State.homepageMasonryObserver.disconnect();
+  let queued = false;
+  const observer = new ResizeObserver(() => {
+    if (queued) return;
+    queued = true;
+    window.requestAnimationFrame(() => {
+      queued = false;
+      layoutHomepageMasonry(container);
+    });
+  });
+  observer.observe(container);
+  container.querySelectorAll('.homepage-harness-card').forEach((card) => observer.observe(card));
+  State.homepageMasonryObserver = observer;
 }
 
 // ── "Both" Mode: Dual Charts (legacy fallback) ──
