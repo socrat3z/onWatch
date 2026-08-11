@@ -371,7 +371,7 @@ func TestAnthropicAgent_PollAuthPauseAndResume(t *testing.T) {
 }
 
 func TestAnthropicAgent_PollRateLimitBypassWithOAuthRefresh(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestUserHome(t, t.TempDir())
 
 	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -430,7 +430,7 @@ func TestAnthropicAgent_PollRateLimitBypassWithOAuthRefresh(t *testing.T) {
 }
 
 func TestAnthropicAgent_PollProactiveOAuthRefresh(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestUserHome(t, t.TempDir())
 
 	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

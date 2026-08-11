@@ -1,9 +1,10 @@
 ---
 id: TASK-20
 title: Normalize formatting in new multi-account code
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:23'
+updated_date: '2026-08-11 00:00'
 labels:
   - review-multi-account
   - rev-p3-8
@@ -28,6 +29,6 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P3.8
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 gofmt -l reports nothing for the changed files
+- [x] #1 gofmt -l reports nothing for the changed files
 - [ ] #2 ./app.sh --smoke passes
 <!-- AC:END -->

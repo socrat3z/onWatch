@@ -1,9 +1,10 @@
 ---
 id: TASK-8
 title: Surface account health in the API and picker
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:22'
+updated_date: '2026-08-11 00:00'
 updated_date: '2026-08-10 19:23'
 labels:
   - review-multi-account
@@ -30,7 +31,7 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P2.3
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 GET /api/accounts returns a health field per account
-- [ ] #2 An account with missing credentials is visually distinguished in the picker
-- [ ] #3 Selecting an unhealthy account shows an explanation naming the expected credential path, not an empty chart
+- [x] #1 GET /api/accounts returns a health field per account
+- [x] #2 An account with missing credentials is visually distinguished in the picker
+- [x] #3 Selecting an unhealthy account shows an explanation naming the expected credential path, not an empty chart
 <!-- AC:END -->

@@ -274,11 +274,7 @@ func TestMigrateSystemdUnit_ReadAndWriteFailuresAndNoop(t *testing.T) {
 
 	t.Run("missing unit file is noop", func(t *testing.T) {
 		tmpHome := t.TempDir()
-		oldHome := os.Getenv("HOME")
-		t.Cleanup(func() { _ = os.Setenv("HOME", oldHome) })
-		if err := os.Setenv("HOME", tmpHome); err != nil {
-			t.Fatalf("set HOME: %v", err)
-		}
+		setTestUserHome(t, tmpHome)
 		readCgroupFile = func() ([]byte, error) {
 			return []byte("0::/user.slice/user-501.slice/user@501.service/app.slice/missing.service"), nil
 		}
@@ -287,11 +283,7 @@ func TestMigrateSystemdUnit_ReadAndWriteFailuresAndNoop(t *testing.T) {
 
 	t.Run("read failure is noop", func(t *testing.T) {
 		tmpHome := t.TempDir()
-		oldHome := os.Getenv("HOME")
-		t.Cleanup(func() { _ = os.Setenv("HOME", oldHome) })
-		if err := os.Setenv("HOME", tmpHome); err != nil {
-			t.Fatalf("set HOME: %v", err)
-		}
+		setTestUserHome(t, tmpHome)
 		userDir := filepath.Join(tmpHome, ".config", "systemd", "user")
 		if err := os.MkdirAll(userDir, 0o755); err != nil {
 			t.Fatalf("mkdir user dir: %v", err)
@@ -308,11 +300,7 @@ func TestMigrateSystemdUnit_ReadAndWriteFailuresAndNoop(t *testing.T) {
 
 	t.Run("already up to date is noop", func(t *testing.T) {
 		tmpHome := t.TempDir()
-		oldHome := os.Getenv("HOME")
-		t.Cleanup(func() { _ = os.Setenv("HOME", oldHome) })
-		if err := os.Setenv("HOME", tmpHome); err != nil {
-			t.Fatalf("set HOME: %v", err)
-		}
+		setTestUserHome(t, tmpHome)
 		serviceName := "noop.service"
 		userDir := filepath.Join(tmpHome, ".config", "systemd", "user")
 		if err := os.MkdirAll(userDir, 0o755); err != nil {

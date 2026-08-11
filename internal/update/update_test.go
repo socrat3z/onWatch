@@ -992,11 +992,7 @@ func TestFindUnitFile_UserLevelPath(t *testing.T) {
 	serviceName := "onwatch-user-level-test.service"
 	tmpHome := t.TempDir()
 
-	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
-	if err := os.Setenv("HOME", tmpHome); err != nil {
-		t.Fatalf("Setenv HOME: %v", err)
-	}
+	setTestUserHome(t, tmpHome)
 
 	userDir := filepath.Join(tmpHome, ".config", "systemd", "user")
 	if err := os.MkdirAll(userDir, 0755); err != nil {
@@ -1174,7 +1170,7 @@ func TestMigrateSystemdUnit_UpdatesUserUnitAndReloads(t *testing.T) {
 	}
 
 	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	setTestUserHome(t, tmpHome)
 	t.Setenv("INVOCATION_ID", "invocation-test-id")
 
 	unitDir := filepath.Join(tmpHome, ".config", "systemd", "user")

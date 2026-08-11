@@ -935,6 +935,11 @@ func run() error {
 		anthropicMgr = agent.NewAnthropicAgentManager(db, cfg.PollInterval, logger)
 		anthropicMgr.SetAuthRoot(cfg.AnthropicAuthRoot)
 		logger.Info("Anthropic named account discovery configured", "root", cfg.AnthropicAuthRoot)
+		if cfg.AnthropicToken != "" {
+			logger.Warn("ANTHROPIC_TOKEN is ignored while ANTHROPIC_AUTH_ROOT is set",
+				"reason", "each named account authenticates from its own <root>/<alias>/.claude/.credentials.json",
+				"root", cfg.AnthropicAuthRoot)
+		}
 	}
 	if anthropicClient != nil {
 		// Load provider settings from DB (overrides .env)
@@ -1109,6 +1114,12 @@ func run() error {
 		antigravityMgr = agent.NewAntigravityAgentManager(db, cfg.PollInterval, logger)
 		antigravityMgr.SetAuthRoot(cfg.AntigravityAuthRoot)
 		logger.Info("Antigravity named account discovery configured", "root", cfg.AntigravityAuthRoot)
+		if cfg.AntigravitySource != api.AntigravitySourceCLI {
+			logger.Warn("ANTIGRAVITY_SOURCE is ignored while ANTIGRAVITY_AUTH_ROOT is set",
+				"ignored_value", cfg.AntigravitySource,
+				"effective_source", api.AntigravitySourceCLI,
+				"reason", "the IDE probe cannot be scoped to one account home, so every named account polls through the agy CLI")
+		}
 	}
 	if antigravityClient != nil {
 		antigravitySm := agent.NewSessionManager(db, "antigravity", idleTimeout, logger)

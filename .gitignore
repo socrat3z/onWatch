@@ -1,5 +1,6 @@
 # Secrets & Environment
 .env
+.claude/settings.local.json
 *.key
 *.pem
 *.cert

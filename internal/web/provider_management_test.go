@@ -137,7 +137,7 @@ func TestHandler_ProviderVisibilityHelpers(t *testing.T) {
 func TestHandler_IsProviderConfiguredAndTryAutoDetect(t *testing.T) {
 	home := t.TempDir()
 	codexHome := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t, home)
 	t.Setenv("CODEX_HOME", codexHome)
 
 	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(`{"tokens":{"access_token":"codex-auto"}}`), 0o600); err != nil {

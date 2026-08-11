@@ -1,9 +1,10 @@
 ---
 id: TASK-16
 title: Create XDG_RUNTIME_DIR before launching agy
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:23'
+updated_date: '2026-08-11 00:00'
 labels:
   - review-multi-account
   - rev-p3-4
@@ -28,6 +29,6 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P3.4
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The daemon creates the per-account runtime directory with mode 0700 before launching agy
+- [x] #1 The daemon creates the per-account runtime directory with mode 0700 before launching agy
 - [ ] #2 A second Antigravity account persists its keyring state across a daemon restart
 <!-- AC:END -->

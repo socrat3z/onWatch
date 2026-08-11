@@ -16,7 +16,7 @@ func TestConfig_LoadsFromEnv(t *testing.T) {
 	os.Setenv("ONWATCH_ADMIN_PASS", "mypass")
 	os.Setenv("ONWATCH_DB_PATH", "/tmp/test.db")
 	os.Setenv("ONWATCH_LOG_LEVEL", "debug")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -47,9 +47,9 @@ func TestConfig_LoadsFromEnv(t *testing.T) {
 }
 
 func TestConfig_LoadsMetricsTokenFromEnv(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("ONWATCH_METRICS_TOKEN", "metrics-secret")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -63,7 +63,7 @@ func TestConfig_LoadsMetricsTokenFromEnv(t *testing.T) {
 func TestConfig_LoadsZaiFromEnv(t *testing.T) {
 	os.Setenv("ZAI_API_KEY", "zai_test_key_456")
 	os.Setenv("ZAI_BASE_URL", "https://custom.z.ai/api")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -80,7 +80,7 @@ func TestConfig_LoadsZaiFromEnv(t *testing.T) {
 
 func TestConfig_ZaiDefaults(t *testing.T) {
 	os.Setenv("ZAI_API_KEY", "zai_test_key")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -93,10 +93,10 @@ func TestConfig_ZaiDefaults(t *testing.T) {
 }
 
 func TestConfig_ZaiRegion_LoadsFromEnv(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("ZAI_API_KEY", "zai_test_key")
 	os.Setenv("ZAI_REGION", "cn")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -108,9 +108,9 @@ func TestConfig_ZaiRegion_LoadsFromEnv(t *testing.T) {
 }
 
 func TestConfig_ZaiRegion_DefaultsToGlobal(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("ZAI_API_KEY", "zai_test_key")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -122,10 +122,10 @@ func TestConfig_ZaiRegion_DefaultsToGlobal(t *testing.T) {
 }
 
 func TestConfig_ZaiRegion_NormalizesToLowercase(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("ZAI_API_KEY", "zai_test_key")
 	os.Setenv("ZAI_REGION", "CN")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -137,10 +137,10 @@ func TestConfig_ZaiRegion_NormalizesToLowercase(t *testing.T) {
 }
 
 func TestConfig_ZaiRegion_SelectsCNBaseURL(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("ZAI_API_KEY", "zai_test_key")
 	os.Setenv("ZAI_REGION", "cn")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -153,7 +153,7 @@ func TestConfig_ZaiRegion_SelectsCNBaseURL(t *testing.T) {
 
 func TestConfig_DefaultValues(t *testing.T) {
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key_123")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -193,9 +193,9 @@ func TestConfig_DefaultValues(t *testing.T) {
 }
 
 func TestConfig_APIIntegrationsRetention_LoadsFromEnv(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("ONWATCH_API_INTEGRATIONS_RETENTION", "168h")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -207,9 +207,9 @@ func TestConfig_APIIntegrationsRetention_LoadsFromEnv(t *testing.T) {
 }
 
 func TestConfig_APIIntegrationsRetention_Disabled(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("ONWATCH_API_INTEGRATIONS_RETENTION", "0")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -222,7 +222,7 @@ func TestConfig_APIIntegrationsRetention_Disabled(t *testing.T) {
 
 func TestConfig_OnlySyntheticProvider(t *testing.T) {
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -245,7 +245,7 @@ func TestConfig_OnlySyntheticProvider(t *testing.T) {
 
 func TestConfig_OnlyZaiProvider(t *testing.T) {
 	os.Setenv("ZAI_API_KEY", "zai_test_key")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -269,7 +269,7 @@ func TestConfig_OnlyZaiProvider(t *testing.T) {
 func TestConfig_BothProviders(t *testing.T) {
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
 	os.Setenv("ZAI_API_KEY", "zai_test_key")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -291,9 +291,9 @@ func TestConfig_BothProviders(t *testing.T) {
 }
 
 func TestConfig_MiniMaxProvider(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("MINIMAX_API_KEY", "sk-cp-test-key")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -309,10 +309,10 @@ func TestConfig_MiniMaxProvider(t *testing.T) {
 }
 
 func TestConfig_MiniMaxRegion_LoadsFromEnv(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("MINIMAX_API_KEY", "sk-cp-test-key")
 	os.Setenv("MINIMAX_REGION", "cn")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -324,9 +324,9 @@ func TestConfig_MiniMaxRegion_LoadsFromEnv(t *testing.T) {
 }
 
 func TestConfig_MiniMaxRegion_DefaultsToGlobal(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("MINIMAX_API_KEY", "sk-cp-test-key")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -338,10 +338,10 @@ func TestConfig_MiniMaxRegion_DefaultsToGlobal(t *testing.T) {
 }
 
 func TestConfig_MiniMaxRegion_NormalizesToLowercase(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("MINIMAX_API_KEY", "sk-cp-test-key")
 	os.Setenv("MINIMAX_REGION", "CN")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -353,7 +353,7 @@ func TestConfig_MiniMaxRegion_NormalizesToLowercase(t *testing.T) {
 }
 
 func TestConfig_AllowsNoProvidersConfigured(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -380,9 +380,9 @@ func TestConfig_ValidatesSyntheticAPIKey_Format(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Clearenv()
+			clearConfigTestEnv()
 			os.Setenv("SYNTHETIC_API_KEY", tt.apiKey)
-			defer os.Clearenv()
+			defer clearConfigTestEnv()
 
 			_, err := Load()
 			if tt.wantErr && err == nil {
@@ -398,7 +398,7 @@ func TestConfig_ValidatesSyntheticAPIKey_Format(t *testing.T) {
 func TestConfig_ValidatesInterval_Minimum(t *testing.T) {
 	os.Setenv("ZAI_API_KEY", "zai_test_key")
 	os.Setenv("ONWATCH_POLL_INTERVAL", "5")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	_, err := Load()
 	if err == nil {
@@ -409,7 +409,7 @@ func TestConfig_ValidatesInterval_Minimum(t *testing.T) {
 func TestConfig_ValidatesInterval_Maximum(t *testing.T) {
 	os.Setenv("ZAI_API_KEY", "zai_test_key")
 	os.Setenv("ONWATCH_POLL_INTERVAL", "7200")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	_, err := Load()
 	if err == nil {
@@ -434,10 +434,10 @@ func TestConfig_ValidatesPort_Range(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Clearenv()
+			clearConfigTestEnv()
 			os.Setenv("ZAI_API_KEY", "zai_test_key")
 			os.Setenv("ONWATCH_PORT", tt.port)
-			defer os.Clearenv()
+			defer clearConfigTestEnv()
 
 			_, err := Load()
 			if tt.wantOK && err != nil {
@@ -474,7 +474,7 @@ func TestConfig_RedactsZaiAPIKey(t *testing.T) {
 
 func TestConfig_DebugMode_Default(t *testing.T) {
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -491,7 +491,7 @@ func TestConfig_LoadWithArgs_FlagOverridesEnv(t *testing.T) {
 	os.Setenv("ONWATCH_POLL_INTERVAL", "120")
 	os.Setenv("ONWATCH_PORT", "8080")
 	os.Setenv("ONWATCH_DB_PATH", "/tmp/env.db")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := loadWithArgs([]string{"--interval", "30", "--port", "9000", "--db", "/tmp/flag.db"})
 	if err != nil {
@@ -511,7 +511,7 @@ func TestConfig_LoadWithArgs_FlagOverridesEnv(t *testing.T) {
 
 func TestConfig_LoadWithArgs_EqualsSyntax(t *testing.T) {
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := loadWithArgs([]string{"--interval=45", "--port=7777"})
 	if err != nil {
@@ -528,7 +528,7 @@ func TestConfig_LoadWithArgs_EqualsSyntax(t *testing.T) {
 
 func TestConfig_DebugMode_Flag(t *testing.T) {
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := loadWithArgs([]string{"--debug"})
 	if err != nil {
@@ -732,7 +732,7 @@ func TestConfig_LogWriter_RotatesFileWhenAtLimit(t *testing.T) {
 
 func TestConfig_LoadsAnthropicFromEnv(t *testing.T) {
 	os.Setenv("ANTHROPIC_TOKEN", "sk-ant-test-token-123")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -746,7 +746,7 @@ func TestConfig_LoadsAnthropicFromEnv(t *testing.T) {
 
 func TestConfig_OnlyAnthropicProvider(t *testing.T) {
 	os.Setenv("ANTHROPIC_TOKEN", "sk-ant-test-token")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -774,7 +774,7 @@ func TestConfig_OnlyAnthropicProvider(t *testing.T) {
 func TestConfig_AnthropicWithOtherProviders(t *testing.T) {
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
 	os.Setenv("ANTHROPIC_TOKEN", "sk-ant-test-token")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -1102,7 +1102,7 @@ func TestConfig_LogWriter_TestMode(t *testing.T) {
 
 func TestConfig_LoadWithArgs_TestFlag(t *testing.T) {
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := loadWithArgs([]string{"--test"})
 	if err != nil {
@@ -1115,7 +1115,7 @@ func TestConfig_LoadWithArgs_TestFlag(t *testing.T) {
 
 func TestConfig_LoadWithArgs_DbEqualsSyntax(t *testing.T) {
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := loadWithArgs([]string{"--db=/tmp/equals.db"})
 	if err != nil {
@@ -1128,7 +1128,7 @@ func TestConfig_LoadWithArgs_DbEqualsSyntax(t *testing.T) {
 
 func TestConfig_LoadAntigravityFromEnv(t *testing.T) {
 	os.Setenv("ANTIGRAVITY_ENABLED", "true")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -1144,7 +1144,7 @@ func TestConfig_LoadAntigravityFromEnv(t *testing.T) {
 
 func TestConfig_LoadCopilotFromEnv(t *testing.T) {
 	os.Setenv("COPILOT_TOKEN", "ghp_test_copilot_token")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -1158,7 +1158,7 @@ func TestConfig_LoadCopilotFromEnv(t *testing.T) {
 func TestConfig_SecureCookiesFromEnv(t *testing.T) {
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
 	os.Setenv("ONWATCH_SECURE_COOKIES", "true")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -1172,7 +1172,7 @@ func TestConfig_SecureCookiesFromEnv(t *testing.T) {
 func TestConfig_SessionIdleTimeoutFromEnv(t *testing.T) {
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
 	os.Setenv("ONWATCH_SESSION_IDLE_TIMEOUT", "300")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -1283,7 +1283,7 @@ func TestLoadEnvFile_PrefersStandardLocation(t *testing.T) {
 
 	// Create temp directory structure
 	tmpDir := t.TempDir()
-	os.Setenv("HOME", tmpDir)
+	setTestUserHome(t, tmpDir)
 
 	// Create ~/.onwatch/.env
 	onwatchDir := filepath.Join(tmpDir, ".onwatch")
@@ -1297,8 +1297,8 @@ func TestLoadEnvFile_PrefersStandardLocation(t *testing.T) {
 	}
 
 	// Clear env and load
-	os.Clearenv()
-	os.Setenv("HOME", tmpDir)
+	clearConfigTestEnv()
+	setTestUserHome(t, tmpDir)
 	loadEnvFile()
 
 	// Verify the standard location was loaded
@@ -1321,7 +1321,7 @@ func TestLoadEnvFile_FallsBackToLocalOnwatchEnv(t *testing.T) {
 
 	// Create temp directory with NO ~/.onwatch/.env
 	tmpDir := t.TempDir()
-	os.Setenv("HOME", tmpDir)
+	setTestUserHome(t, tmpDir)
 
 	// Create local .env with onwatch-specific keys
 	localDir := filepath.Join(tmpDir, "project")
@@ -1340,8 +1340,8 @@ func TestLoadEnvFile_FallsBackToLocalOnwatchEnv(t *testing.T) {
 	}
 
 	// Clear env and load
-	os.Clearenv()
-	os.Setenv("HOME", tmpDir)
+	clearConfigTestEnv()
+	setTestUserHome(t, tmpDir)
 	loadEnvFile()
 
 	// Verify the local .env was loaded (because standard location doesn't exist)
@@ -1361,7 +1361,7 @@ func TestLoadEnvFile_IgnoresNonOnwatchLocalEnv(t *testing.T) {
 
 	// Create temp directory with NO ~/.onwatch/.env
 	tmpDir := t.TempDir()
-	os.Setenv("HOME", tmpDir)
+	setTestUserHome(t, tmpDir)
 
 	// Create local .env WITHOUT onwatch-specific keys (generic env file)
 	localDir := filepath.Join(tmpDir, "project")
@@ -1381,8 +1381,8 @@ func TestLoadEnvFile_IgnoresNonOnwatchLocalEnv(t *testing.T) {
 	}
 
 	// Clear env and load
-	os.Clearenv()
-	os.Setenv("HOME", tmpDir)
+	clearConfigTestEnv()
+	setTestUserHome(t, tmpDir)
 	loadEnvFile()
 
 	// Verify the local .env was NOT loaded (because it's not onwatch-specific)
@@ -1437,9 +1437,9 @@ func TestConfig_CodexShowAvailable(t *testing.T) {
 }
 
 func TestConfig_LogFormat_DefaultsToText(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -1451,10 +1451,10 @@ func TestConfig_LogFormat_DefaultsToText(t *testing.T) {
 }
 
 func TestConfig_LogFormat_LoadsFromEnv(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
 	os.Setenv("ONWATCH_LOG_FORMAT", "json")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := Load()
 	if err != nil {
@@ -1466,10 +1466,10 @@ func TestConfig_LogFormat_LoadsFromEnv(t *testing.T) {
 }
 
 func TestConfig_LogFormat_FlagOverridesEnv(t *testing.T) {
-	os.Clearenv()
+	clearConfigTestEnv()
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
 	os.Setenv("ONWATCH_LOG_FORMAT", "text")
-	defer os.Clearenv()
+	defer clearConfigTestEnv()
 
 	cfg, err := loadWithArgs([]string{"--log-format", "json"})
 	if err != nil {
@@ -1513,12 +1513,12 @@ func TestConfig_LogFormat_AliasesAndCaseInsensitive(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run("input_"+tt.input, func(t *testing.T) {
-			os.Clearenv()
+			clearConfigTestEnv()
 			os.Setenv("SYNTHETIC_API_KEY", "syn_test_key")
 			if tt.input != "" {
 				os.Setenv("ONWATCH_LOG_FORMAT", tt.input)
 			}
-			defer os.Clearenv()
+			defer clearConfigTestEnv()
 
 			cfg, err := Load()
 			if err != nil {

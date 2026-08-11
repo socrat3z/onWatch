@@ -1,14 +1,17 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,7 +32,7 @@ func newCodexManagerFixture(t *testing.T) *codexManagerFixture {
 	t.Helper()
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t, home)
 	t.Setenv("CODEX_HOME", "")
 	// Pin OpenCode detection under the temp HOME so DetectCodexCredentials never
 	// reads the host's real ~/.local/share/opencode/auth.json (issue #78 path).
@@ -120,7 +123,7 @@ func makeCodexIDToken(t *testing.T, exp time.Time, accountID, userID string) str
 
 func TestNewCodexAgentManager_Defaults(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t, home)
 
 	manager := NewCodexAgentManager(nil, nil, 15*time.Second, nil)
 	if manager.logger == nil {
@@ -728,5 +731,79 @@ func TestCodexAgentManager_TeamProfileRejectsSystemCredsFromDifferentUser(t *tes
 	}
 	if creds.AccessToken == "bob-token" {
 		t.Fatal("credsRefresh returned bob's token - cross-contamination")
+	}
+}
+
+// lockedBuffer collects log output while agent goroutines are also logging.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func writeCodexAuthHome(t *testing.T, root, alias, accessToken string) {
+	t.Helper()
+	dir := filepath.Join(root, alias)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	body := fmt.Sprintf(`{"tokens":{"access_token":%q,"refresh_token":"refresh-%s","account_id":"acct-%s"}}`, accessToken, alias, alias)
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write auth.json: %v", err)
+	}
+}
+
+func TestCodexAgentManager_NativeAccountCollidingWithLegacyProfileIsReported(t *testing.T) {
+	fx := newCodexManagerFixture(t)
+	logs := &lockedBuffer{}
+	fx.manager.logger = slog.New(slog.NewTextHandler(logs, nil))
+
+	legacy := CodexProfile{Name: "work", AccountID: "acct-legacy", SavedAt: time.Now().UTC()}
+	legacy.Tokens.AccessToken = "legacy-token"
+	fx.writeProfile(t, legacy)
+	if err := fx.manager.loadAndStartProfiles(); err != nil {
+		t.Fatalf("loadAndStartProfiles: %v", err)
+	}
+	waitUntil(t, time.Second, func() bool { return fx.instance("work") != nil }, "legacy profile to start")
+
+	// A container codex-login now writes a native home under the same alias,
+	// plus one that does not collide.
+	authRoot := t.TempDir()
+	writeCodexAuthHome(t, authRoot, "work", "native-token")
+	writeCodexAuthHome(t, authRoot, "personal", "personal-token")
+	fx.manager.SetAuthRoot(authRoot)
+	if err := fx.manager.loadAndStartNativeAccounts(); err != nil {
+		t.Fatalf("loadAndStartNativeAccounts: %v", err)
+	}
+	waitUntil(t, time.Second, func() bool { return fx.instance("personal") != nil }, "non-colliding native account to start")
+
+	if got := fx.instance("work"); got == nil || got.Profile.Native {
+		t.Fatalf("the legacy profile must keep the alias, got %+v", got)
+	}
+	if !strings.Contains(logs.String(), "legacy profile of the same name") || !strings.Contains(logs.String(), "account=work") {
+		t.Fatalf("expected a warning naming the alias and the winner, got:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "account=personal") {
+		t.Fatalf("a non-colliding native account must not warn, got:\n%s", logs.String())
+	}
+
+	// The 30s rescan must not repeat the warning forever.
+	before := strings.Count(logs.String(), "legacy profile of the same name")
+	if err := fx.manager.loadAndStartNativeAccounts(); err != nil {
+		t.Fatalf("second loadAndStartNativeAccounts: %v", err)
+	}
+	if after := strings.Count(logs.String(), "legacy profile of the same name"); after != before {
+		t.Fatalf("collision warning repeated on rescan: %d then %d", before, after)
 	}
 }

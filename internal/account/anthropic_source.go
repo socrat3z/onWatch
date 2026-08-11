@@ -21,6 +21,11 @@ func (s AnthropicSource) List(ctx context.Context) ([]Definition, error) {
 	if err != nil {
 		return nil, err
 	}
+	// ListDirectories already reports an absent root as "no accounts"; resolving
+	// it here anyway would turn an unmounted volume into a warning every minute.
+	if len(names) == 0 {
+		return nil, nil
+	}
 	resolvedRoot, err := filepath.EvalSymlinks(s.Root)
 	if err != nil {
 		return nil, err

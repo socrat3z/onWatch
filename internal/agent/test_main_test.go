@@ -1,22 +1,29 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
 	"github.com/onllm-dev/onwatch/v2/internal/api"
+	"github.com/onllm-dev/onwatch/v2/internal/testenv"
 )
 
-// TestMain runs before all tests in the agent package. It enables test mode
-// on the api package to prevent any keychain/keyring operations during tests.
-// This ensures tests never read or write real Claude Code OAuth tokens.
-//
-// It also unsets OPENCODE_HOME/XDG_DATA_HOME so codex credential detection
-// never resolves to the host's real ~/.local/share/opencode/auth.json; tests
-// that set a temp HOME stay fully isolated regardless of host env.
+// TestMain prevents any agent test from falling back to credentials, keyrings,
+// or settings in the developer's real user profile.
 func TestMain(m *testing.M) {
 	api.SetTestMode(true)
-	os.Unsetenv("OPENCODE_HOME")
-	os.Unsetenv("XDG_DATA_HOME")
-	os.Exit(m.Run())
+	cleanup, err := testenv.IsolateProcessUserEnvironment()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "isolate test user environment: %v\n", err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	cleanup()
+	os.Exit(code)
+}
+
+func setTestUserHome(t *testing.T, home string) {
+	t.Helper()
+	testenv.SetTestUserHome(t, home)
 }

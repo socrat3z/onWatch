@@ -109,7 +109,7 @@ func TestPIDFileLifecycle(t *testing.T) {
 
 func TestMigrateDBLocation_MovesDBAndSidecars(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t, home)
 
 	oldDB := filepath.Join(home, ".onwatch", "onwatch.db")
 	newDB := filepath.Join(home, ".onwatch", "data", "onwatch.db")
@@ -144,7 +144,7 @@ func TestMigrateDBLocation_MovesDBAndSidecars(t *testing.T) {
 
 func TestFixExplicitDBPath_RedirectsToCanonicalWhenBetter(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t, home)
 	canonical := filepath.Join(home, ".onwatch", "data", "onwatch.db")
 	if err := os.MkdirAll(filepath.Dir(canonical), 0o755); err != nil {
 		t.Fatalf("mkdir canonical dir: %v", err)
@@ -413,7 +413,7 @@ func TestPrintSummaryAndNextSteps(t *testing.T) {
 func TestRunSetupEarlyPathsAndSafeRunCommands(t *testing.T) {
 	t.Run("runSetup returns early when all providers already configured", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		setTestUserHome(t, home)
 		installDir := filepath.Join(home, ".onwatch")
 		envFile := filepath.Join(installDir, ".env")
 		if err := os.MkdirAll(filepath.Join(installDir, "data"), 0o755); err != nil {
@@ -438,7 +438,7 @@ func TestRunSetupEarlyPathsAndSafeRunCommands(t *testing.T) {
 
 	t.Run("runSetup fresh safe path", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		setTestUserHome(t, home)
 		input := strings.Join([]string{
 			"6",    // antigravity only
 			"1",    // antigravity source: both

@@ -1,9 +1,10 @@
 ---
 id: TASK-13
 title: Explain and label the legacy default account
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:23'
+updated_date: '2026-08-11 00:00'
 updated_date: '2026-08-10 19:23'
 labels:
   - review-multi-account
@@ -30,7 +31,7 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P3.1
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The default account is visually distinguished and explained where it appears
-- [ ] #2 docs/WITH_USER_ENV.md states what happens to pre-migration history when account discovery is enabled
-- [ ] #3 No automatic reassignment of historical rows occurs without an explicit user action
+- [x] #1 The default account is visually distinguished and explained where it appears
+- [x] #2 docs/WITH_USER_ENV.md states what happens to pre-migration history when account discovery is enabled
+- [x] #3 No automatic reassignment of historical rows occurs without an explicit user action
 <!-- AC:END -->

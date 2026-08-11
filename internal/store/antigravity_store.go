@@ -170,9 +170,17 @@ func (s *Store) QueryLatestAntigravity(accountIDs ...int64) (*api.AntigravitySna
 	return &snapshot, rows.Err()
 }
 
-// QueryAntigravityRange returns Antigravity snapshots within a time range.
+// QueryAntigravityRange returns the provider default account's Antigravity
+// snapshots within a time range. It resolves an account rather than accepting
+// the absence of one, so no exported query can run without an account
+// predicate. Callers that mean a specific account use
+// QueryAntigravityRangeForAccount.
 func (s *Store) QueryAntigravityRange(start, end time.Time, limit ...int) ([]*api.AntigravitySnapshot, error) {
-	return s.queryAntigravityRange(0, start, end, limit...)
+	accountID, err := s.defaultProviderAccountID("antigravity")
+	if err != nil {
+		return nil, err
+	}
+	return s.queryAntigravityRange(accountID, start, end, limit...)
 }
 
 // queryAntigravityRange applies the account filter inside the LIMIT so a limited
@@ -377,9 +385,15 @@ func (s *Store) QueryActiveAntigravityCycle(modelID string, accountIDs ...int64)
 	return &cycle, nil
 }
 
-// QueryAntigravityCycleHistory returns completed cycles for an Antigravity model with optional limit.
+// QueryAntigravityCycleHistory returns the provider default account's completed
+// cycles for a model. Like QueryAntigravityRange it always applies an account
+// predicate; QueryAntigravityCycleHistoryForAccount selects a different account.
 func (s *Store) QueryAntigravityCycleHistory(modelID string, limit ...int) ([]*AntigravityResetCycle, error) {
-	return s.queryAntigravityCycleHistory(0, modelID, limit...)
+	accountID, err := s.defaultProviderAccountID("antigravity")
+	if err != nil {
+		return nil, err
+	}
+	return s.queryAntigravityCycleHistory(accountID, modelID, limit...)
 }
 
 // queryAntigravityCycleHistory filters by account in SQL so the LIMIT bounds one

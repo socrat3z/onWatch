@@ -344,8 +344,14 @@ func (a *AnthropicAgent) proactiveRefresh(ctx context.Context, creds *api.Anthro
 	a.rateLimitPaused = false
 	a.rateLimitResumeAt = time.Time{}
 
-	// CRITICAL: Save new tokens to disk IMMEDIATELY
-	if err := api.WriteAnthropicCredentials(newTokens.AccessToken, newTokens.RefreshToken, newTokens.ExpiresIn); err != nil {
+	// CRITICAL: Save new tokens to disk IMMEDIATELY. Named accounts install a
+	// writer bound to their own credentials file; without it a background
+	// account would rotate the ambient account's tokens instead of its own.
+	writer := a.credsWrite
+	if writer == nil {
+		writer = api.WriteAnthropicCredentials
+	}
+	if err := writer(newTokens.AccessToken, newTokens.RefreshToken, newTokens.ExpiresIn); err != nil {
 		a.logger.Error("Failed to save refreshed credentials", "error", err)
 	} else {
 		a.client.SetToken(newTokens.AccessToken)
@@ -593,7 +599,9 @@ func (a *AnthropicAgent) poll(ctx context.Context) {
 
 					// Save new tokens immediately (refresh tokens are one-time use!)
 					writer := a.credsWrite
-					if writer == nil { writer = api.WriteAnthropicCredentials }
+					if writer == nil {
+						writer = api.WriteAnthropicCredentials
+					}
 					if saveErr := writer(newTokens.AccessToken, newTokens.RefreshToken, newTokens.ExpiresIn); saveErr != nil {
 						a.logger.Error("Failed to save refreshed credentials", "error", saveErr)
 						// Continue anyway - we have the new token in memory
@@ -714,7 +722,7 @@ processResponse:
 			a.notifier.Check(notify.QuotaStatus{
 				Provider:    "anthropic",
 				QuotaKey:    q.Name,
-				AccountID:   fmt.Sprintf("%d", a.accountID),
+				AccountID:   notifyAccountID(a.accountID),
 				Utilization: q.Utilization,
 			})
 		}

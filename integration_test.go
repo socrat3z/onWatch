@@ -1099,9 +1099,9 @@ func TestIntegration_Anthropic_SnapshotStoredCorrectly(t *testing.T) {
 	}
 }
 
-// TestIntegration_Anthropic_DynamicQuotaKeys verifies that arbitrary quota keys
-// from the Anthropic API are stored and retrieved correctly.
-func TestIntegration_Anthropic_DynamicQuotaKeys(t *testing.T) {
+// TestIntegration_Anthropic_QuotaWhitelist verifies that newly supported quota
+// keys round-trip while unknown experimental keys stay out of query results.
+func TestIntegration_Anthropic_QuotaWhitelist(t *testing.T) {
 	db := testutil.InMemoryStore(t)
 	now := time.Now().UTC()
 
@@ -1113,7 +1113,9 @@ func TestIntegration_Anthropic_DynamicQuotaKeys(t *testing.T) {
 			{Name: "new_future_quota", Utilization: 1.5}, // unknown key
 		},
 	}
-	db.InsertAnthropicSnapshot(snap)
+	if _, err := db.InsertAnthropicSnapshot(snap); err != nil {
+		t.Fatalf("InsertAnthropicSnapshot: %v", err)
+	}
 
 	latest, err := db.QueryLatestAnthropic()
 	if err != nil {
@@ -1124,8 +1126,8 @@ func TestIntegration_Anthropic_DynamicQuotaKeys(t *testing.T) {
 	for _, q := range latest.Quotas {
 		names[q.Name] = true
 	}
-	if !names["new_future_quota"] {
-		t.Error("Dynamic key 'new_future_quota' not found in stored snapshot")
+	if names["new_future_quota"] {
+		t.Error("unknown experimental key 'new_future_quota' must be filtered")
 	}
 	if !names["monthly_limit"] {
 		t.Error("Key 'monthly_limit' not found")

@@ -1,9 +1,10 @@
 ---
 id: TASK-9
 title: Show the account picker at one account
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:22'
+updated_date: '2026-08-11 00:00'
 labels:
   - review-multi-account
   - rev-p2-4
@@ -28,7 +29,7 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P2.4
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 With exactly one account, the header shows that accounts alias
-- [ ] #2 The alias-edit action is reachable at one account
-- [ ] #3 With zero named accounts nothing new renders
+- [x] #1 With exactly one account, the header shows that accounts alias
+- [x] #2 The alias-edit action is reachable at one account
+- [x] #3 With zero named accounts nothing new renders
 <!-- AC:END -->

@@ -15,6 +15,7 @@ import (
 	"github.com/onllm-dev/onwatch/v2/internal/api"
 	"github.com/onllm-dev/onwatch/v2/internal/config"
 	"github.com/onllm-dev/onwatch/v2/internal/store"
+	"github.com/onllm-dev/onwatch/v2/internal/testenv"
 )
 
 // freePort returns an available TCP port for testing
@@ -275,8 +276,19 @@ func TestServer_EmbeddedAssets(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
-	// Ensure templates directory exists for tests
-	os.Exit(m.Run())
+	api.SetTestMode(true)
+	cleanup, err := testenv.IsolateProcessUserEnvironment()
+	if err != nil {
+		os.Exit(1)
+	}
+	code := m.Run()
+	cleanup()
+	os.Exit(code)
+}
+
+func setTestUserHome(t *testing.T, home string) {
+	t.Helper()
+	testenv.SetTestUserHome(t, home)
 }
 
 func TestServer_RequiresCSRFHeader_OnPost(t *testing.T) {

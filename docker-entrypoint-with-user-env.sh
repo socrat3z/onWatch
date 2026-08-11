@@ -106,6 +106,10 @@ fi
 if [ -f /auth/claude/.credentials.json ] && [ ! -e /auth/claude/default/.claude/.credentials.json ]; then mkdir -p /auth/claude/default/.claude && cp -a /auth/claude/.credentials.json /auth/claude/default/.claude/; fi
 if [ -d /legacy/antigravity-profile ] && [ ! -d /auth/antigravity/default/.gemini ]; then mkdir -p /auth/antigravity/default && cp -a /legacy/antigravity-profile /auth/antigravity/default/.gemini; fi
 if [ -d /legacy/antigravity-keyring ] && [ ! -d /auth/antigravity/default/.local/share/keyrings ]; then mkdir -p /auth/antigravity/default/.local/share && cp -a /legacy/antigravity-keyring /auth/antigravity/default/.local/share/keyrings; fi
+# The login CLI gets $HOME=$target_home. Only the store roots exist at this
+# point, so the per-account directory has to be created here: the CLIs assume
+# an existing HOME and fail before the login prompt when it is missing.
+mkdir -p "$target_home"
 chown -R nonroot:nonroot /data /auth /tmp/onwatch-runtime
 
 exec gosu nonroot sh -c '

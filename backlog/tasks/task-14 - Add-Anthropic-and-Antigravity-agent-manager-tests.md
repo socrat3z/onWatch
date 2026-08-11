@@ -1,9 +1,10 @@
 ---
 id: TASK-14
 title: Add Anthropic and Antigravity agent manager tests
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:23'
+updated_date: '2026-08-11 00:00'
 labels:
   - review-multi-account
   - rev-p3-2
@@ -28,8 +29,8 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P3.2
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 anthropic_agent_manager_test.go and antigravity_agent_manager_test.go exist and use temp dirs and fake clients only - no real credential stores, no installed CLIs
-- [ ] #2 Adding, removing and restoring an account directory is covered for both managers
+- [x] #1 anthropic_agent_manager_test.go and antigravity_agent_manager_test.go exist and use temp dirs and fake clients only - no real credential stores, no installed CLIs
+- [x] #2 Adding, removing and restoring an account directory is covered for both managers
 - [ ] #3 ./app.sh --test passes with -race
-- [ ] #4 A test asserts one paused account does not pause another
+- [x] #4 A test asserts one paused account does not pause another
 <!-- AC:END -->

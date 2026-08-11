@@ -15,6 +15,8 @@ Content-Type: application/json
 
 Aliases are non-secret metadata. They never move credential files or restore a
 deleted account, which keeps account discovery and historical telemetry safe.
+See [Multiple Accounts Per Provider](MULTI_ACCOUNT.md) for how accounts are
+discovered and what `&account=<id>` does on the read endpoints.
 
 onWatch serves the same authenticated `/api/*` endpoints its dashboard uses, so
 anything the dashboard shows can be scripted. The full endpoint list lives in
@@ -54,6 +56,30 @@ example `https://example.com/onwatch`.
 Quota providers return a `quotas` array. The balance providers documented below
 return a `balance` or `credits` object instead, because they track remaining
 credit rather than a consumed allowance.
+
+### Account-scoped providers in the combined payload
+
+Anthropic, Antigravity, Codex, and MiniMax can each hold several accounts. In
+`?provider=both` they follow one rule:
+
+| Visible accounts | Key | Value |
+|---|---|---|
+| 1 | `<provider>` | the account's payload |
+| 2 or more | `<provider>Accounts` | an array of those payloads |
+| 0 (all switched off in settings) | - | the provider is omitted |
+
+The two keys are mutually exclusive, so a single-account install keeps the flat
+shape. Every payload carries the account it describes:
+
+| Field | Meaning |
+|---|---|
+| `accountId`, `id` | the account's durable ID - what `&account=` and the `<provider>:<id>` visibility settings key take |
+| `name` | the credential folder name, which is never renamed |
+| `accountName` | the display alias, and the only field meant for rendering |
+
+Anthropic and Antigravity payloads additionally carry a nested `account` object
+with `alias`, `isDefault`, `accountCount`, and credential `health` - the same
+shape `/api/accounts` returns.
 
 ## DeepSeek current balance
 

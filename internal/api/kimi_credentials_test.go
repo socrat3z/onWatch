@@ -32,7 +32,7 @@ func writeKimiCred(t *testing.T, dir string, access, refresh string, expiresAt f
 
 func TestDetectKimiCredentials_KimiCodeOnly(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t, home)
 	t.Setenv("KIMI_CODE_CREDENTIALS", "")
 	t.Setenv("KIMI_CREDENTIALS", "")
 	t.Setenv("KIMI_CODE_HOME", "")
@@ -63,7 +63,7 @@ func TestDetectKimiCredentials_KimiCodeOnly(t *testing.T) {
 
 func TestDetectKimiCredentials_IgnoresKimiCLIAlone(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t, home)
 	t.Setenv("KIMI_CODE_CREDENTIALS", "")
 	t.Setenv("KIMI_CREDENTIALS", "")
 	t.Setenv("KIMI_CODE_HOME", filepath.Join(home, "no-code"))
@@ -83,7 +83,7 @@ func TestDetectKimiCredentials_IgnoresKimiCLIAlone(t *testing.T) {
 
 func TestDetectKimiCredentials_ExplicitEnvFile(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t, home)
 	path := writeKimiCred(t, filepath.Join(home, "custom"), "env-access", "env-refresh", float64(time.Now().Unix()+3600))
 	t.Setenv("KIMI_CODE_CREDENTIALS", path)
 	t.Setenv("KIMI_CODE_HOME", "")

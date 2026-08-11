@@ -632,6 +632,72 @@ function providerAccountParam(provider) {
 
 function providerAccountStorageKey(provider) { return `onwatch-${provider}-account`; }
 
+// The legacy account holds everything polled before this install had named
+// accounts. It is not a real credential directory, so it is labelled rather
+// than silently sitting in the picker looking like one more login.
+const LEGACY_ACCOUNT_BADGE = 'Before account split';
+const LEGACY_ACCOUNT_NOTE = 'Holds the history recorded before named accounts were enabled. It keeps polling only if a credential folder named "default" exists.';
+
+const accountHealthCopy = {
+  missing: {
+    label: 'No credentials',
+    detail: (path) => path
+      ? `onWatch found no credential file at ${path}. Log in for this account, then it starts polling within a minute.`
+      : 'onWatch found no credential file for this account. Log in for this account, then it starts polling within a minute.',
+  },
+  unreadable: {
+    label: 'Credentials unreadable',
+    detail: (path) => path
+      ? `The credential file at ${path} could not be parsed. Log in again to rewrite it.`
+      : 'This account’s credential file could not be parsed. Log in again to rewrite it.',
+  },
+  unverified: {
+    label: 'Unverified',
+    detail: () => 'onWatch cannot check this login without reading the keyring. If no data appears, run the login for this account.',
+  },
+};
+
+function accountHealthState(account) {
+  return (account && account.health && account.health.credentials) || 'unverified';
+}
+
+// An account is only called out when there is something to act on. "ok" and
+// Antigravity's permanent "unverified" are both silent so a healthy install
+// never grows a warning it cannot clear.
+function accountHealthProblem(account) {
+  const state = accountHealthState(account);
+  if (state === 'ok' || state === 'unverified') return null;
+  return accountHealthCopy[state] || null;
+}
+
+function providerAccountLabel(account) {
+  if (!account) return 'Account';
+  return account.alias || account.name || 'Account';
+}
+
+// The card label is the account name only where it disambiguates - a
+// single-account install must look exactly as it did before.
+function providerAccountCardLabel(account) {
+  if (!account || Number(account.accountCount || 0) <= 1) return '';
+  return providerAccountLabel(account);
+}
+
+function renderProviderAccountNote(provider, account) {
+  const note = document.getElementById('provider-account-note');
+  if (!note) return;
+  const messages = [];
+  const problem = account ? accountHealthProblem(account) : null;
+  if (problem) messages.push(`${problem.label}: ${problem.detail((account.health || {}).credentialPath || '')}`);
+  if (account && account.isDefault) messages.push(`${LEGACY_ACCOUNT_BADGE}: ${LEGACY_ACCOUNT_NOTE}`);
+  if (messages.length === 0) {
+    note.hidden = true;
+    note.textContent = '';
+    return;
+  }
+  note.hidden = false;
+  note.textContent = messages.join(' ');
+}
+
 async function loadProviderAccounts(provider) {
   try {
     const res = await authFetch(`${API_BASE}/api/accounts?provider=${encodeURIComponent(provider)}`);
@@ -652,14 +718,36 @@ function renderProviderAccountPicker() {
   const provider = getCurrentProvider();
   if (!dropdown || !menu || !label) return;
   const accounts = State.providerAccounts[provider] || [];
-  if ((provider !== 'anthropic' && provider !== 'antigravity') || accounts.length <= 1) { dropdown.style.display = 'none'; return; }
+  // One account still shows its name and stays renameable - the first account a
+  // user names was previously invisible until a second one existed. Zero
+  // accounts adds nothing.
+  if ((provider !== 'anthropic' && provider !== 'antigravity') || accounts.length === 0) {
+    dropdown.style.display = 'none';
+    renderProviderAccountNote(provider, null);
+    return;
+  }
   dropdown.style.display = '';
   menu.innerHTML = '';
   for (const account of accounts) {
     const item = document.createElement('li');
     const selected = account.id === State.providerAccount[provider];
-    item.className = 'codex-profile-item' + (selected ? ' active' : '');
-    item.textContent = account.alias || account.name;
+    const problem = accountHealthProblem(account);
+    item.className = 'codex-profile-item' + (selected ? ' active' : '') + (problem ? ' provider-account-unhealthy' : '');
+    item.textContent = providerAccountLabel(account);
+    if (account.isDefault) {
+      const legacy = document.createElement('span');
+      legacy.className = 'provider-account-tag';
+      legacy.textContent = LEGACY_ACCOUNT_BADGE;
+      item.appendChild(legacy);
+      item.title = LEGACY_ACCOUNT_NOTE;
+    }
+    if (problem) {
+      const warn = document.createElement('span');
+      warn.className = 'provider-account-tag provider-account-tag-warn';
+      warn.textContent = problem.label;
+      item.appendChild(warn);
+      item.title = problem.detail((account.health || {}).credentialPath || '');
+    }
     item.setAttribute('role', 'option');
     item.setAttribute('aria-selected', selected ? 'true' : 'false');
     item.addEventListener('click', () => {
@@ -675,21 +763,74 @@ function renderProviderAccountPicker() {
   rename.className = 'codex-profile-item provider-account-alias-action';
   rename.textContent = 'Edit display alias…';
   rename.setAttribute('role', 'option');
-  rename.addEventListener('click', async () => {
+  rename.addEventListener('click', () => {
     const active = accounts.find(a => a.id === State.providerAccount[provider]);
     if (!active) return;
-    const alias = window.prompt('Display alias (your credential folder name stays unchanged)', active.alias || active.name);
-    if (alias === null || !alias.trim() || alias.trim() === (active.alias || active.name)) return;
-    try {
-      const res = await authFetch(`${API_BASE}/api/accounts?provider=${encodeURIComponent(provider)}`, { method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({account_id: active.id, alias: alias.trim()}) });
-      if (!res.ok) throw new Error('Unable to save alias');
-      await loadProviderAccounts(provider);
-    } catch (_) { window.alert('Could not save that display alias. Use 1-64 characters.'); }
     closeProviderAccountPicker();
+    openProviderAccountAliasDialog(provider, active);
   });
   menu.appendChild(rename);
   const active = accounts.find(a => a.id === State.providerAccount[provider]);
-  label.textContent = (active && (active.alias || active.name)) || 'Account';
+  label.textContent = providerAccountLabel(active);
+  renderProviderAccountNote(provider, active);
+}
+
+// openProviderAccountAliasDialog replaces window.prompt/window.alert: the rule
+// is stated before submission and the server's own message is shown verbatim,
+// instead of a guess that contradicted it.
+function openProviderAccountAliasDialog(provider, account) {
+  const modal = document.getElementById('detail-modal');
+  const titleEl = document.getElementById('modal-title');
+  const bodyEl = document.getElementById('modal-body');
+  if (!modal || !titleEl || !bodyEl) return;
+
+  titleEl.textContent = 'Edit display alias';
+  bodyEl.innerHTML = `
+    <form class="account-alias-form" id="account-alias-form">
+      <p class="insight-text">Renaming changes only the label shown in onWatch. The credential folder <code>${escapeHTML(account.name)}</code> is not touched, so polling keeps working.</p>
+      <label class="account-alias-label" for="account-alias-input">Display alias</label>
+      <input class="account-alias-input" id="account-alias-input" type="text" maxlength="64" value="${escapeHTML(account.alias || account.name)}" autocomplete="off">
+      <p class="account-alias-hint">Use 1-64 characters.</p>
+      <p class="account-alias-error" id="account-alias-error" role="alert" hidden></p>
+      <div class="account-alias-actions">
+        <button type="button" class="header-btn" id="account-alias-cancel">Cancel</button>
+        <button type="submit" class="header-btn" id="account-alias-save">Save</button>
+      </div>
+    </form>`;
+  modal.hidden = false;
+
+  const form = document.getElementById('account-alias-form');
+  const input = document.getElementById('account-alias-input');
+  const error = document.getElementById('account-alias-error');
+  if (input) { input.focus(); input.select(); }
+  const cancel = document.getElementById('account-alias-cancel');
+  if (cancel) cancel.addEventListener('click', closeModal);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const alias = (input.value || '').trim();
+    error.hidden = true;
+    try {
+      const res = await authFetch(`${API_BASE}/api/accounts?provider=${encodeURIComponent(provider)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account_id: account.id, alias }),
+      });
+      if (!res.ok) {
+        // The server already explains precisely what it rejected; repeat it.
+        let message = 'Could not save that display alias.';
+        try { const payload = await res.json(); if (payload && payload.error) message = payload.error; } catch (_) { /* keep fallback */ }
+        error.textContent = message;
+        error.hidden = false;
+        return;
+      }
+      closeModal();
+      await loadProviderAccounts(provider);
+    } catch (err) {
+      error.textContent = 'Could not reach onWatch to save that alias.';
+      error.hidden = false;
+    }
+  });
 }
 
 function closeProviderAccountPicker() {
@@ -5942,7 +6083,9 @@ function isProviderTelemetryEnabled(provider, accountID) {
     ? State.providerVisibility
     : {};
 
-  if ((provider === 'codex' || provider === 'minimax') && accountID != null) {
+  // "<provider>:<id>" is the key the settings UI writes for every
+  // multi-account provider, and the backend resolves it the same way.
+  if (accountID != null) {
     const accountKey = `${provider}:${accountID}`;
     const accountVis = visibility[accountKey];
     if (accountVis && typeof accountVis === 'object' && accountVis.polling === false) {
@@ -6217,6 +6360,41 @@ function renderFreshnessBannerHTML(entries) {
   </div>`;
 }
 
+// Multi-account providers ship one payload per profile under these keys once a
+// second account exists, and the flat provider key otherwise. Codex and MiniMax
+// still need their own single-account branches below, because only they group
+// insights and history per account as well.
+const MULTI_ACCOUNT_PROVIDER_KEYS = {
+  anthropic: 'anthropicAccounts',
+  antigravity: 'antigravityAccounts',
+  codex: 'codexAccounts',
+  minimax: 'minimaxAccounts',
+};
+
+const MULTI_ACCOUNT_PROVIDER_FROM_KEY = Object.fromEntries(
+  Object.entries(MULTI_ACCOUNT_PROVIDER_KEYS).map(([provider, key]) => [key, provider]));
+
+// One card per provider, one widget per profile inside it - the grouping rule
+// for every multi-account provider, so a fifth one needs no new branch. An
+// account switched off in settings is dropped here, matching the backend.
+function groupedAccountEntry(provider, accounts) {
+  const visible = (Array.isArray(accounts) ? accounts : []).filter((account, idx) =>
+    isProviderTelemetryEnabled(provider, account.accountId || account.id || idx + 1));
+  if (visible.length === 0) return null;
+  return {
+    provider,
+    cardKey: sanitizeProviderCardKey(provider),
+    title: bothProviderNames[provider] || toTitleCase(provider),
+    badge: `${visible.length} accounts`,
+    // The promo is provider-wide, so any account can carry it.
+    promoHtml: provider === 'anthropic' && visible.some(account => account && account.promo)
+      ? promoTagHTML()
+      : '',
+    snapshotAt: oldestSnapshotAt(visible),
+    accountsGroup: visible,
+  };
+}
+
 function buildAllProviderEntries() {
   const current = State.allProvidersCurrent || {};
   const insights = State.allProvidersInsights || {};
@@ -6225,12 +6403,9 @@ function buildAllProviderEntries() {
   const providerSet = new Set(configuredOrder);
   const addProviderFromKey = (key) => {
     if (!key) return;
-    if (key === 'codex' || key === 'codexAccounts') {
-      providerSet.add('codex');
-      return;
-    }
-    if (key === 'minimax' || key === 'minimaxAccounts') {
-      providerSet.add('minimax');
+    const grouped = MULTI_ACCOUNT_PROVIDER_FROM_KEY[key];
+    if (grouped) {
+      providerSet.add(grouped);
       return;
     }
     if (bothProviderNames[key]) {
@@ -6257,9 +6432,14 @@ function buildAllProviderEntries() {
       order.push(provider);
     });
 
-  // Set Anthropic promo state so promoTagHTML() works in both view
-  if (current.anthropic && current.anthropic.promo) {
-    updateAnthropicPromoState(current.anthropic.promo);
+  // Set Anthropic promo state so promoTagHTML() works in both view. The promo
+  // is provider-wide, so a multi-account install reads it off any account.
+  const anthropicPromoSource = current.anthropic
+    || (Array.isArray(current.anthropicAccounts)
+      ? current.anthropicAccounts.find(account => account && account.promo)
+      : null);
+  if (anthropicPromoSource && anthropicPromoSource.promo) {
+    updateAnthropicPromoState(anthropicPromoSource.promo);
   }
 
   const entries = [];
@@ -6298,17 +6478,8 @@ function buildAllProviderEntries() {
 
       // Multiple accounts: group into one compact card instead of N stacked cards.
       if (currentAccounts.length > 1) {
-        const groupAccounts = currentAccounts.filter((acc, idx) =>
-          isProviderTelemetryEnabled('codex', acc.accountId || acc.id || idx + 1));
-        if (groupAccounts.length === 0) return;
-        entries.push({
-          provider: 'codex',
-          cardKey: sanitizeProviderCardKey('codex'),
-          title: 'Codex',
-          badge: `${groupAccounts.length} accounts`,
-          snapshotAt: oldestSnapshotAt(groupAccounts),
-          accountsGroup: groupAccounts,
-        });
+        const grouped = groupedAccountEntry('codex', currentAccounts);
+        if (grouped) entries.push(grouped);
         return;
       }
 
@@ -6366,17 +6537,8 @@ function buildAllProviderEntries() {
 
       // Multiple accounts: group into one compact card.
       if (currentAccounts.length > 1) {
-        const groupAccounts = currentAccounts.filter((acc, idx) =>
-          isProviderTelemetryEnabled('minimax', acc.accountId || acc.id || idx + 1));
-        if (groupAccounts.length === 0) return;
-        entries.push({
-          provider: 'minimax',
-          cardKey: sanitizeProviderCardKey('minimax'),
-          title: bothProviderNames.minimax || 'MiniMax',
-          badge: `${groupAccounts.length} accounts`,
-          snapshotAt: oldestSnapshotAt(groupAccounts),
-          accountsGroup: groupAccounts,
-        });
+        const grouped = groupedAccountEntry('minimax', currentAccounts);
+        if (grouped) entries.push(grouped);
         return;
       }
 
@@ -6405,6 +6567,15 @@ function buildAllProviderEntries() {
       return;
     }
 
+    // One widget per profile, grouped into the provider's card so the homepage
+    // stays a single row per provider however many accounts are logged in.
+    const groupedAccounts = current[MULTI_ACCOUNT_PROVIDER_KEYS[provider]];
+    if (Array.isArray(groupedAccounts) && groupedAccounts.length > 0) {
+      const grouped = groupedAccountEntry(provider, groupedAccounts);
+      if (grouped) entries.push(grouped);
+      return;
+    }
+
     const payload = current[provider];
     if (!payload) return;
     if (!isProviderTelemetryEnabled(provider)) return;
@@ -6418,6 +6589,9 @@ function buildAllProviderEntries() {
           ? (payload.planName || toTitleCase(payload.accountType || ''))
           : toTitleCase(payload.planType || '')),
       snapshotAt: payload.snapshotAt || null,
+      // The combined view has no account picker, so a multi-account install
+      // would otherwise read an unattributed number. One account: no chrome.
+      accountLabel: providerAccountCardLabel(payload.account),
       promoHtml: provider === 'anthropic' && payload.promo ? promoTagHTML() : '',
       planType: payload.planType || '',
       quotas: normalizeBothQuotas(provider, payload),
@@ -7085,7 +7259,7 @@ function renderHomepageAccountsHTML(provider, accounts) {
     const accountName = account.accountName || account.name || `Account ${accountId}`;
     const quotas = normalizeBothQuotas(provider, account);
     const freshness = providerFreshness(account.snapshotAt);
-    return `<div class="homepage-harness-account" data-account-id="${escapeHTML(accountId)}" data-freshness="${escapeHTML(freshness.state)}">
+    return `<div class="homepage-harness-account" data-account-id="${escapeHTML(accountId)}" data-freshness="${escapeHTML(freshness.state)}" role="button" tabindex="0" aria-label="Open ${escapeHTML(accountName)}">
       <div class="homepage-harness-account-name">
         <span>${escapeHTML(accountName)}</span>
         ${freshnessChipHTML(freshness)}
@@ -7121,10 +7295,13 @@ function renderAllProvidersView() {
         </div></div>
       </section>`;
     }
+    const accountChip = entry.accountLabel
+      ? `<span class="provider-card-account" title="These numbers are for the ${escapeHTML(entry.accountLabel)} account">${escapeHTML(entry.accountLabel)}</span>`
+      : '';
     const cardHeader = `<header class="provider-card-header">
         <div class="provider-card-title">
           <span>${escapeHTML(entry.title)}</span>
-          ${badge}${promo}
+          ${accountChip}${badge}${promo}
         </div>
         <div class="homepage-harness-header-meta">
           ${freshnessChip}
@@ -7153,6 +7330,19 @@ function renderAllProvidersView() {
       saveDefaultProvider(provider);
       window.location.href = `${BASE_PATH}/?provider=${provider}`;
     };
+    // Clicking one profile opens that profile, not whichever the picker last
+    // remembered. The picker reads the same key, so this is the whole handoff.
+    card.querySelectorAll('.homepage-harness-account[data-account-id]').forEach((block) => {
+      const openAccount = (e) => {
+        e.stopPropagation();
+        try { localStorage.setItem(providerAccountStorageKey(provider), block.dataset.accountId); } catch (_) { /* private mode keeps the default account */ }
+        go();
+      };
+      block.addEventListener('click', openAccount);
+      block.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAccount(e); }
+      });
+    });
     card.addEventListener('click', go);
     card.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }

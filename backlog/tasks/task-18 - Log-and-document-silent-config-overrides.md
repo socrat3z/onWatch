@@ -1,9 +1,10 @@
 ---
 id: TASK-18
 title: Log and document silent config overrides
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:23'
+updated_date: '2026-08-11 00:00'
 labels:
   - review-multi-account
   - rev-p3-6
@@ -28,6 +29,6 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P3.6
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Each override emits one startup Warn naming both the ignored setting and the reason
-- [ ] #2 docs/WITH_USER_ENV.md documents both interactions
+- [x] #1 Each override emits one startup Warn naming both the ignored setting and the reason
+- [x] #2 docs/WITH_USER_ENV.md documents both interactions
 <!-- AC:END -->

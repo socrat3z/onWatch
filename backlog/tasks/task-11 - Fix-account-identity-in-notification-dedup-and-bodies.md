@@ -1,9 +1,10 @@
 ---
 id: TASK-11
 title: Fix account identity in notification dedup and bodies
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:22'
+updated_date: '2026-08-11 00:00'
 labels:
   - review-multi-account
   - rev-p2-6
@@ -28,7 +29,7 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P2.6
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The same quota on two accounts produces two independent alert states
-- [ ] #2 Switching an install from ambient to manager mode does not re-alert quotas that were already alerted
-- [ ] #3 Alert bodies name the account alias
+- [x] #1 The same quota on two accounts produces two independent alert states
+- [x] #2 Switching an install from ambient to manager mode does not re-alert quotas that were already alerted
+- [x] #3 Alert bodies name the account alias
 <!-- AC:END -->

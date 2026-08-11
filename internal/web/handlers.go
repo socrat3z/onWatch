@@ -79,47 +79,6 @@ type MiniMaxAccountReloader interface {
 	Reload()
 }
 
-// ProviderAccounts exposes safe account presentation management. Credentials
-// are intentionally not accepted here - login and discovery remain the source
-// of truth for which accounts can poll.
-func (h *Handler) ProviderAccounts(w http.ResponseWriter, r *http.Request) {
-	provider := strings.TrimSpace(r.URL.Query().Get("provider"))
-	if provider != "anthropic" && provider != "antigravity" {
-		respondError(w, http.StatusBadRequest, "unsupported provider")
-		return
-	}
-	if r.Method == http.MethodGet {
-		accounts, err := h.store.QueryProviderAccounts(provider)
-		if err != nil {
-			respondError(w, http.StatusInternalServerError, "failed to query accounts")
-			return
-		}
-		response := make([]map[string]interface{}, 0, len(accounts))
-		for _, account := range accounts {
-			response = append(response, map[string]interface{}{"id": account.ID, "name": account.Name, "alias": store.ProviderAccountAlias(account), "deletedAt": account.DeletedAt})
-		}
-		respondJSON(w, http.StatusOK, map[string]interface{}{"accounts": response})
-		return
-	}
-	if r.Method != http.MethodPatch {
-		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	var request struct {
-		AccountID int64  `json:"account_id"`
-		Alias     string `json:"alias"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&request); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid account request")
-		return
-	}
-	if err := h.store.UpdateProviderAccountAlias(provider, request.AccountID, request.Alias); err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	respondJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
-}
-
 // Handler handles HTTP requests for the web dashboard
 type Handler struct {
 	store              *store.Store
@@ -210,6 +169,60 @@ func (h *Handler) parseProviderAccountID(r *http.Request, provider string) (int6
 		return 0, err
 	}
 	return account.ID, nil
+}
+
+// ProviderAccounts exposes safe account presentation management. Credentials
+// are intentionally not accepted here - login and discovery remain the source
+// of truth for which accounts can poll.
+func (h *Handler) ProviderAccounts(w http.ResponseWriter, r *http.Request) {
+	provider := strings.TrimSpace(r.URL.Query().Get("provider"))
+	if provider != "anthropic" && provider != "antigravity" {
+		respondError(w, http.StatusBadRequest, "unsupported provider")
+		return
+	}
+	if r.Method == http.MethodGet {
+		accounts, err := h.store.QueryProviderAccounts(provider)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to query accounts")
+			return
+		}
+		response := make([]map[string]interface{}, 0, len(accounts))
+		for _, account := range accounts {
+			state, credentialPath := store.ProviderAccountCredentialHealth(account)
+			response = append(response, map[string]interface{}{
+				"id":        account.ID,
+				"name":      account.Name,
+				"alias":     store.ProviderAccountAlias(account),
+				"deletedAt": account.DeletedAt,
+				// isDefault marks the pre-discovery account that holds history
+				// from before this install had named accounts.
+				"isDefault": account.Name == store.DefaultProviderAccountName,
+				"health": map[string]interface{}{
+					"credentials":    state,
+					"credentialPath": credentialPath,
+				},
+			})
+		}
+		respondJSON(w, http.StatusOK, map[string]interface{}{"accounts": response})
+		return
+	}
+	if r.Method != http.MethodPatch {
+		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var request struct {
+		AccountID int64  `json:"account_id"`
+		Alias     string `json:"alias"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&request); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid account request")
+		return
+	}
+	if err := h.store.UpdateProviderAccountAlias(provider, request.AccountID, request.Alias); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
 }
 
 // CodexProfile represents a saved Codex credential profile (mirrors agent.CodexProfile).
@@ -645,26 +658,10 @@ func (h *Handler) codexUsageAccounts() []map[string]interface{} {
 		return []map[string]interface{}{}
 	}
 
-	// Only return active (non-deleted) accounts for dashboard rendering
-	accounts, err := h.store.QueryActiveProviderAccounts("codex")
-	if err != nil {
-		h.logger.Error("failed to query Codex accounts", "error", err)
+	// Only active (non-deleted) accounts are rendered.
+	usages := h.providerAccountUsages("codex", h.buildCodexCurrent, func() int64 { return DefaultCodexAccountID })
+	if usages == nil {
 		return []map[string]interface{}{}
-	}
-	if len(accounts) == 0 {
-		accounts = []store.ProviderAccount{
-			{ID: DefaultCodexAccountID, Name: "default"},
-		}
-	}
-
-	usages := make([]map[string]interface{}, 0, len(accounts))
-	for _, acc := range accounts {
-		usage := h.buildCodexCurrent(acc.ID)
-		usage["accountId"] = acc.ID
-		usage["accountName"] = acc.Name
-		usage["id"] = acc.ID
-		usage["name"] = acc.Name
-		usages = append(usages, usage)
 	}
 	return usages
 }
@@ -1171,12 +1168,20 @@ func providerTelemetryEnabled(visibility map[string]interface{}, providerKey str
 	return true
 }
 
-func codexAccountTelemetryEnabled(visibility map[string]interface{}, accountID int64) bool {
-	accountKey := fmt.Sprintf("codex:%d", accountID)
+// accountTelemetryEnabled resolves the "<provider>:<id>" visibility key the
+// settings UI writes for every multi-account provider, falling back to the
+// provider-wide switch. One implementation, so an account switched off is
+// honoured the same way whichever provider it belongs to.
+func accountTelemetryEnabled(visibility map[string]interface{}, provider string, accountID int64) bool {
+	accountKey := fmt.Sprintf("%s:%d", provider, accountID)
 	if polling, exists := providerPollingValue(visibility[accountKey]); exists {
 		return polling
 	}
-	return providerTelemetryEnabled(visibility, "codex")
+	return providerTelemetryEnabled(visibility, provider)
+}
+
+func codexAccountTelemetryEnabled(visibility map[string]interface{}, accountID int64) bool {
+	return accountTelemetryEnabled(visibility, "codex", accountID)
 }
 
 type providerCatalogItem struct {
@@ -2334,52 +2339,26 @@ func (h *Handler) currentBoth(w http.ResponseWriter, r *http.Request) {
 	if h.config.HasProvider("zai") && providerTelemetryEnabled(visibility, "zai") {
 		response["zai"] = h.buildZaiCurrent()
 	}
+	// The four multi-account providers all go through attachAccountScopedCurrent
+	// so the homepage sees one payload shape, whichever provider it came from.
 	if h.config.HasProvider("anthropic") && providerTelemetryEnabled(visibility, "anthropic") {
-		response["anthropic"] = h.buildAnthropicCurrent(h.defaultProviderAccountID("anthropic"))
+		h.attachAccountScopedCurrent(response, visibility, "anthropic", h.buildAnthropicCurrent,
+			func() int64 { return h.defaultProviderAccountID("anthropic") })
 	}
 	if h.config.HasProvider("copilot") && providerTelemetryEnabled(visibility, "copilot") {
 		response["copilot"] = h.buildCopilotCurrent()
 	}
 	if h.config.HasProvider("codex") && providerTelemetryEnabled(visibility, "codex") {
-		codexAccounts := h.codexUsageAccounts()
-		originalAccountCount := len(codexAccounts)
-		filteredAccounts := make([]map[string]interface{}, 0, len(codexAccounts))
-		for _, acc := range codexAccounts {
-			accountID := codexUsageAccountID(acc)
-			if codexAccountTelemetryEnabled(visibility, accountID) {
-				filteredAccounts = append(filteredAccounts, acc)
-			}
-		}
-		codexAccounts = filteredAccounts
-		if len(codexAccounts) > 1 {
-			response["codexAccounts"] = codexAccounts
-		} else if len(codexAccounts) == 1 {
-			response["codex"] = codexAccounts[0]
-		} else if originalAccountCount == 0 {
-			response["codex"] = h.buildCodexCurrent(DefaultCodexAccountID)
-		}
+		h.attachAccountScopedCurrent(response, visibility, "codex", h.buildCodexCurrent,
+			func() int64 { return DefaultCodexAccountID })
 	}
 	if h.config.HasProvider("antigravity") && providerTelemetryEnabled(visibility, "antigravity") {
-		response["antigravity"] = h.buildAntigravityCurrent(h.defaultProviderAccountID("antigravity"))
+		h.attachAccountScopedCurrent(response, visibility, "antigravity", h.buildAntigravityCurrent,
+			func() int64 { return h.defaultProviderAccountID("antigravity") })
 	}
 	if h.config.HasProvider("minimax") && providerTelemetryEnabled(visibility, "minimax") {
-		minimaxAccounts := h.minimaxUsageAccounts()
-		originalCount := len(minimaxAccounts)
-		filtered := make([]map[string]interface{}, 0, len(minimaxAccounts))
-		for _, acc := range minimaxAccounts {
-			accountID := minimaxUsageAccountID(acc)
-			if minimaxAccountTelemetryEnabled(visibility, accountID) {
-				filtered = append(filtered, acc)
-			}
-		}
-		minimaxAccounts = filtered
-		if len(minimaxAccounts) > 1 {
-			response["minimaxAccounts"] = minimaxAccounts
-		} else if len(minimaxAccounts) == 1 {
-			response["minimax"] = minimaxAccounts[0]
-		} else if originalCount == 0 {
-			response["minimax"] = h.buildMiniMaxCurrent(h.defaultMiniMaxAccountID())
-		}
+		h.attachAccountScopedCurrent(response, visibility, "minimax", h.buildMiniMaxCurrent,
+			h.defaultMiniMaxAccountID)
 	}
 	if h.config.HasProvider("openrouter") && providerTelemetryEnabled(visibility, "openrouter") {
 		response["openrouter"] = h.buildOpenRouterCurrent()
@@ -5749,11 +5728,120 @@ func (h *Handler) queryProviderSessionsByAccount(provider string, accountID int6
 	return h.store.QuerySessionHistory(provider)
 }
 
-// buildAnthropicCurrentForAccount is kept as the account-explicit entry point;
-// it renders the same payload as the default view so a picker switch cannot
-// change which fields the dashboard receives.
-func (h *Handler) buildAnthropicCurrentForAccount(accountID int64) map[string]interface{} {
-	return h.buildAnthropicCurrent(accountID)
+// providerAccountUsages builds one current payload per live account of a
+// multi-account provider. Every provider gets the same identity keys, so a
+// consumer never has to know which provider it is reading:
+//
+//	accountId / id - the durable key the pickers and visibility settings use
+//	name           - the credential folder name, which is never renamed
+//	accountName    - the display alias, which is the only label ever rendered
+//
+// fallbackAccountID supplies the synthetic account used when the store holds no
+// rows yet, so a provider is never dropped from the dashboard while it waits
+// for its first discovery pass.
+func (h *Handler) providerAccountUsages(provider string, build func(int64) map[string]interface{}, fallbackAccountID func() int64) []map[string]interface{} {
+	if h.store == nil {
+		return nil
+	}
+	accounts, err := h.store.QueryActiveProviderAccounts(provider)
+	if err != nil {
+		h.logger.Error("failed to query provider accounts", "provider", provider, "error", err)
+		return nil
+	}
+	if len(accounts) == 0 {
+		id := fallbackAccountID()
+		if id <= 0 {
+			return nil
+		}
+		accounts = []store.ProviderAccount{{ID: id, Name: store.DefaultProviderAccountName}}
+	}
+
+	usages := make([]map[string]interface{}, 0, len(accounts))
+	for _, account := range accounts {
+		usage := build(account.ID)
+		usage["accountId"] = account.ID
+		usage["id"] = account.ID
+		usage["name"] = account.Name
+		usage["accountName"] = store.ProviderAccountAlias(account)
+		usages = append(usages, usage)
+	}
+	return usages
+}
+
+// attachAccountScopedCurrent writes one provider's slice of the combined
+// payload under a single rule: two or more visible accounts are keyed
+// "<provider>Accounts", one is keyed by the provider name so single-account
+// installs keep the flat shape, and a provider whose every account has been
+// switched off is omitted rather than silently reappearing as its default.
+func (h *Handler) attachAccountScopedCurrent(response, visibility map[string]interface{}, provider string, build func(int64) map[string]interface{}, fallbackAccountID func() int64) {
+	usages := h.providerAccountUsages(provider, build, fallbackAccountID)
+	if len(usages) == 0 {
+		// No store, or no account to attribute the numbers to.
+		response[provider] = build(fallbackAccountID())
+		return
+	}
+
+	visible := make([]map[string]interface{}, 0, len(usages))
+	for _, usage := range usages {
+		if accountTelemetryEnabled(visibility, provider, providerUsageAccountID(usage)) {
+			visible = append(visible, usage)
+		}
+	}
+	switch len(visible) {
+	case 0:
+		// Every account is hidden on purpose - say nothing about this provider.
+	case 1:
+		response[provider] = visible[0]
+	default:
+		response[provider+"Accounts"] = visible
+	}
+}
+
+// providerUsageAccountID reads back the identity providerAccountUsages wrote.
+func providerUsageAccountID(usage map[string]interface{}) int64 {
+	if usage == nil {
+		return 0
+	}
+	switch v := usage["accountId"].(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case float64:
+		return int64(v)
+	}
+	return 0
+}
+
+// accountIdentity says which account a payload belongs to. The combined
+// dashboard has no account picker, so without this the Anthropic and
+// Antigravity cards show numbers with no indication of whose they are.
+// accountCount lets the UI stay completely unchanged on a single-account
+// install and only add labelling once a second account exists.
+func (h *Handler) accountIdentity(provider string, accountID int64) map[string]interface{} {
+	if h.store == nil || accountID <= 0 {
+		return nil
+	}
+	account, err := h.store.GetProviderAccountByID(accountID)
+	if err != nil || account == nil {
+		return nil
+	}
+	count := 0
+	if accounts, err := h.store.QueryActiveProviderAccounts(provider); err == nil {
+		count = len(accounts)
+	}
+	state, credentialPath := store.ProviderAccountCredentialHealth(*account)
+	return map[string]interface{}{
+		"id":           account.ID,
+		"name":         account.Name,
+		"alias":        store.ProviderAccountAlias(*account),
+		"isDefault":    account.Name == store.DefaultProviderAccountName,
+		"accountCount": count,
+		"health": map[string]interface{}{
+			"credentials":    state,
+			"credentialPath": credentialPath,
+		},
+	}
 }
 
 // buildAnthropicCurrent builds the Anthropic current quota response map.
@@ -5771,6 +5859,9 @@ func (h *Handler) buildAnthropicCurrent(accountID int64) map[string]interface{} 
 
 	if h.store == nil {
 		return response
+	}
+	if identity := h.accountIdentity("anthropic", accountID); identity != nil {
+		response["account"] = identity
 	}
 
 	// Get per-quota latest values (merges statusline + API snapshots).
@@ -8671,6 +8762,9 @@ func (h *Handler) buildAntigravityCurrent(accountID int64) map[string]interface{
 	if h.store == nil {
 		return response
 	}
+	if identity := h.accountIdentity("antigravity", accountID); identity != nil {
+		response["account"] = identity
+	}
 
 	latest, err := h.store.QueryLatestAntigravity(accountID)
 	if err != nil {
@@ -9333,28 +9427,9 @@ func (h *Handler) minimaxUsageAccounts() []map[string]interface{} {
 		return []map[string]interface{}{}
 	}
 
-	accounts, err := h.store.QueryActiveProviderAccounts("minimax")
-	if err != nil {
-		h.logger.Error("failed to query MiniMax accounts", "error", err)
+	usages := h.providerAccountUsages("minimax", h.buildMiniMaxCurrent, h.defaultMiniMaxAccountID)
+	if usages == nil {
 		return []map[string]interface{}{}
-	}
-	if len(accounts) == 0 {
-		defID := h.defaultMiniMaxAccountID()
-		if defID > 0 {
-			accounts = []store.ProviderAccount{
-				{ID: defID, Name: "default"},
-			}
-		}
-	}
-
-	usages := make([]map[string]interface{}, 0, len(accounts))
-	for _, acc := range accounts {
-		usage := h.buildMiniMaxCurrent(acc.ID)
-		usage["accountId"] = acc.ID
-		usage["accountName"] = acc.Name
-		usage["id"] = acc.ID
-		usage["name"] = acc.Name
-		usages = append(usages, usage)
 	}
 	return usages
 }
@@ -9389,11 +9464,7 @@ func minimaxUsageAccountName(usage map[string]interface{}) string {
 }
 
 func minimaxAccountTelemetryEnabled(visibility map[string]interface{}, accountID int64) bool {
-	accountKey := fmt.Sprintf("minimax:%d", accountID)
-	if polling, exists := providerPollingValue(visibility[accountKey]); exists {
-		return polling
-	}
-	return providerTelemetryEnabled(visibility, "minimax")
+	return accountTelemetryEnabled(visibility, "minimax", accountID)
 }
 
 // MiniMaxAccounts handles MiniMax account management.
@@ -11535,8 +11606,13 @@ func (h *Handler) loggingHistoryAnthropic(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	accountID, err := h.parseProviderAccountID(r, "anthropic")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	start, end, limit := h.loggingHistoryRangeAndLimit(r)
-	snapshots, err := h.store.QueryAnthropicRange(start, end, limit)
+	snapshots, err := h.store.QueryAnthropicRangeForAccount(accountID, start, end, limit)
 	if err != nil {
 		h.logger.Error("failed to query Anthropic snapshots", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query logging history")
@@ -11747,8 +11823,13 @@ func (h *Handler) loggingHistoryAntigravity(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	accountID, err := h.parseProviderAccountID(r, "antigravity")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	start, end, limit := h.loggingHistoryRangeAndLimit(r)
-	snapshots, err := h.store.QueryAntigravityRange(start, end, limit)
+	snapshots, err := h.store.QueryAntigravityRangeForAccount(accountID, start, end, limit)
 	if err != nil {
 		h.logger.Error("failed to query Antigravity snapshots", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query logging history")

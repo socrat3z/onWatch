@@ -9,6 +9,11 @@ untouched, so the default build is still upstream's distroless image.
 
 ## Multiple accounts
 
+> The provider-neutral model - discovery, aliases, health, API, metrics, and the
+> host (non-container) setup - is documented in
+> [Multiple Accounts Per Provider](MULTI_ACCOUNT.md). This section covers the
+> container login path only.
+
 Each provider uses a root with one safe, stable credential folder per account.
 Choose a lowercase local name such as `work` or `personal`, then use it only for
 the one-shot login command:
@@ -29,6 +34,59 @@ Existing single-account volumes are copied to `default` on first start and the
 original files are retained as a recovery copy. SQLite data is migrated
 automatically; no manual database step is required.
 
+### What happens to history recorded before account discovery
+
+Everything polled before account discovery was enabled stays attached to a
+reserved account named `default`, and nothing is ever reassigned to a named
+account automatically - a merge would have to rewrite reset cycles, and there is
+no reversible action for that yet. Concretely:
+
+- The picker shows `default` labelled **Before account split**, with an
+  explanation under the header. That row is the pre-discovery history.
+- If the entrypoint copied your old credentials to a `default` folder (the
+  normal upgrade path), `default` also keeps polling as a live account and the
+  history is simply continuous.
+- If no `default` credential folder exists, `default` stops gaining data but
+  keeps all of it. Account reconciliation never soft-deletes `default`, because
+  it is not backed by a credential directory like every other account.
+- Removing a named account's folder soft-deletes that account. This now applies
+  to an account that never started - one registered with missing credentials -
+  which previously could not be removed at all. History is retained; Prometheus
+  stops exporting series for it (see [Metrics](#metrics-and-deleted-accounts)).
+
+### Account health
+
+Each reconcile records whether the credential file a provider needs is present
+and parseable. `GET /api/accounts` returns it per account, and the picker marks
+an account that cannot poll along with the exact path onWatch looked at, instead
+of showing an empty dashboard with no explanation. Antigravity accounts report
+`unverified`: confirming that login needs the keyring, which discovery
+deliberately never reads.
+
+### Metrics and deleted accounts
+
+Prometheus exports only live accounts. A soft-deleted account never gains new
+data, so keeping its series would pin a frozen value and grow label cardinality
+forever. Its history stays queryable in the dashboard and API.
+
+### Configuration that is overridden in multi-account mode
+
+Two settings are deliberately ignored once account discovery is on. Both now
+emit one startup `WARN` naming the setting and the reason:
+
+| Setting | Ignored when | Why |
+|---------|--------------|-----|
+| `ANTHROPIC_TOKEN` | `ANTHROPIC_AUTH_ROOT` is set | Every named account authenticates from its own `<root>/<alias>/.claude/.credentials.json`, and each rotates its own refresh token. |
+| `ANTIGRAVITY_SOURCE` | `ANTIGRAVITY_AUTH_ROOT` is set | The IDE probe cannot be scoped to one account home, so every named account polls through the `agy` CLI. |
+
+### Codex alias collisions
+
+Codex has two account sources: legacy onWatch profiles and native `auth.json`
+homes under `CODEX_AUTH_ROOT`. Native accounts load after legacy profiles, so if
+both use the same alias the legacy profile wins and the native account never
+polls. That case now logs one `WARN` naming the alias and the winner. Rename one
+of the two so the aliases differ.
+
 > **Everything about this image lives in this document.** The provider setup guides
 > ([Antigravity](ANTIGRAVITY_SETUP.md), [Codex](CODEX_SETUP.md)) cover host installs
 > and provider configuration and link back here for the container path.
@@ -37,6 +95,12 @@ automatically; no manual database step is required.
 
 ## Contents
 
+- [Multiple accounts](#multiple-accounts)
+  - [What happens to history recorded before account discovery](#what-happens-to-history-recorded-before-account-discovery)
+  - [Account health](#account-health)
+  - [Metrics and deleted accounts](#metrics-and-deleted-accounts)
+  - [Configuration that is overridden in multi-account mode](#configuration-that-is-overridden-in-multi-account-mode)
+  - [Codex alias collisions](#codex-alias-collisions)
 - [Why this image exists](#why-this-image-exists)
 - [Files](#files)
 - [Quick start](#quick-start)

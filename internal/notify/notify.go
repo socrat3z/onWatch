@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,8 +21,9 @@ type NotificationEngine struct {
 	vapidPublicKey      string
 	mu                  sync.RWMutex
 	cfg                 NotificationConfig
-	encryptionKey       string // current hex-encoded key for decrypting SMTP passwords
-	legacyEncryptionKey string // fallback hex-encoded key for legacy SMTP password migration
+	encryptionKey       string            // current hex-encoded key for decrypting SMTP passwords
+	legacyEncryptionKey string            // fallback hex-encoded key for legacy SMTP password migration
+	defaultAccountIDs   map[string]string // provider -> default account ID, cached for notification keying
 }
 
 // NotificationConfig holds threshold and delivery settings.
@@ -420,7 +422,7 @@ func (e *NotificationEngine) Check(status QuotaStatus) {
 
 	// Handle reset: clear notification log so alerts can fire again in the new cycle
 	provider := normalizeNotificationProvider(status.Provider)
-	quotaKey := notificationQuotaKey(status)
+	quotaKey := e.notificationQuotaKey(status)
 	overrideKey := notificationOverrideKey(provider, status.QuotaKey)
 	override, hasOverride := cfg.Overrides[overrideKey]
 	if !hasOverride {
@@ -508,7 +510,7 @@ func (e *NotificationEngine) TestSMTPDiag() (string, error) {
 // The notification_log entry is cleared on quota reset (see Check/resetOccurred).
 func (e *NotificationEngine) sendNotification(mailer *SMTPMailer, pushSender *PushSender, channels NotificationChannels, status QuotaStatus, notifType string) {
 	provider := normalizeNotificationProvider(status.Provider)
-	quotaKey := notificationQuotaKey(status)
+	quotaKey := e.notificationQuotaKey(status)
 	sentAt, _, err := e.store.GetLastNotification(provider, quotaKey, notifType)
 	if err != nil {
 		e.logger.Error("failed to check notification log", "error", err)
@@ -580,16 +582,75 @@ func notificationOverrideKey(provider, quotaKey string) string {
 	return normalizeNotificationProvider(provider) + ":" + strings.TrimSpace(quotaKey)
 }
 
-// notificationQuotaKey generates a unique key for notification tracking.
-// For multi-account providers like Codex, the key includes the account ID.
-func notificationQuotaKey(status QuotaStatus) string {
-	key := status.QuotaKey
-	// Include account ID for multi-account providers (Codex)
-	// AccountID "1" is the default account, so we only prefix for other accounts
-	if status.AccountID != "" && status.AccountID != "1" {
-		key = status.AccountID + ":" + key
+// notificationQuotaKey generates a unique key for notification tracking. The
+// provider is already a separate column in the notification log, so this key
+// only has to namespace by account.
+//
+// Every spelling of "this provider's default account" - "", "0" from the
+// ambient agent, and the default row's real ID from an account manager -
+// collapses onto the bare quota key. That keeps one account in one dedup
+// namespace across an ambient-to-manager switch (and preserves the keys
+// written by every earlier version), while any other account is prefixed so
+// two accounts alert independently on the same quota.
+func (e *NotificationEngine) notificationQuotaKey(status QuotaStatus) string {
+	id := strings.TrimSpace(status.AccountID)
+	if id == "" || id == "0" || id == e.defaultAccountID(status.Provider) {
+		return status.QuotaKey
 	}
-	return key
+	return id + ":" + status.QuotaKey
+}
+
+// defaultAccountID returns the provider's default account ID as a string, or ""
+// when it has none. It is cached because Check runs on every poll of every
+// quota and the answer changes only when the database is recreated.
+func (e *NotificationEngine) defaultAccountID(provider string) string {
+	provider = normalizeNotificationProvider(provider)
+	e.mu.RLock()
+	cached, ok := e.defaultAccountIDs[provider]
+	e.mu.RUnlock()
+	if ok {
+		return cached
+	}
+	resolved := ""
+	if e.store != nil {
+		id, err := e.store.LookupDefaultProviderAccountID(provider)
+		if err != nil {
+			e.logger.Debug("could not resolve default account for notification key", "provider", provider, "error", err)
+			return ""
+		}
+		if id > 0 {
+			resolved = strconv.FormatInt(id, 10)
+		}
+	}
+	e.mu.Lock()
+	if e.defaultAccountIDs == nil {
+		e.defaultAccountIDs = make(map[string]string)
+	}
+	e.defaultAccountIDs[provider] = resolved
+	e.mu.Unlock()
+	return resolved
+}
+
+// accountLabel turns a raw account ID into the alias a user recognises. Alert
+// bodies said "Account: 12" before this; a global autoincrement row ID is
+// meaningless to the person reading the email.
+func (e *NotificationEngine) accountLabel(provider, accountID string) string {
+	id := strings.TrimSpace(accountID)
+	if id == "" || id == "0" || e.store == nil {
+		return ""
+	}
+	parsed, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return id // Non-numeric IDs are already names (legacy Codex profiles).
+	}
+	account, err := e.store.GetProviderAccountByID(parsed)
+	if err != nil || account == nil {
+		return id
+	}
+	if provider != "" && !strings.EqualFold(account.Provider, normalizeNotificationProvider(provider)) {
+		return id
+	}
+	return store.ProviderAccountAlias(*account)
 }
 
 // titleCase capitalizes the first letter of a string.
@@ -621,6 +682,9 @@ func (e *NotificationEngine) buildSubject(status QuotaStatus, notifType string) 
 func (e *NotificationEngine) buildBody(status QuotaStatus, notifType string) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Provider: %s\n", status.Provider))
+	if label := e.accountLabel(status.Provider, status.AccountID); label != "" {
+		sb.WriteString(fmt.Sprintf("Account: %s\n", label))
+	}
 	sb.WriteString(fmt.Sprintf("Quota: %s\n", status.QuotaKey))
 	sb.WriteString(fmt.Sprintf("Utilization: %.1f%%\n", status.Utilization))
 	if status.Limit > 0 {
@@ -730,8 +794,8 @@ func (e *NotificationEngine) buildAuthErrorBody(alert AuthErrorAlert) string {
 	sb.WriteString(fmt.Sprintf("Provider: %s\n", titleCase(alert.Provider)))
 	sb.WriteString(fmt.Sprintf("Issue: %s\n", alert.Title))
 	sb.WriteString(fmt.Sprintf("Details: %s\n", alert.Message))
-	if alert.AccountID != "" {
-		sb.WriteString(fmt.Sprintf("Account: %s\n", alert.AccountID))
+	if label := e.accountLabel(alert.Provider, alert.AccountID); label != "" {
+		sb.WriteString(fmt.Sprintf("Account: %s\n", label))
 	}
 	sb.WriteString(fmt.Sprintf("Time: %s\n", time.Now().UTC().Format(time.RFC3339)))
 	sb.WriteString("\n")

@@ -17,7 +17,7 @@ func TestConfigLoad_WithOnlyCodexAuthFile_AllowsEmptyProviderConfig(t *testing.T
 	homeDir := t.TempDir()
 	codexHome := t.TempDir()
 	t.Chdir(t.TempDir())
-	t.Setenv("HOME", homeDir)
+	setTestUserHome(t, homeDir)
 	t.Setenv("CODEX_HOME", codexHome)
 	t.Setenv("SYNTHETIC_API_KEY", "")
 	t.Setenv("ZAI_API_KEY", "")
@@ -117,7 +117,7 @@ func TestDeriveEncryptionKey_UsesEncryptionSalt(t *testing.T) {
 func TestStatusLogCandidates(t *testing.T) {
 	t.Run("prefers db directory then home then cwd", func(t *testing.T) {
 		homeDir := t.TempDir()
-		t.Setenv("HOME", homeDir)
+		setTestUserHome(t, homeDir)
 
 		dbPath := filepath.Join(t.TempDir(), "data", "onwatch.db")
 		got := statusLogCandidates(dbPath, "main.log", "menubar.log")
@@ -142,7 +142,7 @@ func TestStatusLogCandidates(t *testing.T) {
 
 	t.Run("adds pid dir when db path missing", func(t *testing.T) {
 		homeDir := t.TempDir()
-		t.Setenv("HOME", homeDir)
+		setTestUserHome(t, homeDir)
 
 		oldPIDDir := pidDir
 		pidDir = t.TempDir()
@@ -166,7 +166,7 @@ func TestStatusLogCandidates(t *testing.T) {
 
 	t.Run("deduplicates repeated names", func(t *testing.T) {
 		homeDir := t.TempDir()
-		t.Setenv("HOME", homeDir)
+		setTestUserHome(t, homeDir)
 
 		dbPath := filepath.Join(t.TempDir(), "data", "onwatch.db")
 		got := statusLogCandidates(dbPath, "main.log", "main.log")

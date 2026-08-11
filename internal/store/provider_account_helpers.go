@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+// DefaultProviderAccountName is the reserved account that holds history from
+// before account discovery existed. It is never backed by a credential
+// directory, so directory-driven reconciliation must leave it alone.
+const DefaultProviderAccountName = "default"
+
 // ProviderAccountAlias returns the non-secret presentation alias selected by
 // the user, falling back to the durable credential-directory name.
 func ProviderAccountAlias(account ProviderAccount) string {
@@ -44,7 +49,7 @@ func (s *Store) UpdateProviderAccountAlias(provider string, accountID int64, ali
 // EnsureDefaultProviderAccount returns the real global database ID for a
 // provider's default account. Only Codex retains its historical ID=1 contract.
 func (s *Store) EnsureDefaultProviderAccount(provider string) (*ProviderAccount, error) {
-	return s.GetOrCreateProviderAccount(strings.TrimSpace(provider), "default")
+	return s.GetOrCreateProviderAccount(strings.TrimSpace(provider), DefaultProviderAccountName)
 }
 
 // ResolveProviderAccount verifies that an ID belongs to provider. This prevents
@@ -63,19 +68,44 @@ func (s *Store) ResolveProviderAccount(provider string, accountID int64) (*Provi
 	return account, nil
 }
 
-// ResolveDefaultProviderAccount returns the active default account for provider.
-func (s *Store) ResolveDefaultProviderAccount(provider string) (*ProviderAccount, error) {
+const providerAccountColumns = "id, provider, name, created_at, COALESCE(metadata, ''), COALESCE(external_id, '')"
+
+func (s *Store) scanProviderAccount(query string, args ...interface{}) (*ProviderAccount, error) {
 	var account ProviderAccount
 	var created string
-	err := s.db.QueryRow(`SELECT id, provider, name, created_at, COALESCE(metadata, ''), deleted_at, COALESCE(external_id, '') FROM provider_accounts WHERE provider = ? AND name = 'default' AND deleted_at IS NULL`, provider).Scan(&account.ID, &account.Provider, &account.Name, &created, &account.Metadata, new(sql.NullString), &account.ExternalID)
-	if err == sql.ErrNoRows {
-		return s.EnsureDefaultProviderAccount(provider)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("resolve default %s account: %w", provider, err)
+	if err := s.db.QueryRow(query, args...).Scan(&account.ID, &account.Provider, &account.Name, &created, &account.Metadata, &account.ExternalID); err != nil {
+		return nil, err
 	}
 	account.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	return &account, nil
+}
+
+// ResolveDefaultProviderAccount returns the account that account-unaware views
+// read. An install whose accounts all come from directory discovery has no
+// "default" row at all, so falling back to the oldest live account keeps those
+// views on real data instead of minting an empty placeholder that discovery
+// would never populate. Oldest rather than newest: the choice must not move
+// when the user adds another alias.
+func (s *Store) ResolveDefaultProviderAccount(provider string) (*ProviderAccount, error) {
+	account, err := s.scanProviderAccount(
+		"SELECT "+providerAccountColumns+" FROM provider_accounts WHERE provider = ? AND name = ? AND deleted_at IS NULL",
+		provider, DefaultProviderAccountName)
+	if err == nil {
+		return account, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, fmt.Errorf("resolve default %s account: %w", provider, err)
+	}
+	account, err = s.scanProviderAccount(
+		"SELECT "+providerAccountColumns+" FROM provider_accounts WHERE provider = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1",
+		provider)
+	if err == nil {
+		return account, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, fmt.Errorf("resolve default %s account: %w", provider, err)
+	}
+	return s.EnsureDefaultProviderAccount(provider)
 }
 
 func (s *Store) defaultProviderAccountID(provider string) (int64, error) {
@@ -118,4 +148,77 @@ func (s *Store) backfillProviderAccount(provider string, tables []string) error 
 		return fmt.Errorf("commit %s account migration: %w", provider, err)
 	}
 	return nil
+}
+
+// LookupDefaultProviderAccountID returns a provider's default account ID, or 0
+// when it has none. Unlike ResolveDefaultProviderAccount it never creates a row,
+// so hot read paths (notification keying) cannot write to the database.
+func (s *Store) LookupDefaultProviderAccountID(provider string) (int64, error) {
+	var id int64
+	err := s.db.QueryRow(
+		`SELECT id FROM provider_accounts WHERE provider = ? AND name = ? AND deleted_at IS NULL`,
+		strings.TrimSpace(provider), DefaultProviderAccountName,
+	).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("look up default %s account: %w", provider, err)
+	}
+	return id, nil
+}
+
+// Credential health states persisted in provider_accounts.metadata. They come
+// from account discovery, which never reads a secret - only whether the file a
+// provider needs is there and parseable.
+const (
+	AccountCredentialsOK         = "ok"         // credentials found and readable
+	AccountCredentialsMissing    = "missing"    // the expected file is not there
+	AccountCredentialsUnreadable = "unreadable" // present but malformed or empty
+	AccountCredentialsUnverified = "unverified" // discovery cannot tell (Antigravity keyring)
+)
+
+// SetProviderAccountCredentialHealth merges credential state into an account's
+// metadata, leaving the user's alias untouched. It skips the write when nothing
+// changed, so the once-a-minute reconcile does not churn the database.
+func (s *Store) SetProviderAccountCredentialHealth(accountID int64, state, credentialPath string) error {
+	account, err := s.GetProviderAccountByID(accountID)
+	if err != nil {
+		return err
+	}
+	if account == nil {
+		return fmt.Errorf("account %d not found", accountID)
+	}
+	metadata := map[string]interface{}{}
+	_ = json.Unmarshal([]byte(account.Metadata), &metadata)
+	if metadata["credentials"] == state && metadata["credentials_path"] == credentialPath {
+		return nil
+	}
+	metadata["credentials"] = state
+	if credentialPath == "" {
+		delete(metadata, "credentials_path")
+	} else {
+		metadata["credentials_path"] = credentialPath
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	return s.UpdateProviderAccountMetadata(accountID, string(encoded))
+}
+
+// ProviderAccountCredentialHealth reports the credential state recorded for an
+// account, and the path the daemon expects that credential at. An account that
+// predates health recording reports "unverified".
+func ProviderAccountCredentialHealth(account ProviderAccount) (state, credentialPath string) {
+	var metadata map[string]interface{}
+	if json.Unmarshal([]byte(account.Metadata), &metadata) != nil {
+		return AccountCredentialsUnverified, ""
+	}
+	state, _ = metadata["credentials"].(string)
+	credentialPath, _ = metadata["credentials_path"].(string)
+	if strings.TrimSpace(state) == "" {
+		state = AccountCredentialsUnverified
+	}
+	return state, credentialPath
 }

@@ -1,19 +1,14 @@
-package main
+package update
 
 import (
 	"fmt"
 	"os"
 	"testing"
 
-	"github.com/onllm-dev/onwatch/v2/internal/api"
 	"github.com/onllm-dev/onwatch/v2/internal/testenv"
 )
 
-// TestMain runs before all tests in the main package. It redirects every
-// supported home/config lookup so setup and profile tests cannot inspect or
-// mutate the developer's real credentials or onWatch data.
 func TestMain(m *testing.M) {
-	api.SetTestMode(true)
 	cleanup, err := testenv.IsolateProcessUserEnvironment()
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "isolate test user environment: %v\n", err)

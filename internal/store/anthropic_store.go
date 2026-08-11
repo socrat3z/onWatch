@@ -160,9 +160,17 @@ func (s *Store) QueryAnthropicUtilizationSeriesForAccount(accountID int64, quota
 	return points, rows.Err()
 }
 
-// QueryAnthropicRange returns Anthropic snapshots within a time range with optional limit.
+// QueryAnthropicRange returns the provider default account's Anthropic snapshots
+// within a time range. It resolves an account rather than accepting the absence
+// of one: an exported query that can run with no account predicate is what let
+// the dashboard show an unlabelled mixture of two accounts. Callers that mean a
+// specific account use QueryAnthropicRangeForAccount.
 func (s *Store) QueryAnthropicRange(start, end time.Time, limit ...int) ([]*api.AnthropicSnapshot, error) {
-	return s.queryAnthropicRange(0, start, end, limit...)
+	accountID, err := s.defaultProviderAccountID("anthropic")
+	if err != nil {
+		return nil, err
+	}
+	return s.queryAnthropicRange(accountID, start, end, limit...)
 }
 
 // queryAnthropicRange applies the account filter inside the LIMIT so a limited
@@ -340,9 +348,15 @@ func (s *Store) QueryActiveAnthropicCycle(quotaName string, accountIDs ...int64)
 	return &cycle, nil
 }
 
-// QueryAnthropicCycleHistory returns completed cycles for an Anthropic quota with optional limit.
+// QueryAnthropicCycleHistory returns the provider default account's completed
+// cycles for a quota. Like QueryAnthropicRange it always applies an account
+// predicate; QueryAnthropicCycleHistoryForAccount selects a different account.
 func (s *Store) QueryAnthropicCycleHistory(quotaName string, limit ...int) ([]*AnthropicResetCycle, error) {
-	return s.queryAnthropicCycleHistory(0, quotaName, limit...)
+	accountID, err := s.defaultProviderAccountID("anthropic")
+	if err != nil {
+		return nil, err
+	}
+	return s.queryAnthropicCycleHistory(accountID, quotaName, limit...)
 }
 
 // queryAnthropicCycleHistory filters by account in SQL so the LIMIT bounds one

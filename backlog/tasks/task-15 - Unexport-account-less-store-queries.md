@@ -1,9 +1,10 @@
 ---
 id: TASK-15
 title: Unexport account-less store queries
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:23'
+updated_date: '2026-08-11 00:00'
 updated_date: '2026-08-10 19:23'
 labels:
   - review-multi-account
@@ -31,6 +32,6 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P3.3
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 No exported store method for these four providers can execute without an account predicate
-- [ ] #2 internal/web/ compiles against the scoped API only
+- [x] #1 No exported store method for these four providers can execute without an account predicate
+- [x] #2 internal/web/ compiles against the scoped API only
 <!-- AC:END -->

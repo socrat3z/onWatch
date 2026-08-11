@@ -31,6 +31,7 @@ ${CYAN}USAGE:${NC}
 ${CYAN}FLAGS:${NC}
     --build,   -b                  Build production binary (macOS includes menubar support)
     --test,    -t                  Run all tests with race detection and coverage
+    --integration, -i              Run integration-tagged tests with race detection
     --smoke,   -s                  Quick validation: vet + build check + short tests
     --run,     -r                  Build and run in debug mode (foreground)
     --release                      Run tests, then build release binaries
@@ -45,6 +46,7 @@ ${CYAN}FLAGS:${NC}
 ${CYAN}EXAMPLES:${NC}
     ./app.sh --build               # Build production binary
     ./app.sh --test                # Run full test suite
+    ./app.sh --integration         # Run integration-tagged tests
     ./app.sh --smoke               # Quick pre-commit check
     ./app.sh --clean --build --run  # Clean, rebuild, and run
     ./app.sh --deps --build --test  # Install deps, build, test
@@ -56,7 +58,7 @@ ${CYAN}EXAMPLES:${NC}
 
 ${CYAN}NOTES:${NC}
     Flags can be combined. Execution order is always:
-    deps -> clean -> build -> test -> smoke -> release -> run
+    deps -> clean -> build -> test -> integration -> smoke -> release -> run
     With --docker, build/run/clean/stop operate on Docker instead of native Go.
 EOF
 }
@@ -66,6 +68,7 @@ DO_DEPS=false
 DO_CLEAN=false
 DO_BUILD=false
 DO_TEST=false
+DO_INTEGRATION=false
 DO_SMOKE=false
 DO_RELEASE=false
 DO_RUN=false
@@ -83,6 +86,8 @@ for arg in "$@"; do
             DO_BUILD=true ;;
         --test|-t)
             DO_TEST=true ;;
+        --integration|-i)
+            DO_INTEGRATION=true ;;
         --smoke|-s)
             DO_SMOKE=true ;;
         --run|-r)
@@ -223,6 +228,13 @@ do_test() {
     cd "$SCRIPT_DIR"
     go test -race -cover -count=1 ./...
     success "All tests passed."
+}
+
+do_integration() {
+    info "Running integration-tagged tests with race detection and coverage..."
+    cd "$SCRIPT_DIR"
+    go test -race -cover -count=1 -tags=integration ./...
+    success "All integration-tagged tests passed."
 }
 
 do_smoke() {
@@ -370,13 +382,14 @@ do_docker_clean() {
     success "Docker clean complete."
 }
 
-# --- Execute in order: deps -> clean -> build -> test -> smoke -> release -> run/stop ---
+# --- Execute in order: deps -> clean -> build -> test -> integration -> smoke -> release -> run/stop ---
 
 if $DO_DOCKER; then
     $DO_DEPS    && do_deps
     $DO_CLEAN   && do_docker_clean
     $DO_BUILD   && do_docker_build
     $DO_TEST    && do_test
+    $DO_INTEGRATION && do_integration
     $DO_SMOKE   && do_docker_build
     $DO_RELEASE && { warn "Release builds native binaries, not Docker images. Skipping."; }
     $DO_STOP    && do_docker_stop
@@ -386,6 +399,7 @@ else
     $DO_CLEAN   && do_clean
     $DO_BUILD   && do_build
     $DO_TEST    && do_test
+    $DO_INTEGRATION && do_integration
     $DO_SMOKE   && do_smoke
     $DO_RELEASE && do_release
     $DO_STOP    && do_stop

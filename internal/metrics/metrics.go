@@ -313,7 +313,11 @@ func (m *Metrics) scrapeAPIIntegrations(s *store.Store, staleThreshold time.Dura
 
 func (m *Metrics) scrapeAnthropic(s *store.Store, staleThreshold time.Duration) {
 	method := "anthropic"
-	accounts, err := s.QueryProviderAccounts(method)
+	// Policy: Prometheus reports only live accounts. A soft-deleted account never
+	// gains new data, so its series would flat-line forever while its label pair
+	// stays in every scrape - unbounded cardinality growth for a value that is
+	// frozen. Its history is not lost: the dashboard and API still query it.
+	accounts, err := s.QueryActiveProviderAccounts(method)
 	if err != nil {
 		m.scrapeErrorsTotal.WithLabelValues(method, "query_failed").Inc()
 		return
@@ -351,7 +355,11 @@ func (m *Metrics) scrapeAnthropic(s *store.Store, staleThreshold time.Duration) 
 func (m *Metrics) scrapeCodex(s *store.Store, staleThreshold time.Duration) {
 	method := "codex"
 
-	accounts, err := s.QueryProviderAccounts(method)
+	// Policy: Prometheus reports only live accounts. A soft-deleted account never
+	// gains new data, so its series would flat-line forever while its label pair
+	// stays in every scrape - unbounded cardinality growth for a value that is
+	// frozen. Its history is not lost: the dashboard and API still query it.
+	accounts, err := s.QueryActiveProviderAccounts(method)
 	if err != nil {
 		m.scrapeErrorsTotal.WithLabelValues(method, "query_failed").Inc()
 		return
@@ -456,7 +464,11 @@ func (m *Metrics) scrapeZai(s *store.Store, staleThreshold time.Duration) {
 func (m *Metrics) scrapeMiniMax(s *store.Store, staleThreshold time.Duration) {
 	method := "minimax"
 
-	accounts, err := s.QueryProviderAccounts(method)
+	// Policy: Prometheus reports only live accounts. A soft-deleted account never
+	// gains new data, so its series would flat-line forever while its label pair
+	// stays in every scrape - unbounded cardinality growth for a value that is
+	// frozen. Its history is not lost: the dashboard and API still query it.
+	accounts, err := s.QueryActiveProviderAccounts(method)
 	if err != nil {
 		m.scrapeErrorsTotal.WithLabelValues(method, "query_failed").Inc()
 		return
@@ -495,7 +507,11 @@ func (m *Metrics) scrapeMiniMax(s *store.Store, staleThreshold time.Duration) {
 
 func (m *Metrics) scrapeAntigravity(s *store.Store, staleThreshold time.Duration) {
 	method := "antigravity"
-	accounts, err := s.QueryProviderAccounts(method)
+	// Policy: Prometheus reports only live accounts. A soft-deleted account never
+	// gains new data, so its series would flat-line forever while its label pair
+	// stays in every scrape - unbounded cardinality growth for a value that is
+	// frozen. Its history is not lost: the dashboard and API still query it.
+	accounts, err := s.QueryActiveProviderAccounts(method)
 	if err != nil {
 		m.scrapeErrorsTotal.WithLabelValues(method, "query_failed").Inc()
 		return

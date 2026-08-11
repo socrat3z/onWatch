@@ -1,9 +1,10 @@
 ---
 id: TASK-19
 title: Decide metrics policy for soft-deleted accounts
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:23'
+updated_date: '2026-08-11 00:00'
 labels:
   - review-multi-account
   - rev-p3-7
@@ -28,6 +29,6 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P3.7
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The choice is made and recorded in a comment at both call sites
-- [ ] #2 If deleted accounts are excluded, a test asserts their series stop
+- [x] #1 The choice is made and recorded in a comment at both call sites
+- [x] #2 If deleted accounts are excluded, a test asserts their series stop
 <!-- AC:END -->

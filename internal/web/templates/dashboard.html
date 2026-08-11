@@ -99,6 +99,10 @@
     </header>
 
     <main id="main-content" class="main-content">
+        <!-- Explains a selected account that cannot poll, or the legacy
+             pre-discovery account, instead of leaving an empty dashboard. -->
+        <p class="provider-account-note" id="provider-account-note" role="status" hidden></p>
+
         <div class="welcome-banner">
             <h1 class="welcome-title">{{if eq .CurrentProvider "both"}}Harness Overview{{else}}Dashboard{{end}}</h1>
             {{if eq .CurrentProvider "both"}}<p class="welcome-subtitle">Current balances and limits across configured harnesses</p>{{end}}

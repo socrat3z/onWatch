@@ -66,6 +66,7 @@ type CodexAgentManager struct {
 	authRoot         string
 	scanInterval     time.Duration
 	lastScanProfiles map[string]time.Time // profile name -> modified time
+	warnedCollisions map[string]bool      // alias -> native/legacy collision already reported
 }
 
 // NewCodexAgentManager creates a new manager for multi-account Codex polling.
@@ -291,12 +292,37 @@ func (m *CodexAgentManager) loadAndStartProfile(path string) error {
 
 func (m *CodexAgentManager) loadAndStartProfileValue(profile CodexProfile) error {
 	m.mu.RLock()
-	_, exists := m.instances[profile.Name]
+	running, exists := m.instances[profile.Name]
 	m.mu.RUnlock()
 	if exists {
+		// Native accounts are always loaded after legacy profiles, so a name
+		// collision silently drops the one the user just logged in with. Say so
+		// once - the container login otherwise looks like it succeeded.
+		if profile.Native && running != nil && !running.Profile.Native {
+			m.warnOnceAboutCollision(profile.Name)
+		}
 		return nil
 	}
 	return m.startAgentForProfile(profile)
+}
+
+// warnOnceAboutCollision keeps the collision warning out of every 30s rescan.
+func (m *CodexAgentManager) warnOnceAboutCollision(name string) {
+	m.mu.Lock()
+	if m.warnedCollisions == nil {
+		m.warnedCollisions = make(map[string]bool)
+	}
+	already := m.warnedCollisions[name]
+	m.warnedCollisions[name] = true
+	m.mu.Unlock()
+	if already {
+		return
+	}
+	m.logger.Warn("Codex native account is not polling: a legacy profile of the same name is already running",
+		"account", name,
+		"winner", "legacy profile",
+		"ignored", "native auth root account",
+		"fix", "rename the legacy profile or the native account home so the two aliases differ")
 }
 
 func codexCredentialsFromProfile(profile CodexProfile) *api.CodexCredentials {

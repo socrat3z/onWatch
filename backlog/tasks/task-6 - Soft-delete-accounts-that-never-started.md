@@ -1,9 +1,10 @@
 ---
 id: TASK-6
 title: Soft-delete accounts that never started
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:22'
+updated_date: '2026-08-11 00:00'
 labels:
   - review-multi-account
   - rev-p2-1
@@ -28,7 +29,7 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P2.1
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Creating a directory with no credential file, then deleting it, leaves the account row soft-deleted
-- [ ] #2 A running account whose directory disappears is still cancelled and soft-deleted (no regression)
-- [ ] #3 An account soft-deleted while its directory is absent is restored on reappearance
+- [x] #1 Creating a directory with no credential file, then deleting it, leaves the account row soft-deleted
+- [x] #2 A running account whose directory disappears is still cancelled and soft-deleted (no regression)
+- [x] #3 An account soft-deleted while its directory is absent is restored on reappearance
 <!-- AC:END -->

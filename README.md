@@ -127,6 +127,7 @@ Provider setup guides:
 - [Antigravity Setup Guide](docs/ANTIGRAVITY_SETUP.md)
 - [Cursor Setup Guide](docs/CURSOR_SETUP.md)
 - [API Integration Setup Guide](docs/API_INTEGRATIONS_SETUP.md)
+- [Multiple Accounts Per Provider](docs/MULTI_ACCOUNT.md) - track two or more accounts of the same provider (Anthropic, Antigravity, Codex)
 - [with-user-env Image](docs/WITH_USER_ENV.md) - optional fork container with in-container OAuth logins
 
 ### Run

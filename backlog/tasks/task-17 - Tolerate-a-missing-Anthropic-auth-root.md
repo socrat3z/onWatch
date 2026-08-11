@@ -1,9 +1,10 @@
 ---
 id: TASK-17
 title: Tolerate a missing Anthropic auth root
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:23'
+updated_date: '2026-08-11 00:00'
 labels:
   - review-multi-account
   - rev-p3-5
@@ -28,6 +29,6 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P3.5
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A configured-but-absent ANTHROPIC_AUTH_ROOT yields zero definitions and no repeated warning
-- [ ] #2 A present root with a symlinked entry still resolves and is still containment-checked
+- [x] #1 A configured-but-absent ANTHROPIC_AUTH_ROOT yields zero definitions and no repeated warning
+- [x] #2 A present root with a symlinked entry still resolves and is still containment-checked
 <!-- AC:END -->

@@ -1,9 +1,10 @@
 ---
 id: TASK-7
 title: Add account context to the combined dashboard
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:22'
+updated_date: '2026-08-11 00:00'
 updated_date: '2026-08-10 19:23'
 labels:
   - review-multi-account
@@ -30,7 +31,7 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P2.2
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Every Anthropic and Antigravity card in the combined view names the account it represents
-- [ ] #2 The account shown is deterministic across refreshes
-- [ ] #3 A single-account install sees no new chrome
+- [x] #1 Every Anthropic and Antigravity card in the combined view names the account it represents
+- [x] #2 The account shown is deterministic across refreshes
+- [x] #3 A single-account install sees no new chrome
 <!-- AC:END -->

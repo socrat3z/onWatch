@@ -1,9 +1,10 @@
 ---
 id: TASK-10
 title: Replace prompt and alert rename flow with an in-app dialog
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 19:22'
+updated_date: '2026-08-11 00:00'
 labels:
   - review-multi-account
   - rev-p2-5
@@ -28,7 +29,7 @@ Source: docs/reviews/MULTI_ACCOUNT_MULTI_ANGLE_REVIEW.md section 7, item P2.5
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Renaming uses an in-app dialog consistent with other dashboard dialogs
-- [ ] #2 A rejected alias displays the servers message verbatim
-- [ ] #3 The 1-64 character rule is stated in the dialog before submission
+- [x] #1 Renaming uses an in-app dialog consistent with other dashboard dialogs
+- [x] #2 A rejected alias displays the servers message verbatim
+- [x] #3 The 1-64 character rule is stated in the dialog before submission
 <!-- AC:END -->

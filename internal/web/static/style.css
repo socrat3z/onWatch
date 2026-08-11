@@ -635,6 +635,26 @@ button, input, select { font-family: inherit; }
   gap: 7px;
 }
 
+/* Each profile is its own target - it opens that account, not the provider's
+   last-remembered one. */
+.homepage-harness-account {
+  border-radius: 8px;
+  padding: 6px 8px;
+  margin: 0 -8px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.homepage-harness-account:hover,
+.homepage-harness-account:focus-visible {
+  background: var(--accent-teal-muted);
+  outline: none;
+}
+
+.homepage-harness-account:focus-visible {
+  box-shadow: 0 0 0 2px var(--border-focus);
+}
+
 .homepage-harness-account + .homepage-harness-account {
   margin-top: 4px;
   padding-top: 8px;
@@ -4417,4 +4437,93 @@ body.accounts-overview-mode #sessions-section {
   color: var(--text-secondary);
   font-size: 11px;
   text-overflow: ellipsis;
+}
+
+/* ── Provider account picker: health, legacy label, alias dialog ───────────── */
+
+/* Tags ride inside a picker row, so they must not push its single line wider
+   than the menu; the row already sets white-space: nowrap. */
+.provider-account-tag {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+}
+
+.provider-account-tag-warn {
+  color: var(--status-warning, #d98d1f);
+  border-color: var(--status-warning, #d98d1f);
+}
+
+.codex-profile-item.provider-account-unhealthy {
+  color: var(--status-warning, #d98d1f);
+}
+
+.provider-account-note {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--status-warning);
+  border-radius: 4px;
+  background: var(--surface-inset);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* Names the account a homepage card is reporting on. Only rendered when a
+   provider has more than one account. */
+.provider-card-account {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+}
+
+.account-alias-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.account-alias-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.account-alias-input {
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+}
+
+.account-alias-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.account-alias-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--status-critical, #d9534f);
+}
+
+.account-alias-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }

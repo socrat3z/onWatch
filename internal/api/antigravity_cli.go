@@ -46,6 +46,13 @@ var agyPollSerial = make(chan struct{}, 1)
 // configured accounts - determines the daemon's memory ceiling. With more
 // accounts than slots, a poll evicts another account's warm session instead of
 // adding a second process.
+//
+// The cost of holding it at 1 is that two or more accounts trade the slot on
+// every poll, so each account pays an agy cold start (~15s) per interval
+// instead of reusing a warm process. That is deliberate: 2 x 190 MiB does not
+// fit the 512M container budget documented in
+// docs/WITH_USER_ENV.md#measured-resource-budget. Raising it requires raising
+// that budget in the same change.
 const agyMaxResidentSessions = 1
 
 // agyResidencyMu guards agyResident. It is never held while taking a runner

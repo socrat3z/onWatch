@@ -13,7 +13,7 @@ clean:
 	./app.sh --clean
 
 integration:
-	go test -v -tags=integration ./...
+	./app.sh --integration
 
 dev:
 	go run . --debug --interval 10
