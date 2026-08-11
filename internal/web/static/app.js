@@ -7218,6 +7218,58 @@ function destroyProviderCardCharts() {
   State.providerCharts = {};
 }
 
+// Seconds until a quota rolls over. timeUntilResetSeconds is computed when the
+// response is built, so it is already stale by the time it renders - resetsAt is
+// the authority and the seconds field is only the fallback.
+function homepageResetSeconds(quota) {
+  if (quota && quota.resetsAt) {
+    const at = new Date(quota.resetsAt).getTime();
+    if (Number.isFinite(at)) return Math.max(0, Math.round((at - Date.now()) / 1000));
+  }
+  const secs = Number(quota && quota.timeUntilResetSeconds);
+  return Number.isFinite(secs) && secs > 0 ? Math.round(secs) : 0;
+}
+
+// Two units at most, no spaces: 5h12m, 2d3h, 47m. The homepage has room for a
+// glance, not a duration breakdown - the provider page keeps the long form.
+function formatHomepageReset(seconds) {
+  if (!(seconds > 0)) return '';
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return h > 0 ? `${d}d${h}h` : `${d}d`;
+  if (h > 0) return m > 0 ? `${h}h${m}m` : `${h}h`;
+  if (m > 0) return `${m}m`;
+  return '<1m';
+}
+
+// Quotas that carry no reset time (balances, credit pools) render without a
+// chip rather than with a placeholder.
+function homepageResetChipHTML(quota) {
+  const seconds = homepageResetSeconds(quota);
+  const text = formatHomepageReset(seconds);
+  if (!text) return '';
+  const attr = quota.resetsAt ? ` data-reset-at="${escapeHTML(String(quota.resetsAt))}"` : '';
+  return `<span class="homepage-harness-reset"${attr} title="Resets in ${escapeHTML(text)}">${escapeHTML(text)}</span>`;
+}
+
+// Recomputes the chips in place so a card that sits on screen between polls
+// still counts down. Cheap enough at a minute's cadence: it only touches text.
+function startHomepageResetTicks() {
+  if (State.homepageResetInterval) return;
+  State.homepageResetInterval = setInterval(() => {
+    const chips = document.querySelectorAll('.homepage-harness-reset[data-reset-at]');
+    if (chips.length === 0) return;
+    chips.forEach((chip) => {
+      const text = formatHomepageReset(homepageResetSeconds({ resetsAt: chip.dataset.resetAt }));
+      // Past the reset the poller has not confirmed the new window yet, so say
+      // "due" instead of counting into negatives.
+      chip.textContent = text || 'due';
+      chip.title = text ? `Resets in ${text}` : 'Reset due';
+    });
+  }, 60000);
+}
+
 function renderHomepageMetricsHTML(quotas) {
   if (!Array.isArray(quotas) || quotas.length === 0) {
     return '<p class="homepage-harness-empty">Waiting for current data...</p>';
@@ -7246,6 +7298,7 @@ function renderHomepageMetricsHTML(quotas) {
     return `<div class="homepage-harness-metric" data-status="${escapeHTML(status)}">
       <div class="homepage-harness-metric-top">
         <span class="homepage-harness-label">${escapeHTML(label)}</span>
+        ${homepageResetChipHTML(quota)}
         <strong class="homepage-harness-value">${escapeHTML(value)}</strong>
       </div>
       <div class="homepage-harness-track"><span style="width:${percent.toFixed(1)}%" data-status="${escapeHTML(status)}"></span></div>
@@ -7354,6 +7407,7 @@ function renderAllProvidersView() {
 
   layoutHomepageMasonry(container);
   observeHomepageMasonry(container);
+  startHomepageResetTicks();
 }
 
 // Row height the spans are counted in. Small enough that a card rounds up by at
