@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -21,6 +22,7 @@ type KimiAgent struct {
 	sm           *SessionManager
 	notifier     *notify.NotificationEngine
 	pollingCheck func() bool
+	backoff      pollBackoff
 }
 
 // SetPollingCheck sets a function that is called before each poll.
@@ -82,14 +84,25 @@ func (a *KimiAgent) poll(ctx context.Context) {
 		return
 	}
 
+	if a.backoff.ShouldSkip() {
+		a.logger.Debug("Skipping Kimi Code poll - in rate limit backoff")
+		return
+	}
+
 	snapshot, err := a.client.FetchSnapshot(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
 		}
+		if errors.Is(err, api.ErrKimiRateLimited) {
+			cycles := a.backoff.RateLimited()
+			a.logger.Warn("Kimi Code rate limited, backing off", "skip_cycles", cycles)
+			return
+		}
 		a.logger.Error("Failed to fetch Kimi Code usages", "error", err)
 		return
 	}
+	a.backoff.Reset()
 
 	if _, err := a.store.InsertKimiSnapshot(snapshot); err != nil {
 		a.logger.Error("Failed to insert Kimi snapshot", "error", err)

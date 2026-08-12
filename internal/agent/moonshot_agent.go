@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -21,6 +22,7 @@ type MoonshotAgent struct {
 	sm           *SessionManager
 	notifier     *notify.NotificationEngine
 	pollingCheck func() bool
+	backoff      pollBackoff
 }
 
 // SetPollingCheck sets a function that is called before each poll.
@@ -80,14 +82,25 @@ func (a *MoonshotAgent) poll(ctx context.Context) {
 		return // polling disabled for this provider
 	}
 
+	if a.backoff.ShouldSkip() {
+		a.logger.Debug("Skipping Moonshot poll - in rate limit backoff")
+		return
+	}
+
 	resp, err := a.client.FetchBalance(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
 		}
+		if errors.Is(err, api.ErrMoonshotRateLimited) {
+			cycles := a.backoff.RateLimited()
+			a.logger.Warn("Moonshot rate limited, backing off", "skip_cycles", cycles)
+			return
+		}
 		a.logger.Error("Failed to fetch Moonshot balance", "error", err)
 		return
 	}
+	a.backoff.Reset()
 
 	now := time.Now().UTC()
 	snapshot := resp.ToSnapshot(now)

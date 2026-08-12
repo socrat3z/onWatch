@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -21,6 +22,7 @@ type DeepSeekAgent struct {
 	sm           *SessionManager
 	notifier     *notify.NotificationEngine
 	pollingCheck func() bool
+	backoff      pollBackoff
 }
 
 // SetPollingCheck sets a function that is called before each poll.
@@ -80,15 +82,26 @@ func (a *DeepSeekAgent) poll(ctx context.Context) {
 		return // polling disabled for this provider
 	}
 
+	if a.backoff.ShouldSkip() {
+		a.logger.Debug("Skipping DeepSeek poll - in rate limit backoff")
+		return
+	}
+
 	resp, err := a.client.FetchBalance(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
 		}
+		if errors.Is(err, api.ErrDeepSeekRateLimited) {
+			cycles := a.backoff.RateLimited()
+			a.logger.Warn("DeepSeek rate limited, backing off", "skip_cycles", cycles)
+			return
+		}
 		a.logger.Error("Failed to fetch DeepSeek balance", "error", err)
 		return
 	}
-	
+	a.backoff.Reset()
+
 	if !resp.IsAvailable {
 		a.logger.Info("DeepSeek service is currently not available")
 		return

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -21,6 +22,7 @@ type OpenRouterAgent struct {
 	sm           *SessionManager
 	notifier     *notify.NotificationEngine
 	pollingCheck func() bool
+	backoff      pollBackoff
 }
 
 // SetPollingCheck sets a function that is called before each poll.
@@ -86,14 +88,25 @@ func (a *OpenRouterAgent) poll(ctx context.Context) {
 		return // polling disabled for this provider
 	}
 
+	if a.backoff.ShouldSkip() {
+		a.logger.Debug("Skipping OpenRouter poll - in rate limit backoff")
+		return
+	}
+
 	resp, err := a.client.FetchUsage(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
 		}
+		if errors.Is(err, api.ErrOpenRouterRateLimited) {
+			cycles := a.backoff.RateLimited()
+			a.logger.Warn("OpenRouter rate limited, backing off", "skip_cycles", cycles)
+			return
+		}
 		a.logger.Error("Failed to fetch OpenRouter usage", "error", err)
 		return
 	}
+	a.backoff.Reset()
 
 	// Convert to snapshot and store
 	now := time.Now().UTC()
