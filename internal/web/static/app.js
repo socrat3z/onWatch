@@ -7426,20 +7426,29 @@ function layoutHomepageMasonry(container) {
     return;
   }
 
+  // The freshness banner is a grid item too, and once is-masonry sets
+  // grid-auto-rows to HOMEPAGE_MASONRY_ROW every implicit row is that tall.
+  // Left unspanned the banner gets one 4px row, overflows it, and the cards
+  // placed on the following rows paint over its text. It is measured with the
+  // cards rather than special-cased so it stays correct when its detail line
+  // wraps to a second line.
+  const banners = Array.from(container.querySelectorAll('.freshness-banner'));
+  const items = banners.concat(cards);
+
   const styles = window.getComputedStyle(container);
   const columns = styles.getPropertyValue('grid-template-columns').trim().split(/\s+/).filter(Boolean).length;
   if (columns < 2) {
     container.classList.remove('is-masonry');
-    cards.forEach((card) => { card.style.gridRowEnd = ''; });
+    items.forEach((item) => { item.style.gridRowEnd = ''; });
     return;
   }
 
   const gap = parseFloat(styles.getPropertyValue('row-gap')) || 0;
-  // Measure every card before writing any span back, so one card's new span
-  // cannot reflow the next card mid-measurement.
-  const heights = cards.map((card) => {
-    card.style.gridRowEnd = '';
-    return card.getBoundingClientRect().height;
+  // Measure every item before writing any span back, so one item's new span
+  // cannot reflow the next item mid-measurement.
+  const heights = items.map((item) => {
+    item.style.gridRowEnd = '';
+    return item.getBoundingClientRect().height;
   });
   // A hidden container measures every card at zero; spanning one row each would
   // stack them all on top of each other once it is shown. Leave the plain grid
@@ -7448,9 +7457,9 @@ function layoutHomepageMasonry(container) {
     container.classList.remove('is-masonry');
     return;
   }
-  cards.forEach((card, i) => {
+  items.forEach((item, i) => {
     const span = Math.max(1, Math.ceil((heights[i] + gap) / (HOMEPAGE_MASONRY_ROW + gap)));
-    card.style.gridRowEnd = `span ${span}`;
+    item.style.gridRowEnd = `span ${span}`;
   });
   container.style.setProperty('--homepage-masonry-row', `${HOMEPAGE_MASONRY_ROW}px`);
   container.classList.add('is-masonry');
@@ -7471,7 +7480,9 @@ function observeHomepageMasonry(container) {
     });
   });
   observer.observe(container);
-  container.querySelectorAll('.homepage-harness-card').forEach((card) => observer.observe(card));
+  // The banner is observed alongside the cards: its detail line wraps at narrow
+  // widths, which changes the row span it needs.
+  container.querySelectorAll('.freshness-banner, .homepage-harness-card').forEach((item) => observer.observe(item));
   State.homepageMasonryObserver = observer;
 }
 

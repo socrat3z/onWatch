@@ -609,7 +609,8 @@ button, input, select { font-family: inherit; }
   align-items: stretch;
 }
 
-.all-providers-view.is-masonry > .homepage-harness-card {
+.all-providers-view.is-masonry > .homepage-harness-card,
+.all-providers-view.is-masonry > .freshness-banner {
   align-self: start;
 }
 
