@@ -47,6 +47,12 @@ const authPausedRetryInterval = 15 * time.Minute
 // authPausedRetryMaxInterval caps the escalating paused-state retry delay.
 const authPausedRetryMaxInterval = 6 * time.Hour
 
+// rateLimitEscalateAfter is how long an unbroken run of OAuth 429s must last
+// before onWatch raises an alert. Measured in wall clock rather than attempts
+// because the attempt count resets on any successful poll and on restart, so a
+// restarting daemon would otherwise never reach a count-based threshold.
+const rateLimitEscalateAfter = 1 * time.Hour
+
 // AnthropicAgent manages the background polling loop for Anthropic quota tracking.
 type AnthropicAgent struct {
 	client       *api.AnthropicClient
@@ -84,6 +90,14 @@ type AnthropicAgent struct {
 	rateLimitFailCount int       // consecutive OAuth 429 failures
 	rateLimitPaused    bool      // true when OAuth refresh is in backoff
 	rateLimitResumeAt  time.Time // when to next attempt OAuth refresh
+
+	// Escalation for a sustained 429 run. Backoff alone only answers how often
+	// to retry, never whether retrying can still work: a persistent block paces
+	// itself out to rateLimitMaxBackoff and stays silent indefinitely. These
+	// track the run by wall clock rather than by count, because the count is
+	// reset by any successful poll and by a daemon restart.
+	rateLimitFirstFailAt time.Time // start of the current run of 429s
+	rateLimitNotified    bool      // alert already sent for the current run
 
 	// isClaudeCodeRunning checks if Claude Code is executing. If nil, uses the
 	// package-level IsClaudeCodeRunning. Override in tests to control behavior.
@@ -304,6 +318,76 @@ func (a *AnthropicAgent) resumeAuth() {
 	a.authRetryCount = 0
 }
 
+// noteRateLimited records one OAuth 429, advances the backoff, and escalates
+// once when the run has persisted past rateLimitEscalateAfter.
+//
+// The escalation exists because backoff is only a pacing decision. A 429 that
+// never clears - an edge block on a datacenter IP, say - is paced out to a 6h
+// retry and otherwise looks identical to a healthy agent, which is how a refresh
+// outage ran for days without an alert. Polling deliberately keeps retrying
+// afterwards so the agent still self-heals if the block lifts.
+//
+// Returns the backoff applied, for the caller to log.
+func (a *AnthropicAgent) noteRateLimited(err error) time.Duration {
+	now := time.Now()
+	a.rateLimitFailCount++
+	if a.rateLimitFirstFailAt.IsZero() {
+		a.rateLimitFirstFailAt = now
+	}
+
+	backoff := api.RetryAfter(err)
+	if backoff <= 0 {
+		backoff = rateLimitBackoff(a.rateLimitFailCount)
+	}
+	a.rateLimitPaused = true
+	a.rateLimitResumeAt = now.Add(backoff)
+
+	stuckFor := now.Sub(a.rateLimitFirstFailAt)
+	if !a.rateLimitNotified && stuckFor >= rateLimitEscalateAfter {
+		a.rateLimitNotified = true
+		a.logger.Error("OAuth refresh rate limited persistently - alerting",
+			"stuck_for", stuckFor.Round(time.Minute),
+			"fail_count", a.rateLimitFailCount,
+			"response_body", api.OAuthResponseBody(err),
+			"action", "Check for an IP-level block, or re-authenticate to reset the credential")
+		a.sendAuthErrorNotification(
+			"Anthropic token refresh blocked",
+			fmt.Sprintf("OAuth refresh has been rate limited for %s. Quota history is not being collected. "+
+				"Re-authenticate with 'claude auth' if this persists.", stuckFor.Round(time.Minute)),
+			true,
+		)
+	}
+	return backoff
+}
+
+// clearRateLimitBackoff resets every field tracking the OAuth 429 run. Called
+// wherever a refresh succeeds or the credentials change, so the next run starts
+// from the base backoff and can alert again.
+func (a *AnthropicAgent) clearRateLimitBackoff() {
+	a.rateLimitFailCount = 0
+	a.rateLimitPaused = false
+	a.rateLimitResumeAt = time.Time{}
+	a.rateLimitFirstFailAt = time.Time{}
+	a.rateLimitNotified = false
+}
+
+// decayRateLimitBackoff walks the failure count back down after a successful
+// poll, and ends the 429 run once it reaches zero.
+//
+// Only successful polls may call this. The backoff-expired retry path also
+// decrements, but must leave the run timestamp alone: resetting it there would
+// restart the escalation clock on every retry, so a permanent 429 would pace
+// itself out and never alert - the behaviour this escalation exists to fix.
+func (a *AnthropicAgent) decayRateLimitBackoff() {
+	if a.rateLimitFailCount > 0 {
+		a.rateLimitFailCount--
+	}
+	if a.rateLimitFailCount == 0 {
+		a.rateLimitFirstFailAt = time.Time{}
+		a.rateLimitNotified = false
+	}
+}
+
 // authRetryBackoff returns the delay before the nth paused-state recovery attempt.
 func authRetryBackoff(attempt int) time.Duration {
 	if attempt <= 0 {
@@ -354,18 +438,13 @@ func (a *AnthropicAgent) applyRefreshedTokens(newTokens *api.OAuthTokenResponse,
 func (a *AnthropicAgent) noteOAuthRefreshFailure(err error, source string) {
 	switch {
 	case errors.Is(err, api.ErrOAuthRateLimited):
-		a.rateLimitFailCount++
-		backoff := api.RetryAfter(err)
-		if backoff <= 0 {
-			backoff = rateLimitBackoff(a.rateLimitFailCount)
-		}
-		a.rateLimitPaused = true
-		a.rateLimitResumeAt = time.Now().Add(backoff)
+		backoff := a.noteRateLimited(err)
 		a.logger.Warn("OAuth refresh rate limited - backing off",
 			"source", source,
 			"fail_count", a.rateLimitFailCount,
 			"backoff", backoff,
-			"resume_at", a.rateLimitResumeAt)
+			"resume_at", a.rateLimitResumeAt,
+			"response_body", api.OAuthResponseBody(err))
 	case errors.Is(err, api.ErrOAuthInvalidGrant):
 		a.authFailCount = maxAuthFailures
 		a.pauseAuth(a.lastToken)
@@ -424,9 +503,7 @@ func (a *AnthropicAgent) tryOAuthRecovery(ctx context.Context, source string) bo
 	}
 
 	// Refresh succeeded - reset OAuth backoff state
-	a.rateLimitFailCount = 0
-	a.rateLimitPaused = false
-	a.rateLimitResumeAt = time.Time{}
+	a.clearRateLimitBackoff()
 
 	// CRITICAL: refresh tokens are one-time use, persist the new pair immediately.
 	a.applyRefreshedTokens(newTokens, creds.AccessToken)
@@ -504,22 +581,12 @@ func (a *AnthropicAgent) proactiveRefresh(ctx context.Context, creds *api.Anthro
 	newTokens, err := api.RefreshAnthropicToken(ctx, creds.RefreshToken)
 	if err != nil {
 		if errors.Is(err, api.ErrOAuthRateLimited) {
-			a.rateLimitFailCount++
-			backoff := api.RetryAfter(err)
-			if backoff > 0 {
-				a.rateLimitPaused = true
-				a.rateLimitResumeAt = time.Now().Add(backoff)
-				a.logger.Warn("Proactive OAuth refresh rate limited - using server Retry-After",
-					"fail_count", a.rateLimitFailCount,
-					"retry_after", backoff)
-			} else {
-				backoff = rateLimitBackoff(a.rateLimitFailCount)
-				a.rateLimitPaused = true
-				a.rateLimitResumeAt = time.Now().Add(backoff)
-				a.logger.Warn("Proactive OAuth refresh rate limited - backing off",
-					"fail_count", a.rateLimitFailCount,
-					"backoff", backoff)
-			}
+			backoff := a.noteRateLimited(err)
+			a.logger.Warn("Proactive OAuth refresh rate limited - backing off",
+				"fail_count", a.rateLimitFailCount,
+				"backoff", backoff,
+				"server_retry_after", api.RetryAfter(err),
+				"response_body", api.OAuthResponseBody(err))
 		} else if errors.Is(err, api.ErrOAuthInvalidGrant) {
 			a.authFailCount = maxAuthFailures
 			a.pauseAuth(a.lastToken)
@@ -533,9 +600,7 @@ func (a *AnthropicAgent) proactiveRefresh(ctx context.Context, creds *api.Anthro
 	}
 
 	// Proactive refresh succeeded - reset all backoff state
-	a.rateLimitFailCount = 0
-	a.rateLimitPaused = false
-	a.rateLimitResumeAt = time.Time{}
+	a.clearRateLimitBackoff()
 
 	// CRITICAL: Save new tokens to disk IMMEDIATELY
 	a.applyRefreshedTokens(newTokens, creds.AccessToken)
@@ -582,9 +647,7 @@ func (a *AnthropicAgent) poll(ctx context.Context) {
 				"source", "statusline",
 				"quota_count", len(snapshot.Quotas),
 				"cycle", a.pollCycleCount)
-			if a.rateLimitFailCount > 0 {
-				a.rateLimitFailCount--
-			}
+			a.decayRateLimitBackoff()
 			// Hybrid: periodically do a full API poll for supplementary quotas
 			// (seven_day_sonnet, extra_usage, etc.) that statusline doesn't provide.
 			if a.apiPollCycleInterval > 0 && a.pollCycleCount%a.apiPollCycleInterval == 0 {
@@ -643,9 +706,7 @@ func (a *AnthropicAgent) poll(ctx context.Context) {
 
 			// If we were in rate limit backoff and credentials changed, resume
 			if a.rateLimitPaused {
-				a.rateLimitPaused = false
-				a.rateLimitFailCount = 0
-				a.rateLimitResumeAt = time.Time{}
+				a.clearRateLimitBackoff()
 				a.logger.Info("Rate limit backoff lifted - new credentials detected")
 			}
 		}
@@ -714,33 +775,19 @@ func (a *AnthropicAgent) poll(ctx context.Context) {
 						// Classify the OAuth refresh failure
 						if errors.Is(refreshErr, api.ErrOAuthRateLimited) {
 							// OAuth endpoint itself is rate limited - apply backoff.
-							// Prefer server-provided Retry-After header if available.
-							a.rateLimitFailCount++
-							backoff := api.RetryAfter(refreshErr)
-							if backoff > 0 {
-								a.rateLimitPaused = true
-								a.rateLimitResumeAt = time.Now().Add(backoff)
-								a.logger.Warn("OAuth refresh rate limited - using server Retry-After",
-									"fail_count", a.rateLimitFailCount,
-									"retry_after", backoff,
-									"resume_at", a.rateLimitResumeAt)
-							} else {
-								backoff = rateLimitBackoff(a.rateLimitFailCount)
-								a.rateLimitResumeAt = time.Now().Add(backoff)
-								if a.rateLimitFailCount >= maxRateLimitFailures {
-									a.rateLimitPaused = true
-									a.logger.Error("OAuth refresh rate limited - entering extended backoff",
-										"fail_count", a.rateLimitFailCount,
-										"backoff", backoff,
-										"resume_at", a.rateLimitResumeAt)
-								} else {
-									a.rateLimitPaused = true
-									a.logger.Warn("OAuth refresh rate limited - backing off",
-										"fail_count", a.rateLimitFailCount,
-										"backoff", backoff,
-										"resume_at", a.rateLimitResumeAt)
-								}
+							// noteRateLimited prefers the server Retry-After and
+							// escalates once the run passes rateLimitEscalateAfter.
+							backoff := a.noteRateLimited(refreshErr)
+							level := slog.LevelWarn
+							if a.rateLimitFailCount >= maxRateLimitFailures {
+								level = slog.LevelError
 							}
+							a.logger.Log(ctx, level, "OAuth refresh rate limited - backing off",
+								"fail_count", a.rateLimitFailCount,
+								"backoff", backoff,
+								"resume_at", a.rateLimitResumeAt,
+								"server_retry_after", api.RetryAfter(refreshErr),
+								"response_body", api.OAuthResponseBody(refreshErr))
 						} else if errors.Is(refreshErr, api.ErrOAuthInvalidGrant) {
 							// Terminal: refresh token revoked/expired - pause like auth errors
 							a.authFailCount = maxAuthFailures
@@ -774,9 +821,7 @@ func (a *AnthropicAgent) poll(ctx context.Context) {
 					}
 
 					// OAuth refresh succeeded - reset backoff state
-					a.rateLimitFailCount = 0
-					a.rateLimitPaused = false
-					a.rateLimitResumeAt = time.Time{}
+					a.clearRateLimitBackoff()
 
 					// Save new tokens immediately (refresh tokens are one-time use!)
 					a.applyRefreshedTokens(newTokens, creds.AccessToken)
@@ -885,9 +930,7 @@ func (a *AnthropicAgent) poll(ctx context.Context) {
 		// Success - decay rate limit backoff. Auth state is reset below, at
 		// processResponse, so the recovery paths that jump straight there
 		// clear it too.
-		if a.rateLimitFailCount > 0 {
-			a.rateLimitFailCount--
-		}
+		a.decayRateLimitBackoff()
 	}
 
 processResponse:
