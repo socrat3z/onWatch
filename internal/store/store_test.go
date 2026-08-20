@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -50,6 +51,99 @@ func TestStore_WALMode(t *testing.T) {
 	}
 	if journalMode != "wal" {
 		t.Errorf("Expected WAL mode, got %s", journalMode)
+	}
+}
+
+// TestStore_PragmasAppliedToAllPooledConnections guards against a regression
+// where pragmas were run once via db.Exec after Open, which only lands on
+// whichever single pooled connection served that call. With MaxOpenConns(2),
+// the second connection - opened lazily on first concurrent use - kept
+// SQLite's defaults (busy_timeout=0, foreign_keys=OFF), so a second writer
+// hit an immediate SQLITE_BUSY instead of waiting on the timeout. Pragmas
+// must instead be carried in the DSN so the driver applies them to every
+// connection it opens.
+func TestStore_PragmasAppliedToAllPooledConnections(t *testing.T) {
+	t.Parallel()
+	tmpFile := t.TempDir() + "/test.db"
+	s, err := New(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+
+	// db.Conn exclusively checks out a connection until Close, so acquiring
+	// two at once forces the pool to open two distinct physical connections.
+	conn1, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Failed to acquire connection 1: %v", err)
+	}
+	defer conn1.Close()
+	conn2, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Failed to acquire connection 2: %v", err)
+	}
+	defer conn2.Close()
+
+	for i, conn := range []*sql.Conn{conn1, conn2} {
+		var busyTimeout int
+		if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+			t.Fatalf("conn %d: query busy_timeout: %v", i, err)
+		}
+		if busyTimeout != 5000 {
+			t.Errorf("conn %d: expected busy_timeout=5000, got %d", i, busyTimeout)
+		}
+
+		var foreignKeys int
+		if err := conn.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+			t.Fatalf("conn %d: query foreign_keys: %v", i, err)
+		}
+		if foreignKeys != 1 {
+			t.Errorf("conn %d: expected foreign_keys=1, got %d", i, foreignKeys)
+		}
+	}
+}
+
+// TestStore_ConcurrentWritersDoNotHitBusyImmediately exercises the actual
+// failure mode: two goroutines hammering inserts through the pool's two
+// connections should serialize on the write lock and wait, not fail with
+// SQLITE_BUSY. Without the DSN-level busy_timeout, the second connection had
+// a zero timeout and failed on first contention.
+func TestStore_ConcurrentWritersDoNotHitBusyImmediately(t *testing.T) {
+	t.Parallel()
+	tmpFile := t.TempDir() + "/test.db"
+	s, err := New(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer s.Close()
+
+	const writersN = 2
+	const insertsPerWriter = 25
+	errCh := make(chan error, writersN)
+
+	for w := 0; w < writersN; w++ {
+		go func(id int) {
+			for i := 0; i < insertsPerWriter; i++ {
+				_, err := s.db.Exec(
+					`INSERT INTO quota_snapshots (provider, captured_at, sub_limit, sub_requests, sub_renews_at, search_limit, search_requests, search_renews_at, tool_limit, tool_requests, tool_renews_at)
+					 VALUES (?, datetime('now'), 0, 0, '', 0, 0, '', 0, 0, '')`,
+					fmt.Sprintf("writer-%d", id),
+				)
+				if err != nil {
+					errCh <- fmt.Errorf("writer %d insert %d: %w", id, i, err)
+					return
+				}
+			}
+			errCh <- nil
+		}(w)
+	}
+
+	for i := 0; i < writersN; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

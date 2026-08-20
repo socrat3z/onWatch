@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -378,5 +380,68 @@ func TestAntigravityAgent_EnvVarConfig(t *testing.T) {
 	latest, _ := st.QueryLatestAntigravity()
 	if latest == nil {
 		t.Fatal("expected snapshot with env var config")
+	}
+}
+
+// TestAntigravityAgent_CLIBackoffSkipsRepeatedFailedLaunches guards against a
+// production incident where a persistently unready/unauthenticated agy CLI
+// (e.g. stale credentials) caused a fresh ~190 MiB process spin-up and a
+// ~90s readiness wait on every single poll cycle, forever. With backoff
+// wired in, a failed launch must skip subsequent cycles instead of retrying
+// immediately.
+func TestAntigravityAgent_CLIBackoffSkipsRepeatedFailedLaunches(t *testing.T) {
+	// Point at a path that does not exist so resolveAgyPath fails fast
+	// (no 90s readiness wait, no real process spawned).
+	t.Setenv("ANTIGRAVITY_CLI_PATH", filepath.Join(t.TempDir(), "does-not-exist"))
+
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer st.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := api.NewAntigravityClient(logger)
+	tr := tracker.NewAntigravityTracker(st, logger)
+
+	ag := NewAntigravityAgent(client, st, tr, time.Hour, logger, nil)
+	ag.SetSourceCheck(func() string { return api.AntigravitySourceCLI })
+
+	ctx := context.Background()
+
+	// First poll: attempts a real launch, fails fast, arms backoff.
+	ag.poll(ctx)
+	if ag.cliBackoff.failCount != 1 {
+		t.Fatalf("failCount after 1st poll = %d, want 1", ag.cliBackoff.failCount)
+	}
+	if ag.cliBackoff.skipRemaining != 1 {
+		t.Fatalf("skipRemaining after 1st poll = %d, want 1", ag.cliBackoff.skipRemaining)
+	}
+	runnerAfterFirst := ag.cliRunner
+	if runnerAfterFirst == nil {
+		t.Fatal("expected cliRunner to be created on first poll")
+	}
+
+	// Second poll: backoff should skip the launch attempt entirely -
+	// failCount must not grow and the runner must not be touched again.
+	ag.poll(ctx)
+	if ag.cliBackoff.failCount != 1 {
+		t.Errorf("failCount after skipped 2nd poll = %d, want unchanged 1", ag.cliBackoff.failCount)
+	}
+	if ag.cliBackoff.skipRemaining != 0 {
+		t.Errorf("skipRemaining after skipped 2nd poll = %d, want 0", ag.cliBackoff.skipRemaining)
+	}
+	if ag.cliRunner != runnerAfterFirst {
+		t.Error("expected cliRunner to be unchanged while backoff was active")
+	}
+
+	// Third poll: backoff expired, so it retries, fails again, and the
+	// skip window grows (exponential backoff).
+	ag.poll(ctx)
+	if ag.cliBackoff.failCount != 2 {
+		t.Fatalf("failCount after 3rd poll = %d, want 2", ag.cliBackoff.failCount)
+	}
+	if ag.cliBackoff.skipRemaining != 2 {
+		t.Fatalf("skipRemaining after 3rd poll = %d, want 2 (backoff should grow)", ag.cliBackoff.skipRemaining)
 	}
 }

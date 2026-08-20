@@ -160,7 +160,26 @@ func New(dbPath string) (*Store, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	// Pragmas are carried in the DSN rather than run via db.Exec after Open,
+	// because database/sql pools connections: a pragma run once via Exec only
+	// lands on whichever single connection served that call. With
+	// MaxOpenConns(2), the second connection - opened lazily on first
+	// concurrent use - would keep SQLite's defaults (busy_timeout=0,
+	// foreign_keys=OFF), so a second writer got an immediate SQLITE_BUSY
+	// instead of waiting on the timeout. DSN-level _pragma params are applied
+	// by the driver to every connection it opens. _txlock=immediate takes the
+	// write lock at BEGIN instead of at the first write, so a transaction that
+	// reads before it writes can't be preempted mid-transaction into
+	// SQLITE_BUSY_SNAPSHOT, which busy_timeout does not retry.
+	dsn := dbPath +
+		"?_pragma=busy_timeout(5000)" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(ON)" +
+		"&_pragma=cache_size(-500)" +
+		"&_txlock=immediate"
+
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -175,21 +194,6 @@ func New(dbPath string) (*Store, error) {
 		db.SetMaxOpenConns(2)
 	}
 	db.SetMaxIdleConns(1)
-
-	// Configure SQLite for RAM efficiency
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL;",
-		"PRAGMA synchronous=NORMAL;",
-		"PRAGMA cache_size=-500;",
-		"PRAGMA foreign_keys=ON;",
-		"PRAGMA busy_timeout=5000;",
-	}
-
-	for _, pragma := range pragmas {
-		if _, err := db.Exec(pragma); err != nil {
-			return nil, fmt.Errorf("failed to set pragma: %w", err)
-		}
-	}
 
 	s := &Store{db: db}
 	if err := s.createTables(); err != nil {

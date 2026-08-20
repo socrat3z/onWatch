@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,6 +13,10 @@ import (
 	"github.com/onllm-dev/onwatch/v2/internal/store"
 	"github.com/onllm-dev/onwatch/v2/internal/tracker"
 )
+
+// errAntigravityCLIBackoff signals that the CLI source was skipped this
+// cycle because it is in backoff after consecutive failures.
+var errAntigravityCLIBackoff = errors.New("antigravity: cli source in backoff")
 
 // AntigravityAgent manages the background polling loop for Antigravity quota tracking.
 // It supports both auto-detection of the local language server and manual configuration
@@ -33,6 +38,12 @@ type AntigravityAgent struct {
 	// cliRunner manages a warm agy process for the CLI source. Created lazily
 	// the first time the CLI source is used.
 	cliRunner *api.AntigravityCLIRunner
+
+	// cliBackoff skips CLI launch attempts after consecutive failures (e.g.
+	// stale/expired agy credentials never reaching a ready quota service).
+	// Without it, every poll cycle pays a ~90s readiness timeout and a ~190
+	// MiB agy process spin-up for a launch that was never going to succeed.
+	cliBackoff pollBackoff
 
 	// Manual configuration for Docker environments
 	manualBaseURL   string
@@ -176,6 +187,10 @@ func (a *AntigravityAgent) poll(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if errors.Is(err, errAntigravityCLIBackoff) {
+			a.logger.Debug("Skipping Antigravity CLI poll - in backoff", "source", source)
+			return
+		}
 		a.logger.Error("Failed to fetch Antigravity quotas", "source", source, "error", err)
 		return
 	}
@@ -243,25 +258,42 @@ func (a *AntigravityAgent) fetchSnapshot(ctx context.Context, source string) (*a
 	}
 	switch source {
 	case api.AntigravitySourceCLI:
+		if a.cliBackoff.ShouldSkip() {
+			return nil, errAntigravityCLIBackoff
+		}
 		return a.fetchCLI(ctx)
 	case api.AntigravitySourceIDE:
 		return a.fetchIDE(ctx)
 	default: // both
-		snap, err := a.fetchCLI(ctx)
-		if err == nil {
-			return snap, nil
+		if !a.cliBackoff.ShouldSkip() {
+			snap, err := a.fetchCLI(ctx)
+			if err == nil {
+				return snap, nil
+			}
+			a.logger.Debug("agy CLI source unavailable, falling back to IDE", "error", err)
 		}
-		a.logger.Debug("agy CLI source unavailable, falling back to IDE", "error", err)
 		return a.fetchIDE(ctx)
 	}
 }
 
 // fetchCLI launches/reuses a managed agy process and returns its snapshot.
+// Consecutive failures arm cliBackoff so a persistently unready or
+// unauthenticated agy (stale credentials) does not pay a full readiness
+// timeout and process spin-up on every poll cycle.
 func (a *AntigravityAgent) fetchCLI(ctx context.Context) (*api.AntigravitySnapshot, error) {
 	if a.cliRunner == nil {
 		a.cliRunner = api.NewAntigravityCLIRunnerWithEnv(a.logger, accountCLIEnv(a.accountHome, a.accountName, a.logger))
 	}
-	return a.cliRunner.Fetch(ctx)
+	snap, err := a.cliRunner.Fetch(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			cycles := a.cliBackoff.RateLimited()
+			a.logger.Warn("agy CLI fetch failed, backing off launch attempts", "skip_cycles", cycles, "error", err)
+		}
+		return nil, err
+	}
+	a.cliBackoff.Reset()
+	return snap, nil
 }
 
 // fetchIDE probes the desktop/IDE language server (the original behavior).
