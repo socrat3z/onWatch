@@ -230,8 +230,7 @@ func (a *AntigravityAgent) poll(ctx context.Context) {
 		}
 		orderedValues := []float64{
 			valuesByKey[api.AntigravityQuotaGroupClaudeGPT],
-			valuesByKey[api.AntigravityQuotaGroupGeminiPro],
-			valuesByKey[api.AntigravityQuotaGroupGeminiFlash],
+			valuesByKey[api.AntigravityQuotaGroupGemini],
 		}
 		a.sm.ReportPoll(orderedValues)
 	}

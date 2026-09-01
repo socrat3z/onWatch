@@ -516,6 +516,7 @@ func (s *Store) QueryAntigravityCycleOverview(groupBy string, limit int, account
 	if groupBy == "" {
 		groupBy = api.AntigravityQuotaGroupClaudeGPT
 	}
+	groupBy = api.NormalizeAntigravityQuotaGroup(groupBy)
 
 	if !isAntigravityQuotaGroup(groupBy) {
 		return nil, fmt.Errorf("invalid antigravity group: %s", groupBy)
@@ -644,6 +645,7 @@ func (s *Store) QueryAntigravityModelIDsForGroup(groupKey string, accountIDs ...
 	if err != nil {
 		return nil, err
 	}
+	groupKey = api.NormalizeAntigravityQuotaGroup(groupKey)
 	rows, err := s.db.Query(
 		`SELECT DISTINCT mv.model_id, mv.label
 		 FROM antigravity_model_values mv
@@ -798,8 +800,8 @@ func (s *Store) getAntigravityGroupedCrossQuotasAt(referenceTime time.Time, acco
 }
 
 func isAntigravityQuotaGroup(groupKey string) bool {
-	switch groupKey {
-	case api.AntigravityQuotaGroupClaudeGPT, api.AntigravityQuotaGroupGeminiPro, api.AntigravityQuotaGroupGeminiFlash:
+	switch api.NormalizeAntigravityQuotaGroup(groupKey) {
+	case api.AntigravityQuotaGroupClaudeGPT, api.AntigravityQuotaGroupGemini:
 		return true
 	default:
 		return false
