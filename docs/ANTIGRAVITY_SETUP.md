@@ -65,6 +65,10 @@ install locations (`~/.local/bin/agy`, `/opt/homebrew/bin/agy`,
 `/usr/local/bin/agy`). The CLI source is supported on macOS, Linux, and Windows
 (via ConPTY); the Unix path is the most thoroughly validated.
 
+#### Multi-account residency cap (`ANTIGRAVITY_MAX_RESIDENT_SESSIONS`)
+
+Each warm `agy` process costs ~190 MiB RSS. By default, onWatch caps resident `agy` processes to `1` to fit within the standard 512M container memory budget. If you configure multiple Antigravity accounts and have sufficient RAM, set `ANTIGRAVITY_MAX_RESIDENT_SESSIONS=2` (or higher) in your `.env` to keep multiple accounts warm and prevent per-poll cold-start process evictions - and raise the container's `mem_limit` in `docker-compose.yml` (or the with-user-env override) by roughly 190 MiB per extra session, per the with-user-env budget in [WITH_USER_ENV.md](WITH_USER_ENV.md#measured-resource-budget).
+
 ---
 
 ## Quick Start (Auto-Detection)

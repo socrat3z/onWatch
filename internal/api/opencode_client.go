@@ -18,7 +18,7 @@ const (
 	openCodeDashboardURLPrefix = "https://opencode.ai/workspace/"
 	openCodeDashboardURLSuffix = "/go"
 	openCodeUserAgent          = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Gecko/20100101 Firefox/148.0"
-	openCodeScrapeTimeout      = 10 * time.Second
+	openCodeScrapeTimeout      = 20 * time.Second // bumped from 10s: dashboard is slow under load
 	openCodeMaxBodyBytes       = 2 << 20 // 2 MiB
 )
 

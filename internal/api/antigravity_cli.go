@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,19 +42,34 @@ const (
 // It is process-wide because each account owns a distinct runner.
 var agyPollSerial = make(chan struct{}, 1)
 
+// defaultAgyMaxResidentSessions is the resident cap used when
+// ANTIGRAVITY_MAX_RESIDENT_SESSIONS is unset or invalid.
+const defaultAgyMaxResidentSessions = 1
+
 // agyMaxResidentSessions caps how many agy processes stay alive at once. Each
 // one costs roughly 190 MiB resident, so this cap - not the number of
 // configured accounts - determines the daemon's memory ceiling. With more
 // accounts than slots, a poll evicts another account's warm session instead of
 // adding a second process.
 //
-// The cost of holding it at 1 is that two or more accounts trade the slot on
-// every poll, so each account pays an agy cold start (~15s) per interval
-// instead of reusing a warm process. That is deliberate: 2 x 190 MiB does not
-// fit the 512M container budget documented in
-// docs/WITH_USER_ENV.md#measured-resource-budget. Raising it requires raising
-// that budget in the same change.
-const agyMaxResidentSessions = 1
+// By default, holding it at 1 ensures two or more accounts fit the 512M
+// container budget documented in
+// docs/WITH_USER_ENV.md#measured-resource-budget. Raising it via
+// ANTIGRAVITY_MAX_RESIDENT_SESSIONS is only safe alongside a matching raise
+// to that container memory budget - the operator, not this function, owns
+// that tradeoff.
+func agyMaxResidentSessions() int {
+	v := strings.TrimSpace(os.Getenv("ANTIGRAVITY_MAX_RESIDENT_SESSIONS"))
+	if v == "" {
+		return defaultAgyMaxResidentSessions
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		slog.Warn("ignoring invalid ANTIGRAVITY_MAX_RESIDENT_SESSIONS, using default", "value", v, "default", defaultAgyMaxResidentSessions)
+		return defaultAgyMaxResidentSessions
+	}
+	return n
+}
 
 // agyResidencyMu guards agyResident. It is never held while taking a runner
 // lock, and admission runs only inside the agyPollSerial critical section, so a
@@ -74,8 +90,9 @@ func agyAdmitResident(r *AntigravityCLIRunner) {
 		}
 	}
 	agyResident = kept
+	capLimit := agyMaxResidentSessions()
 	var evict []*AntigravityCLIRunner
-	for len(agyResident) >= agyMaxResidentSessions {
+	for len(agyResident) >= capLimit {
 		evict = append(evict, agyResident[0])
 		agyResident = agyResident[1:]
 	}
@@ -83,7 +100,7 @@ func agyAdmitResident(r *AntigravityCLIRunner) {
 	agyResidencyMu.Unlock()
 
 	for _, victim := range evict {
-		victim.evict()
+		victim.evict(capLimit)
 	}
 }
 
@@ -101,13 +118,13 @@ func agyForgetResident(r *AntigravityCLIRunner) {
 }
 
 // evict tears down a warm session that another account needs the slot for.
-func (r *AntigravityCLIRunner) evict() {
+func (r *AntigravityCLIRunner) evict(limit int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.sess == nil {
 		return
 	}
-	r.logger.Info("agy session evicted to stay within the resident process cap", "cap", agyMaxResidentSessions)
+	r.logger.Info("agy session evicted to stay within the resident process cap", "cap", limit)
 	r.teardownLocked()
 }
 

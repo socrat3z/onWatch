@@ -349,6 +349,7 @@ Additional environment variables:
 | `ANTIGRAVITY_ENABLED`    | Enable Antigravity provider (auto-detects local server)|
 | `ANTIGRAVITY_SOURCE`     | Data source: `both` (default), `cli` (agy), or `ide`   |
 | `ANTIGRAVITY_CLI_PATH`   | Override path to the `agy` binary (else PATH/well-known)|
+| `ANTIGRAVITY_MAX_RESIDENT_SESSIONS` | Max concurrent warm `agy` CLI processes (default: `1`, ~190 MiB RSS each) |
 | `ANTIGRAVITY_BASE_URL`   | Antigravity base URL (for Docker/manual config)        |
 | `ANTIGRAVITY_CSRF_TOKEN` | Antigravity CSRF token (for Docker/manual config)      |
 | `SYNTHETIC_API_KEY`      | Synthetic API key                                      |

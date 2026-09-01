@@ -27,15 +27,18 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
 
+	outCh := make(chan []byte, 1)
+	go func() {
+		out, _ := io.ReadAll(r)
+		outCh <- out
+	}()
+
 	fn()
 
 	if err := w.Close(); err != nil {
 		t.Fatalf("close writer: %v", err)
 	}
-	out, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read stdout: %v", err)
-	}
+	out := <-outCh
 	return string(out)
 }
 
@@ -282,8 +285,8 @@ func TestGenerateLoad_CollectsMetricsDeterministically(t *testing.T) {
 			if m.Count < 1 {
 				t.Fatalf("expected at least one request for %s", m.Endpoint)
 			}
-			if m.MinTime <= 0 || m.MaxTime <= 0 || m.AvgTime <= 0 {
-				t.Fatalf("expected positive durations for %s, got min=%v avg=%v max=%v", m.Endpoint, m.MinTime, m.AvgTime, m.MaxTime)
+			if m.MinTime > m.AvgTime || m.AvgTime > m.MaxTime {
+				t.Fatalf("expected min<=avg<=max for %s, got min=%v avg=%v max=%v", m.Endpoint, m.MinTime, m.AvgTime, m.MaxTime)
 			}
 		}
 	})

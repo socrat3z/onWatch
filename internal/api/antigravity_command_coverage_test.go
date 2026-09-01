@@ -11,9 +11,15 @@ import (
 	"testing"
 )
 
+// writeExecutable creates a stub script in dir. On Windows it appends ".cmd"
+// so that exec.LookPath resolves the name without an explicit extension —
+// callers pass bare names like "powershell" and Windows finds "powershell.cmd".
 func writeExecutable(t *testing.T, dir, name, content string) {
 	t.Helper()
 	path := filepath.Join(dir, name)
+	if runtime.GOOS == "windows" {
+		path = filepath.Join(dir, name+".cmd")
+	}
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("write executable %s: %v", name, err)
 	}
@@ -68,7 +74,11 @@ func TestAntigravityCommandHelpers(t *testing.T) {
 
 	t.Run("discover ports windows parses netstat", func(t *testing.T) {
 		dir := t.TempDir()
-		writeExecutable(t, dir, "netstat", "#!/bin/sh\ncat <<'EOF'\n  TCP    127.0.0.1:7007     0.0.0.0:0      LISTENING       888\nEOF\n")
+		script := "#!/bin/sh\ncat <<'EOF'\n  TCP    127.0.0.1:7007     0.0.0.0:0      LISTENING       888\nEOF\n"
+		if runtime.GOOS == "windows" {
+			script = "@echo   TCP    127.0.0.1:7007     0.0.0.0:0      LISTENING       888\r\n"
+		}
+		writeExecutable(t, dir, "netstat", script)
 		withPathDir(t, dir)
 
 		ports, err := client.discoverPortsWindows(ctx, 888)
@@ -82,7 +92,11 @@ func TestAntigravityCommandHelpers(t *testing.T) {
 
 	t.Run("detect process windows cim handles single object", func(t *testing.T) {
 		dir := t.TempDir()
-		writeExecutable(t, dir, "powershell", "#!/bin/sh\ncat <<'EOF'\n{\"ProcessId\":1234,\"Name\":\"language_server_windows_x64\",\"CommandLine\":\"C:/antigravity/language_server_windows_x64.exe --csrf_token tok --extension_server_port 7447\"}\nEOF\n")
+		script := "#!/bin/sh\ncat <<'EOF'\n{\"ProcessId\":1234,\"Name\":\"language_server_windows_x64\",\"CommandLine\":\"C:/antigravity/language_server_windows_x64.exe --csrf_token tok --extension_server_port 7447\"}\nEOF\n"
+		if runtime.GOOS == "windows" {
+			script = "@echo {\"ProcessId\":1234,\"Name\":\"language_server_windows_x64\",\"CommandLine\":\"C:/antigravity/language_server_windows_x64.exe --csrf_token tok --extension_server_port 7447\"}\r\n"
+		}
+		writeExecutable(t, dir, "powershell", script)
 		withPathDir(t, dir)
 
 		info, err := client.detectProcessWindowsCIM(ctx)
@@ -96,7 +110,11 @@ func TestAntigravityCommandHelpers(t *testing.T) {
 
 	t.Run("detect process windows powershell uses process lookup", func(t *testing.T) {
 		dir := t.TempDir()
-		writeExecutable(t, dir, "powershell", "#!/bin/sh\ncase \"$*\" in\n  *\"Get-Process\"*)\n    printf '[{\"Id\":4321}]'\n    ;;\n  *\"ProcessId = 4321\"*)\n    printf 'C:/Users/test/antigravity/language_server.exe --csrf_token ps --extension_server_port 8558'\n    ;;\n  *)\n    exit 1\n    ;;\nesac\n")
+		script := "#!/bin/sh\ncase \"$*\" in\n  *\"Get-Process\"*)\n    printf '[{\"Id\":4321}]'\n    ;;\n  *\"ProcessId = 4321\"*)\n    printf 'C:/Users/test/antigravity/language_server.exe --csrf_token ps --extension_server_port 8558'\n    ;;\n  *)\n    exit 1\n    ;;\nesac\n"
+		if runtime.GOOS == "windows" {
+			script = "@echo off\r\nset \"args=%*\"\r\nif not \"%args:Get-Process=%\"==\"%args%\" (\r\n  echo [{\"Id\":4321}]\r\n  exit /b 0\r\n)\r\nif not \"%args:ProcessId = 4321=%\"==\"%args%\" (\r\n  echo C:/Users/test/antigravity/language_server.exe --csrf_token ps --extension_server_port 8558\r\n  exit /b 0\r\n)\r\nexit /b 1\r\n"
+		}
+		writeExecutable(t, dir, "powershell", script)
 		withPathDir(t, dir)
 
 		info, err := client.detectProcessWindowsPowerShell(ctx)
@@ -110,8 +128,14 @@ func TestAntigravityCommandHelpers(t *testing.T) {
 
 	t.Run("detect process windows falls back to wmic", func(t *testing.T) {
 		dir := t.TempDir()
-		writeExecutable(t, dir, "powershell", "#!/bin/sh\nexit 1\n")
-		writeExecutable(t, dir, "wmic", "#!/bin/sh\ncat <<'EOF'\nNode,CommandLine,ProcessId\nHOST,C:/antigravity/language_server.exe --csrf_token wmic --extension_server_port 9669,2468\nEOF\n")
+		psScript := "#!/bin/sh\nexit 1\n"
+		wmicScript := "#!/bin/sh\ncat <<'EOF'\nNode,CommandLine,ProcessId\nHOST,C:/antigravity/language_server.exe --csrf_token wmic --extension_server_port 9669,2468\nEOF\n"
+		if runtime.GOOS == "windows" {
+			psScript = "@exit /b 1\r\n"
+			wmicScript = "@echo Node,CommandLine,ProcessId\r\n@echo HOST,C:/antigravity/language_server.exe --csrf_token wmic --extension_server_port 9669,2468\r\n"
+		}
+		writeExecutable(t, dir, "powershell", psScript)
+		writeExecutable(t, dir, "wmic", wmicScript)
 		withPathDir(t, dir)
 
 		info, err := client.detectProcessWindows(ctx)

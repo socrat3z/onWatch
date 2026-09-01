@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -20,8 +21,8 @@ func TestAgyResidentSessionsAreCappedIndependentOfAccountCount(t *testing.T) {
 		runners = append(runners, runner)
 		agyAdmitResident(runner)
 
-		if got := agyResidentCountForTest(); got > agyMaxResidentSessions {
-			t.Fatalf("after %d accounts: %d residents registered, cap is %d", i+1, got, agyMaxResidentSessions)
+		if got := agyResidentCountForTest(); got > agyMaxResidentSessions() {
+			t.Fatalf("after %d accounts: %d residents registered, cap is %d", i+1, got, agyMaxResidentSessions())
 		}
 		live := 0
 		for _, other := range runners {
@@ -31,8 +32,8 @@ func TestAgyResidentSessionsAreCappedIndependentOfAccountCount(t *testing.T) {
 			}
 			other.mu.Unlock()
 		}
-		if live > agyMaxResidentSessions {
-			t.Fatalf("after %d accounts: %d live agy sessions, cap is %d", i+1, live, agyMaxResidentSessions)
+		if live > agyMaxResidentSessions() {
+			t.Fatalf("after %d accounts: %d live agy sessions, cap is %d", i+1, live, agyMaxResidentSessions())
 		}
 	}
 
@@ -42,6 +43,41 @@ func TestAgyResidentSessionsAreCappedIndependentOfAccountCount(t *testing.T) {
 	defer last.mu.Unlock()
 	if last.sess == nil {
 		t.Fatal("the most recently admitted runner lost its session")
+	}
+}
+
+func TestAgyResidentSessionsConfigurableCap(t *testing.T) {
+	restore := agyResidentSnapshotForTest()
+	defer restore()
+
+	const testCap = 3
+	t.Setenv("ANTIGRAVITY_MAX_RESIDENT_SESSIONS", strconv.Itoa(testCap))
+	if cap := agyMaxResidentSessions(); cap != testCap {
+		t.Fatalf("agyMaxResidentSessions() = %d, want %d", cap, testCap)
+	}
+
+	runners := make([]*AntigravityCLIRunner, 0, 5)
+	for i := 0; i < 5; i++ {
+		runner := NewAntigravityCLIRunner(nil)
+		runner.sess = &agySession{}
+		runners = append(runners, runner)
+		agyAdmitResident(runner)
+
+		if got := agyResidentCountForTest(); got > testCap {
+			t.Fatalf("after %d accounts: %d residents registered, cap is %d", i+1, got, testCap)
+		}
+	}
+
+	live := 0
+	for _, runner := range runners {
+		runner.mu.Lock()
+		if runner.sess != nil {
+			live++
+		}
+		runner.mu.Unlock()
+	}
+	if live != testCap {
+		t.Fatalf("expected %d live sessions with cap=%d, got %d", testCap, testCap, live)
 	}
 }
 

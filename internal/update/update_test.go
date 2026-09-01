@@ -1189,6 +1189,10 @@ func TestMigrateSystemdUnit_UpdatesUserUnitAndReloads(t *testing.T) {
 	script := "#!/bin/sh\n" +
 		"echo \"$@\" >> \"" + markerFile + "\"\n" +
 		"exit 0\n"
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.Join(binDir, "systemctl.cmd")
+		script = "@echo %* >> \"" + markerFile + "\"\r\n@exit /b 0\r\n"
+	}
 	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
 		t.Fatalf("WriteFile systemctl stub: %v", err)
 	}
