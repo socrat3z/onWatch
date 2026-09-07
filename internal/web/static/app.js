@@ -78,6 +78,8 @@ function getCurrentProvider() {
   if (kimiGrid) return 'kimi';
   const opencodeGrid = document.getElementById('quota-grid-opencode');
   if (opencodeGrid) return 'opencode';
+  const ollamaGrid = document.getElementById('quota-grid-ollama');
+  if (ollamaGrid) return 'ollama';
   const grid = document.getElementById('quota-grid');
   return (grid && grid.dataset.provider) || 'synthetic';
 }
@@ -1096,6 +1098,47 @@ const anthropicDisplayNames = {
   extra_usage: 'Extra Usage'
 };
 
+// Per-model weekly buckets (limits[].kind=weekly_scoped) are keyed dynamically
+// by model, so their label is derived from the key rather than listed above.
+// Mirrors AnthropicDisplayName / anthropicScopedModelLabel in the backend.
+const ANTHROPIC_SCOPED_QUOTA_PREFIX = 'seven_day_scoped_';
+
+function isAnthropicScopedQuota(key) {
+  return typeof key === 'string' &&
+    key.startsWith(ANTHROPIC_SCOPED_QUOTA_PREFIX) &&
+    key.length > ANTHROPIC_SCOPED_QUOTA_PREFIX.length;
+}
+
+// A weekly bucket scoped to one model, by either route: promoted from limits[]
+// (seven_day_scoped_*) or reported straight from the statusline under a name we
+// have no entry for (seven_day_*). Mirrors IsAnthropicPerModelWeekly in Go.
+function isAnthropicPerModelWeekly(key) {
+  if (isAnthropicScopedQuota(key)) return true;
+  if (typeof key !== 'string' || anthropicDisplayNames[key]) return false;
+  return key.startsWith('seven_day_') && key.length > 'seven_day_'.length;
+}
+
+function anthropicModelWords(slug) {
+  return slug
+    .split('_')
+    .filter(Boolean)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+function anthropicQuotaLabel(key) {
+  if (anthropicDisplayNames[key]) return anthropicDisplayNames[key];
+  let slug = null;
+  if (isAnthropicScopedQuota(key)) {
+    slug = key.slice(ANTHROPIC_SCOPED_QUOTA_PREFIX.length);
+  } else if (isAnthropicPerModelWeekly(key)) {
+    slug = key.slice('seven_day_'.length);
+  }
+  if (slug === null) return key;
+  const model = anthropicModelWords(slug);
+  return model ? `Weekly ${model}` : key;
+}
+
 // Anthropic quota icons (mapped by key)
 const anthropicQuotaIcons = {
   five_hour: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',       // clock
@@ -1117,6 +1160,16 @@ const anthropicChartColorFallback = [
   { border: '#14B8A6', bg: 'rgba(20, 184, 166, 0.08)' },
   { border: '#EC4899', bg: 'rgba(236, 72, 153, 0.08)' }
 ];
+
+// Z.ai card headings depend on the plan: credit-based accounts report
+// "5-Hour Credits" / "Weekly Credits" where the legacy coding plan reports
+// "Time Limit" / "Tokens Limit" (issue #122). Chart legends, modals and the
+// quota list reuse whatever the current payload called the card so the whole
+// page agrees.
+function zaiQuotaLabel(quotaKey, fallback) {
+  const name = State.currentQuotas && State.currentQuotas[quotaKey] && State.currentQuotas[quotaKey].name;
+  return name || fallback;
+}
 
 // ── Copilot display names (mirrors backend CopilotDisplayName) ──
 const copilotDisplayNames = {
@@ -1177,6 +1230,7 @@ function quotaOrderForProvider(provider) {
   if (provider === 'codex') return codexQuotaOrder;
   if (provider === 'cursor') return cursorQuotaOrder;
   if (provider === 'opencode') return opencodeQuotaOrder;
+  if (provider === 'ollama') return ollamaQuotaOrder;
   return [];
 }
 
@@ -1187,9 +1241,18 @@ function sortQuotaKeysForProvider(keys, provider) {
     return sorted.sort();
   }
   const rank = new Map(preferred.map((name, index) => [name, index]));
+  // Dynamic per-model weekly quotas rank just after Weekly Sonnet instead of
+  // falling to the tail - one of them is often the binding limit.
+  const rankOf = (key) => {
+    if (rank.has(key)) return rank.get(key);
+    if (provider === 'anthropic' && isAnthropicScopedQuota(key)) {
+      return (rank.has('seven_day_sonnet') ? rank.get('seven_day_sonnet') : 0) + 0.5;
+    }
+    return Number.MAX_SAFE_INTEGER;
+  };
   return sorted.sort((left, right) => {
-    const leftRank = rank.has(left) ? rank.get(left) : Number.MAX_SAFE_INTEGER;
-    const rightRank = rank.has(right) ? rank.get(right) : Number.MAX_SAFE_INTEGER;
+    const leftRank = rankOf(left);
+    const rightRank = rankOf(right);
     if (leftRank !== rightRank) return leftRank - rightRank;
     return String(left).localeCompare(String(right));
   });
@@ -1398,6 +1461,9 @@ const renewalCategories = {
     { label: '5-Hour', groupBy: 'five_hour' },
     { label: 'Weekly', groupBy: 'weekly' },
     { label: 'Monthly', groupBy: 'monthly' }
+  ],
+  ollama: [
+    { label: 'Monthly', groupBy: 'monthly' }
   ]
 };
 
@@ -1411,6 +1477,7 @@ const overviewQuotaDisplayNames = {
   code_review: 'Review Requests',
   seven_day_sonnet: 'Weekly Sonnet',
   monthly_limit: 'Monthly',
+  monthly: 'Monthly',
   extra_usage: 'Extra',
   premium_interactions: 'Premium',
   chat: 'Chat',
@@ -1439,6 +1506,9 @@ const providerQuotaDisplayOverrides = {
     'pro': 'Gemini Pro',
     'flash': 'Gemini Flash',
     'flash_lite': 'Gemini Flash Lite',
+  },
+  ollama: {
+    monthly: 'Monthly Included Usage'
   }
 };
 
@@ -1449,6 +1519,7 @@ function getQuotaDisplayName(quotaKey, provider) {
     const override = providerQuotaDisplayOverrides[provider][quotaKey];
     if (override) return override;
   }
+  if (isAnthropicPerModelWeekly(quotaKey)) return anthropicQuotaLabel(quotaKey);
   // Fall back to generic display name
   return overviewQuotaDisplayNames[quotaKey] || quotaKey;
 };
@@ -1571,7 +1642,7 @@ function renderAnthropicQuotaCards(quotas, containerId) {
   // Build cards for each quota
   container.innerHTML = quotas.map((q, i) => {
     const icon = anthropicQuotaIcons[q.name] || '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>';
-    const displayName = q.displayName || anthropicDisplayNames[q.name] || q.name;
+    const displayName = q.displayName || anthropicQuotaLabel(q.name);
     const displayPct = q.cardPercent != null ? q.cardPercent : (q.utilization || 0);
     const utilPct = displayPct.toFixed(1);
     const cardLabel = q.cardLabel || 'Utilization';
@@ -1696,7 +1767,7 @@ function openAnthropicModal(quotaName, providerOverride) {
   const bodyEl = document.getElementById('modal-body');
   if (!modal || !bodyEl) return;
 
-  const displayName = data.displayName || anthropicDisplayNames[quotaName] || quotaName;
+  const displayName = data.displayName || anthropicQuotaLabel(quotaName);
   titleEl.textContent = displayName;
 
   const statusCfg = statusConfig[data.status] || statusConfig.healthy;
@@ -1769,7 +1840,7 @@ async function loadAnthropicModalChart(quotaName) {
       type: 'line',
       data: {
         datasets: [(() => { const c = anthropicChartColorMap[quotaName] || { border: '#D97706', bg: 'rgba(217, 119, 6, 0.08)' }; return {
-          label: anthropicDisplayNames[quotaName] || quotaName,
+          label: anthropicQuotaLabel(quotaName),
           data: processed.data,
           borderColor: c.border,
           backgroundColor: c.bg,
@@ -3711,6 +3782,13 @@ function updateCard(quotaType, data, suffix) {
   State.currentQuotas[key] = data;
 
   const idSuffix = suffix ? `${quotaType}-${suffix}` : quotaType;
+  // Cards whose heading can change with the plan (Z.ai credit windows report
+  // "5-Hour Credits" / "Weekly Credits" instead of Time / Tokens) carry a
+  // title span; everything else keeps its static heading.
+  const titleEl = document.getElementById(`title-${idSuffix}`);
+  if (titleEl && data.name && titleEl.textContent !== data.name) {
+    titleEl.textContent = data.name;
+  }
   const progressEl = document.getElementById(`progress-${idSuffix}`);
   const fractionEl = document.getElementById(`fraction-${idSuffix}`);
   const percentEl = document.getElementById(`percent-${idSuffix}`);
@@ -4169,6 +4247,199 @@ function updateOpenCodeCard(quota) {
 
 
 
+// ── Ollama Cloud Card Rendering ──
+const ollamaQuotaOrder = ['monthly'];
+const ollamaDisplayNames = {
+  monthly: 'Monthly Included Usage'
+};
+const ollamaChartColorMap = {
+  monthly: { border: '#0D9488', bg: 'rgba(13, 148, 136, 0.08)' }
+};
+const ollamaChartColorFallback = [
+  { border: '#2563eb', bg: 'rgba(37, 99, 235, 0.08)' },
+  { border: '#9333ea', bg: 'rgba(147, 51, 234, 0.08)' }
+];
+
+// ollamaCardLabel formats the fraction line: unknown caps show only dollars used.
+// Small included-usage amounts (a few tokens) would round to $0.00; keep
+// three decimals below one cent so the first requests are visible.
+function ollamaFormatUsd(value) {
+  const v = Number(value) || 0;
+  if (v > 0 && v < 0.01) return '$' + v.toFixed(3);
+  return '$' + v.toFixed(2);
+}
+
+function ollamaCardLabel(quota) {
+  const used = quota.used || 0;
+  if (quota.limitUnknown || !quota.limit) {
+    return ollamaFormatUsd(used) + ' used';
+  }
+  return ollamaFormatUsd(used) + ' / ' + ollamaFormatUsd(quota.limit || 0);
+}
+
+function renderOllamaQuotaCards(quotas, containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  if (!Array.isArray(quotas) || quotas.length === 0) {
+    container.innerHTML = '<p class="empty-state">No Ollama data available</p>';
+    return;
+  }
+
+  container.innerHTML = quotas.map((q, i) => {
+    const icon = '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>';
+    const displayName = q.displayName || ollamaDisplayNames[q.name] || q.name;
+    const limitUnknown = q.limitUnknown || !q.limit;
+    const displayPct = limitUnknown ? 0 : (q.cardPercent != null ? q.cardPercent : (q.utilization || 0));
+    const usagePct = displayPct.toFixed(1);
+    const status = limitUnknown ? 'healthy' : (q.status || 'healthy');
+    const statusCfg = statusConfig[status] || statusConfig.healthy;
+    const percentText = limitUnknown ? '--' : `${usagePct}%`;
+    const progressId = `progress-ollama-${q.name}`;
+    const percentId = `percent-ollama-${q.name}`;
+    const fractionId = `fraction-ollama-${q.name}`;
+    const statusId = `status-ollama-${q.name}`;
+    const resetId = `reset-ollama-${q.name}`;
+    const countdownId = `countdown-ollama-${q.name}`;
+
+    const cardLabel = ollamaCardLabel(q);
+
+    return `<article class="quota-card ollama-card" data-quota="${q.name}" data-provider="ollama" role="button" tabindex="0" aria-label="View ${displayName} details" style="animation-delay: ${i * 60}ms">
+      <header class="card-header">
+        <h2 class="quota-title">
+          <svg class="quota-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${icon}</svg>
+          ${displayName}
+        </h2>
+        <span class="countdown" id="${countdownId}">${q.timeUntilResetSeconds > 0 ? formatDuration(q.timeUntilResetSeconds) : '--:--'}</span>
+      </header>
+      <div class="progress-stats">
+        <span class="usage-percent" id="${percentId}">${percentText}</span>
+        <span class="usage-fraction" id="${fractionId}">${cardLabel}</span>
+      </div>
+      <div class="progress-wrapper">
+        <div class="progress-bar" role="progressbar" aria-valuenow="${Math.round(displayPct)}" aria-valuemin="0" aria-valuemax="100">
+          <div class="progress-fill" id="${progressId}" style="width: ${usagePct}%" data-status="${status}"></div>
+        </div>
+      </div>
+      <footer class="card-footer">
+        <span class="status-badge" id="${statusId}" data-status="${status}">
+          <svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${statusCfg.icon}"/></svg>
+          ${statusCfg.label}
+        </span>
+        <span class="reset-time" id="${resetId}"${q.resetsAt ? ` data-reset-at="${q.resetsAt}"` : ''}>${q.resetsAt ? formatResetTime(q.resetsAt) : ''}</span>
+      </footer>
+    </article>`;
+  }).join('');
+}
+
+function ollamaQuotaSetsMatch(container, quotas) {
+  if (!container || !Array.isArray(quotas)) return false;
+
+  const renderedCards = Array.from(container.querySelectorAll('.ollama-card[data-quota]'));
+  const hasRenderedState = renderedCards.length > 0 || container.querySelector('.empty-state') !== null;
+  if (!hasRenderedState) return false;
+
+  const renderedNames = new Set(renderedCards.map(card => card.dataset.quota));
+  const incomingNames = new Set(quotas.map(quota => quota && quota.name).filter(Boolean));
+  if (renderedCards.length !== incomingNames.size || renderedNames.size !== incomingNames.size) return false;
+
+  return Array.from(incomingNames).every(name => renderedNames.has(name));
+}
+
+function updateOllamaCard(quota) {
+  const key = `ollama-${quota.name}`;
+  const prev = State.currentQuotas[key];
+  const limitUnknown = quota.limitUnknown || !quota.limit;
+  State.currentQuotas[key] = {
+    percent: limitUnknown ? 0 : (quota.utilization || 0),
+    used: quota.used || 0,
+    limit: quota.limit || 0,
+    status: limitUnknown ? 'healthy' : (quota.status || 'healthy'),
+    renewsAt: quota.resetsAt,
+    timeUntilResetSeconds: quota.timeUntilResetSeconds || 0,
+    name: quota.name,
+    displayName: quota.displayName
+  };
+
+  const displayPct = limitUnknown ? 0 : (quota.cardPercent != null ? quota.cardPercent : (quota.utilization || 0));
+  const usagePct = displayPct.toFixed(1);
+  const status = limitUnknown ? 'healthy' : (quota.status || 'healthy');
+
+  const progressEl = document.getElementById(`progress-ollama-${quota.name}`);
+  const percentEl = document.getElementById(`percent-ollama-${quota.name}`);
+  const fractionEl = document.getElementById(`fraction-ollama-${quota.name}`);
+  const statusEl = document.getElementById(`status-ollama-${quota.name}`);
+  const resetEl = document.getElementById(`reset-ollama-${quota.name}`);
+  const countdownEl = document.getElementById(`countdown-ollama-${quota.name}`);
+
+  if (progressEl) {
+    progressEl.style.width = `${usagePct}%`;
+    progressEl.setAttribute('data-status', status);
+    const bar = progressEl.parentElement;
+    if (bar) bar.setAttribute('aria-valuenow', Math.round(displayPct));
+  }
+  if (percentEl) {
+    if (limitUnknown) {
+      percentEl.textContent = '--';
+    } else {
+      const oldVal = prev ? prev.percent : 0;
+      if (Math.abs(oldVal - displayPct) > 0.2) {
+        animateValue(percentEl, oldVal, displayPct, 400, v => `${v.toFixed(1)}%`);
+      } else {
+        percentEl.textContent = `${usagePct}%`;
+      }
+    }
+  }
+  if (fractionEl) {
+    fractionEl.textContent = ollamaCardLabel(quota);
+  }
+  if (statusEl) {
+    const config = statusConfig[status] || statusConfig.healthy;
+    statusEl.setAttribute('data-status', status);
+    statusEl.innerHTML = `<svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${config.icon}"/></svg>${config.label}`;
+  }
+  if (resetEl) {
+    if (quota.resetsAt) {
+      resetEl.setAttribute('data-reset-at', quota.resetsAt);
+      resetEl.textContent = formatResetTime(quota.resetsAt);
+    } else {
+      resetEl.removeAttribute('data-reset-at');
+      resetEl.textContent = '';
+    }
+  }
+  if (countdownEl) {
+    if (quota.timeUntilResetSeconds > 0) {
+      countdownEl.textContent = formatDuration(quota.timeUntilResetSeconds);
+      countdownEl.classList.toggle('imminent', quota.timeUntilResetSeconds < 1800);
+      countdownEl.style.display = '';
+    } else {
+      countdownEl.style.display = 'none';
+    }
+  }
+}
+
+// renderOllamaModelBreakdown lists per-model request counts (and cost when > 0).
+function renderOllamaModelBreakdown(models, containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  if (!Array.isArray(models) || models.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+  const sorted = models.slice().sort((a, b) => (b.requestCount || 0) - (a.requestCount || 0));
+  const rows = sorted.map((m) => {
+    const name = escapeHTML(m.name || 'Unknown');
+    const reqs = (m.requestCount || 0).toLocaleString();
+    const cost = (m.cost || 0) > 0 ? `<span class="ollama-model-cost">$${(m.cost).toFixed(2)}</span>` : '';
+    return `<li class="ollama-model-row">
+      <span class="ollama-model-name">${name}</span>
+      <span class="ollama-model-reqs">${reqs} req</span>
+      ${cost}
+    </li>`;
+  }).join('');
+  container.innerHTML = `<h3 class="ollama-model-title">Model Usage This Month</h3><ul class="ollama-model-list">${rows}</ul>`;
+}
+
 async function fetchCurrent() {
   const requestProvider = getCurrentProvider();
   const requestAccount = requestProvider === 'codex' ? State.codexAccount : null;
@@ -4347,6 +4618,18 @@ async function fetchCurrent() {
             data.quotas.forEach(q => updateOpenCodeCard(q));
           }
         }
+
+      } else if (provider === 'ollama') {
+        if (data.quotas) {
+          const container = document.getElementById('quota-grid-ollama');
+          if (container && !ollamaQuotaSetsMatch(container, data.quotas)) {
+            renderOllamaQuotaCards(data.quotas, 'quota-grid-ollama');
+          }
+          if (Array.isArray(data.quotas) && data.quotas.length > 0) {
+            data.quotas.forEach(q => updateOllamaCard(q));
+          }
+        }
+        renderOllamaModelBreakdown(data.models || [], 'ollama-model-breakdown');
 
       } else if (provider === 'zai') {
         updateCard('tokensLimit', data.tokensLimit);
@@ -5357,10 +5640,12 @@ function initChart() {
     defaultDatasets = []; // Kimi datasets are dynamic - populated when history data arrives
   } else if (provider === 'opencode') {
     defaultDatasets = []; // OpenCode datasets are dynamic
+  } else if (provider === 'ollama') {
+    defaultDatasets = []; // Ollama datasets are dynamic
   } else if (provider === 'zai') {
     defaultDatasets = [
-      { label: 'Tokens Limit', data: [], borderColor: getComputedStyle(document.documentElement).getPropertyValue('--chart-subscription').trim() || '#0D9488', backgroundColor: 'rgba(13, 148, 136, 0.06)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, hidden: State.hiddenQuotas.has('tokensLimit') },
-      { label: 'Time Limit', data: [], borderColor: getComputedStyle(document.documentElement).getPropertyValue('--chart-search').trim() || '#F59E0B', backgroundColor: 'rgba(245, 158, 11, 0.06)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, hidden: State.hiddenQuotas.has('timeLimit') },
+      { label: zaiQuotaLabel('tokensLimit', 'Tokens Limit'), data: [], borderColor: getComputedStyle(document.documentElement).getPropertyValue('--chart-subscription').trim() || '#0D9488', backgroundColor: 'rgba(13, 148, 136, 0.06)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, hidden: State.hiddenQuotas.has('tokensLimit') },
+      { label: zaiQuotaLabel('timeLimit', 'Time Limit'), data: [], borderColor: getComputedStyle(document.documentElement).getPropertyValue('--chart-search').trim() || '#F59E0B', backgroundColor: 'rgba(245, 158, 11, 0.06)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, hidden: State.hiddenQuotas.has('timeLimit') },
       { label: 'Tool Calls', data: [], borderColor: getComputedStyle(document.documentElement).getPropertyValue('--chart-toolcalls').trim() || '#3B82F6', backgroundColor: 'rgba(59, 130, 246, 0.06)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, hidden: State.hiddenQuotas.has('toolCalls') }
     ];
   } else {
@@ -5385,6 +5670,8 @@ function initChart() {
     : provider === 'kimi'
       ? []
     : provider === 'opencode'
+      ? []
+    : provider === 'ollama'
       ? []
     : provider === 'api-integrations'
       ? []
@@ -5943,6 +6230,32 @@ async function fetchHistory(range) {
       return;
     }
 
+    if (provider === 'ollama') {
+      const flattenedRows = historyRows.map(row => {
+        const flat = { capturedAt: row.capturedAt };
+        if (Array.isArray(row.quotas)) {
+          row.quotas.forEach(q => { flat[q.name] = q.utilization; });
+        }
+        return flat;
+      });
+      const style = getComputedStyle(document.documentElement);
+      const datasets = [];
+      const configs = [
+        { label: 'Monthly Included Usage', key: 'monthly', hiddenKey: 'monthly', color: style.getPropertyValue('--chart-subscription').trim() || '#0D9488', bg: 'rgba(13, 148, 136, 0.06)' }
+      ];
+      configs.forEach(cfg => {
+        const rawData = flattenedRows.map(d => ({ x: new Date(d.capturedAt), y: d[cfg.key] || 0 }));
+        const { data, gapSegments, pointRadii } = processDataWithGaps(rawData, range);
+        datasets.push({ label: cfg.label, data: data, borderColor: cfg.color, backgroundColor: cfg.bg, fill: true, tension: 0.4, borderWidth: 2, pointRadius: pointRadii, pointHoverRadius: 4, hidden: State.hiddenQuotas.has(cfg.hiddenKey), spanGaps: true, segment: getSegmentStyle(gapSegments, cfg.color) });
+      });
+      State.chart.data.datasets = datasets;
+      updateTimeScale(State.chart, range);
+      State.chartYMax = computeYMax(State.chart.data.datasets, State.chart);
+      State.chart.options.scales.y.max = State.chartYMax;
+      State.chart.update();
+      return;
+    }
+
 
     if (provider === 'codex') {
       // Codex history: array of { capturedAt, five_hour, seven_day, ... }
@@ -5981,8 +6294,8 @@ async function fetchHistory(range) {
       const style = getComputedStyle(document.documentElement);
       const datasets = [];
       const configs = [
-        { label: 'Tokens', key: 'tokensPercent', hiddenKey: 'tokensLimit', color: style.getPropertyValue('--chart-subscription').trim() || '#0D9488', bg: 'rgba(13, 148, 136, 0.06)' },
-        { label: 'Time', key: 'timePercent', hiddenKey: 'timeLimit', color: style.getPropertyValue('--chart-search').trim() || '#F59E0B', bg: 'rgba(245, 158, 11, 0.06)' },
+        { label: zaiQuotaLabel('tokensLimit', 'Tokens'), key: 'tokensPercent', hiddenKey: 'tokensLimit', color: style.getPropertyValue('--chart-subscription').trim() || '#0D9488', bg: 'rgba(13, 148, 136, 0.06)' },
+        { label: zaiQuotaLabel('timeLimit', 'Time'), key: 'timePercent', hiddenKey: 'timeLimit', color: style.getPropertyValue('--chart-search').trim() || '#F59E0B', bg: 'rgba(245, 158, 11, 0.06)' },
         { label: 'Tool Calls', key: 'toolCallsPercent', hiddenKey: 'toolCalls', color: style.getPropertyValue('--chart-toolcalls').trim() || '#3B82F6', bg: 'rgba(59, 130, 246, 0.06)' }
       ];
       configs.forEach(cfg => {
@@ -6034,6 +6347,7 @@ const bothProviderNames = {
   grok: 'Grok',
   kimi: 'Kimi Code',
   opencode: 'OpenCode',
+  ollama: 'Ollama',
   'api-integrations': 'API Integrations',
 };
 
@@ -6202,8 +6516,8 @@ function normalizeBothQuotas(provider, payload) {
 
   if (provider === 'zai') {
     const map = [
-      { key: 'tokensLimit', label: 'Tokens Limit' },
-      { key: 'timeLimit', label: 'Time Limit' },
+      { key: 'tokensLimit', label: zaiQuotaLabel('tokensLimit', 'Tokens Limit') },
+      { key: 'timeLimit', label: zaiQuotaLabel('timeLimit', 'Time Limit') },
       { key: 'toolCalls', label: 'Tool Calls' },
     ];
     return map
@@ -6587,9 +6901,11 @@ function buildAllProviderEntries() {
       title: bothProviderNames[provider] || toTitleCase(provider),
       badge: provider === 'copilot'
         ? 'Beta'
-        : (provider === 'cursor' || provider === 'opencode'
-          ? (payload.planName || toTitleCase(payload.accountType || ''))
-          : toTitleCase(payload.planType || '')),
+        : (provider === 'ollama'
+          ? toTitleCase(payload.plan || '')
+          : (provider === 'cursor' || provider === 'opencode'
+            ? (payload.planName || toTitleCase(payload.accountType || ''))
+            : toTitleCase(payload.planType || ''))),
       snapshotAt: payload.snapshotAt || null,
       // The combined view has no account picker, so a multi-account install
       // would otherwise read an unattributed number. One account: no chrome.
@@ -7148,7 +7464,7 @@ function buildProviderCardDatasets(provider, rows, range) {
   if (provider === 'gemini') {
     return buildDynamicDatasetsForRows(rows, range, geminiDisplayNames, geminiChartColorMap, geminiChartColorFallback, 'gemini');
   }
-  if (provider === 'cursor' || provider === 'opencode') {
+  if (provider === 'cursor' || provider === 'opencode' || provider === 'ollama') {
     const normalizedRows = rows.map((row) => {
       if (!Array.isArray(row.quotas)) return row;
       const entry = { capturedAt: row.capturedAt };
@@ -7157,9 +7473,13 @@ function buildProviderCardDatasets(provider, rows, range) {
       });
       return entry;
     });
-    return provider === 'cursor'
-      ? buildDynamicDatasetsForRows(normalizedRows, range, cursorDisplayNames, cursorChartColorMap, cursorChartColorFallback, 'cursor')
-      : buildDynamicDatasetsForRows(normalizedRows, range, opencodeDisplayNames, opencodeChartColorMap, opencodeChartColorFallback, 'opencode');
+    if (provider === 'cursor') {
+      return buildDynamicDatasetsForRows(normalizedRows, range, cursorDisplayNames, cursorChartColorMap, cursorChartColorFallback, 'cursor');
+    }
+    if (provider === 'ollama') {
+      return buildDynamicDatasetsForRows(normalizedRows, range, ollamaDisplayNames, ollamaChartColorMap, ollamaChartColorFallback, 'ollama');
+    }
+    return buildDynamicDatasetsForRows(normalizedRows, range, opencodeDisplayNames, opencodeChartColorMap, opencodeChartColorFallback, 'opencode');
   }
   if (provider === 'openrouter') {
     const orDisplayNames = { usage: 'Total Usage', usageDaily: 'Daily Usage', percent: 'Usage %' };
@@ -7816,7 +8136,7 @@ async function fetchCycles() {
   const requestSeq = (State.cyclesRequestSeq || 0) + 1;
   State.cyclesRequestSeq = requestSeq;
   const provider = requestProvider;
-  const loggingHistoryProviders = new Set(['synthetic', 'zai', 'anthropic', 'copilot', 'codex', 'antigravity', 'minimax', 'gemini', 'cursor', 'grok', 'kimi', 'opencode']);
+  const loggingHistoryProviders = new Set(['synthetic', 'zai', 'anthropic', 'copilot', 'codex', 'antigravity', 'minimax', 'gemini', 'cursor', 'grok', 'kimi', 'opencode', 'ollama']);
 
   // All-accounts overview: fetch each account's logging history and merge,
   // tagging every row with its account name for the combined table.
@@ -8010,7 +8330,7 @@ function renderCyclesTable() {
 
   const provider = getCurrentProvider();
   const quotaNames = State.cyclesQuotaNames;
-  const usePercent = provider === 'anthropic' || provider === 'copilot' || provider === 'codex' || provider === 'antigravity' || provider === 'minimax' || provider === 'gemini' || provider === 'openrouter' || provider === 'cursor' || provider === 'grok' || provider === 'kimi' || provider === 'moonshot' || provider === 'deepseek' || provider === 'opencode';
+  const usePercent = provider === 'anthropic' || provider === 'copilot' || provider === 'codex' || provider === 'antigravity' || provider === 'minimax' || provider === 'gemini' || provider === 'openrouter' || provider === 'cursor' || provider === 'grok' || provider === 'kimi' || provider === 'moonshot' || provider === 'deepseek' || provider === 'opencode' || provider === 'ollama';
   const deltaUsesPercent = usePercent && provider !== 'minimax' && provider !== 'moonshot' && provider !== 'deepseek';
   const isLoggingHistory = State.isLoggingHistory === true;
   const showAccount = isAccountsOverviewMode(provider);
@@ -8875,7 +9195,11 @@ function openModal(quotaType, providerOverride) {
   const data = State.currentQuotas[quotaKey];
   if (!data) return;
 
-  const zaiQuotaNames = { tokensLimit: 'Tokens Limit', timeLimit: 'Time Limit', toolCalls: 'Tool Calls' };
+  const zaiQuotaNames = {
+    tokensLimit: zaiQuotaLabel('tokensLimit', 'Tokens Limit'),
+    timeLimit: zaiQuotaLabel('timeLimit', 'Time Limit'),
+    toolCalls: 'Tool Calls',
+  };
   const names = effectiveProvider === 'zai' ? zaiQuotaNames : quotaNames;
   titleEl.textContent = names[quotaType] || quotaType;
 
@@ -8977,7 +9301,9 @@ async function loadModalChart(quotaType, effectiveProvider) {
       type: 'line',
       data: {
         datasets: [{
-          label: (provider === 'zai' ? { tokensLimit: 'Tokens Limit', timeLimit: 'Time Limit', toolCalls: 'Tool Calls' } : quotaNames)[quotaType] || quotaType,
+          label: (provider === 'zai'
+            ? { tokensLimit: zaiQuotaLabel('tokensLimit', 'Tokens Limit'), timeLimit: zaiQuotaLabel('timeLimit', 'Time Limit'), toolCalls: 'Tool Calls' }
+            : quotaNames)[quotaType] || quotaType,
           data: processed.data,
           borderColor: colorMap[quotaType] || '#3B82F6',
           backgroundColor: bgMap[quotaType] || 'rgba(59,130,246,0.08)',
@@ -9367,7 +9693,7 @@ function renderOverviewTable() {
 
   const quotaNames = State.overviewQuotaNames;
   const overviewProv = getOverviewProvider();
-  const usePercent = overviewProv === 'anthropic' || overviewProv === 'codex' || overviewProv === 'antigravity' || overviewProv === 'minimax' || overviewProv === 'gemini' || overviewProv === 'openrouter' || overviewProv === 'cursor' || overviewProv === 'grok' || overviewProv === 'kimi' || overviewProv === 'opencode';
+  const usePercent = overviewProv === 'anthropic' || overviewProv === 'codex' || overviewProv === 'antigravity' || overviewProv === 'minimax' || overviewProv === 'gemini' || overviewProv === 'openrouter' || overviewProv === 'cursor' || overviewProv === 'grok' || overviewProv === 'kimi' || overviewProv === 'opencode' || overviewProv === 'ollama';
   const deltaUsesPercent = usePercent && overviewProv !== 'minimax';
   // MiniMax reports a percentage-based quota; the Duration and Total Delta
   // columns add no signal there, so omit them for this provider.
@@ -10475,6 +10801,7 @@ const DEFAULT_PROVIDER_TAB_LABELS = {
   grok: 'Grok',
   kimi: 'Kimi',
   opencode: 'OpenCode',
+  ollama: 'Ollama',
   'api-integrations': 'API Integrations',
   both: 'Home',
 };
@@ -11194,6 +11521,15 @@ const providerSettingsConfig = {
     fields: [
       { id: 'workspace_id', label: 'Workspace ID', type: 'text', placeholder: 'wrk_...', hint: 'Your OpenCode Go workspace ID. Overrides OPENCODE_GO_WORKSPACE_ID from .env.' },
       { id: 'auth_cookie', label: 'Auth Cookie', type: 'password', placeholder: 'Not configured', hint: 'The auth cookie value required for scraping the dashboard. Overrides OPENCODE_GO_AUTH_COOKIE from .env.', sensitive: true },
+    ],
+  },
+  ollama: {
+    title: 'Ollama Cloud',
+    desc: 'Configure Ollama Cloud included usage tracking. Changes take effect after daemon restart.',
+    fields: [
+      { id: 'api_key', label: 'API Key', type: 'password', placeholder: 'Not configured', hint: 'Ollama API key from https://ollama.com/settings/keys. Overrides OLLAMA_API_KEY from .env.', sensitive: true },
+      { id: 'monthly_limit', label: 'Monthly Limit', type: 'text', placeholder: 'Derived from plan', hint: 'Included monthly usage cap in USD. Leave empty to derive from your plan (Pro $60, Max $300, Team $1,000). Overrides OLLAMA_MONTHLY_LIMIT.' },
+      { id: 'reset_day', label: 'Reset Day', type: 'text', placeholder: 'Account anniversary', hint: 'Day of month your included usage resets (1-31). Leave empty to use your account anniversary. Overrides OLLAMA_RESET_DAY.' },
     ],
   },
 };
@@ -12209,6 +12545,9 @@ const _overrideQuotasByProvider = {
     { key: 'five_hour', label: '5-Hour Limit' },
     { key: 'weekly', label: 'Weekly Limit' },
     { key: 'monthly', label: 'Monthly Limit' },
+  ],
+  ollama: [
+    { key: 'monthly', label: 'Monthly Included Usage' },
   ],
 };
 

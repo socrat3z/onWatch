@@ -97,6 +97,7 @@ type Handler struct {
 	grokTracker        *tracker.GrokTracker
 	kimiTracker        *tracker.KimiTracker
 	opencodeTracker    *tracker.OpenCodeTracker
+	ollamaTracker      *tracker.OllamaTracker
 	updater            *update.Updater
 	notifier           Notifier
 	agentManager       ProviderAgentController
@@ -1208,6 +1209,7 @@ func providerCatalog() []providerCatalogItem {
 		{Key: "grok", Name: "Grok", Description: "Grok (xAI) usage tracking", AutoDetectable: true},
 		{Key: "kimi", Name: "Kimi Code", Description: "Kimi Code CLI OAuth quota tracking", AutoDetectable: true},
 		{Key: "opencode", Name: "OpenCode Go", Description: "OpenCode Go quota tracking", AutoDetectable: false},
+		{Key: "ollama", Name: "Ollama Cloud", Description: "Ollama Cloud included usage tracking", AutoDetectable: false},
 	}
 }
 
@@ -1286,6 +1288,8 @@ func (h *Handler) isProviderConfigured(provider string) bool {
 		return api.DetectKimiCredentials(h.logger) != nil
 	case "opencode":
 		return h.config != nil && strings.TrimSpace(h.config.OpenCodeGoWorkspaceID) != "" && strings.TrimSpace(h.config.OpenCodeGoAuthCookie) != ""
+	case "ollama":
+		return h.config != nil && strings.TrimSpace(h.config.OllamaAPIKey) != ""
 	default:
 		return false
 	}
@@ -1436,6 +1440,9 @@ func applyProviderConfig(dst, src *config.Config) {
 	dst.OpenCodeEnabled = src.OpenCodeEnabled
 	dst.OpenCodeGoWorkspaceID = src.OpenCodeGoWorkspaceID
 	dst.OpenCodeGoAuthCookie = src.OpenCodeGoAuthCookie
+	dst.OllamaAPIKey = src.OllamaAPIKey
+	dst.OllamaMonthlyLimit = src.OllamaMonthlyLimit
+	dst.OllamaResetDay = src.OllamaResetDay
 	dst.AntigravityBaseURL = src.AntigravityBaseURL
 	dst.AntigravityCSRFToken = src.AntigravityCSRFToken
 	dst.AntigravityEnabled = src.AntigravityEnabled
@@ -1527,6 +1534,9 @@ var providerEnumFields = map[string]map[string][]string{
 		"display_mode": {"usage", "available"},
 	},
 	"opencode": {
+		"display_mode": {"usage", "available"},
+	},
+	"ollama": {
 		"display_mode": {"usage", "available"},
 	},
 }
@@ -1643,10 +1653,60 @@ func ApplyProviderSettingsFromDB(st *store.Store, cfg *config.Config, logger *sl
 			cfg.OpenCodeGoAuthCookie = cookie
 		}
 	}
+	// Ollama Cloud: API key plus optional included-usage cap and reset day.
+	if s := provSettings["ollama"]; s != nil {
+		if key, _ := s["api_key"].(string); key != "" {
+			cfg.OllamaAPIKey = key
+		}
+		if limit := parseSettingFloat(s["monthly_limit"]); limit > 0 {
+			cfg.OllamaMonthlyLimit = limit
+		}
+		if day := parseSettingInt(s["reset_day"]); day >= 1 && day <= 31 {
+			cfg.OllamaResetDay = day
+		}
+	}
 
 	if logger != nil {
 		logger.Debug("Applied provider_settings from DB")
 	}
+}
+
+// parseSettingFloat reads a provider-setting value that may arrive as a JSON
+// number (float64) or a numeric string. Returns 0 when it cannot be parsed.
+func parseSettingFloat(v interface{}) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case json.Number:
+		f, _ := n.Float64()
+		return f
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		if err != nil {
+			return 0
+		}
+		return f
+	}
+	return 0
+}
+
+// parseSettingInt reads a provider-setting value that may arrive as a JSON
+// number (float64) or a numeric string. Returns 0 when it cannot be parsed.
+func parseSettingInt(v interface{}) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	case string:
+		i, err := strconv.Atoi(strings.TrimSpace(n))
+		if err != nil {
+			return 0
+		}
+		return i
+	}
+	return 0
 }
 
 func (h *Handler) providerStatuses() []ProviderStatus {
@@ -1952,6 +2012,8 @@ func (h *Handler) Current(w http.ResponseWriter, r *http.Request) {
 		h.currentKimi(w, r)
 	case "opencode":
 		h.currentOpenCode(w, r)
+	case "ollama":
+		h.currentOllama(w, r)
 	default:
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("unknown provider: %s", provider))
 	}
@@ -2384,6 +2446,9 @@ func (h *Handler) currentBoth(w http.ResponseWriter, r *http.Request) {
 	if h.config.HasProvider("opencode") && providerTelemetryEnabled(visibility, "opencode") {
 		response["opencode"] = h.buildOpenCodeCurrent()
 	}
+	if h.config.HasProvider("ollama") && providerTelemetryEnabled(visibility, "ollama") {
+		response["ollama"] = h.buildOllamaCurrent()
+	}
 	respondJSON(w, http.StatusOK, response)
 }
 
@@ -2518,9 +2583,15 @@ func buildZaiTokensQuotaResponse(snapshot *api.ZaiSnapshot) map[string]interface
 		status = "warning"
 	}
 
+	name, description := "Tokens Limit", "Token consumption budget"
+	if snapshot.TokensLimitType == api.ZaiLimitTypeCredit {
+		// GLM Coding Plan Lite reports credit windows instead of tokens (#122).
+		name, description = "Weekly Credits", "Credit budget for the weekly window"
+	}
+
 	result := map[string]interface{}{
-		"name":        "Tokens Limit",
-		"description": "Token consumption budget",
+		"name":        name,
+		"description": description,
 		"usage":       currentUsage,
 		"limit":       budget,
 		"percent":     percent,
@@ -2556,9 +2627,15 @@ func buildZaiTimeQuotaResponse(snapshot *api.ZaiSnapshot) map[string]interface{}
 		status = "warning"
 	}
 
-	return map[string]interface{}{
-		"name":                  "Time Limit",
-		"description":           "Tool call time budget",
+	name, description := "Time Limit", "Tool call time budget"
+	if snapshot.TimeLimitType == api.ZaiLimitTypeCredit {
+		// GLM Coding Plan Lite reports credit windows instead of prompts (#122).
+		name, description = "5-Hour Credits", "Credit budget for the 5-hour window"
+	}
+
+	result := map[string]interface{}{
+		"name":                  name,
+		"description":           description,
 		"usage":                 currentUsage,
 		"limit":                 budget,
 		"percent":               percent,
@@ -2567,6 +2644,16 @@ func buildZaiTimeQuotaResponse(snapshot *api.ZaiSnapshot) map[string]interface{}
 		"timeUntilReset":        "N/A",
 		"timeUntilResetSeconds": 0,
 	}
+
+	// Legacy TIME_LIMIT carries no reset time; credit windows do.
+	if snapshot.TimeNextResetTime != nil {
+		timeUntilReset := time.Until(*snapshot.TimeNextResetTime)
+		result["renewsAt"] = snapshot.TimeNextResetTime.Format(time.RFC3339)
+		result["timeUntilReset"] = formatDuration(timeUntilReset)
+		result["timeUntilResetSeconds"] = int64(timeUntilReset.Seconds())
+	}
+
+	return result
 }
 
 func buildZaiToolCallsResponse(snapshot *api.ZaiSnapshot) map[string]interface{} {
@@ -2738,6 +2825,8 @@ func (h *Handler) History(w http.ResponseWriter, r *http.Request) {
 		h.historyKimi(w, r)
 	case "opencode":
 		h.historyOpenCode(w, r)
+	case "ollama":
+		h.historyOllama(w, r)
 	default:
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("unknown provider: %s", provider))
 	}
@@ -3172,6 +3261,28 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 				opencodeData = append(opencodeData, entry)
 			}
 			response["opencode"] = opencodeData
+		}
+	}
+
+	if h.config.HasProvider("ollama") && providerTelemetryEnabled(visibility, "ollama") && h.store != nil {
+		snapshots, err := h.store.QueryOllamaRange(start, now, 200)
+		if err == nil {
+			step := downsampleStep(len(snapshots), maxChartPoints)
+			last := len(snapshots) - 1
+			ollamaData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
+			for i, snap := range snapshots {
+				if step > 1 && i != 0 && i != last && i%step != 0 {
+					continue
+				}
+				entry := map[string]interface{}{
+					"capturedAt": snap.CapturedAt.Format(time.RFC3339),
+				}
+				for _, q := range snap.Quotas {
+					entry[q.Name] = q.Utilization
+				}
+				ollamaData = append(ollamaData, entry)
+			}
+			response["ollama"] = ollamaData
 		}
 	}
 
@@ -3819,6 +3930,8 @@ func (h *Handler) Cycles(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusOK, map[string]interface{}{"cycles": []interface{}{}})
 	case "opencode":
 		h.cyclesOpenCode(w, r)
+	case "ollama":
+		h.cyclesOllama(w, r)
 	default:
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("unknown provider: %s", provider))
 	}
@@ -4189,6 +4302,8 @@ func (h *Handler) Summary(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusOK, map[string]interface{}{"summaries": []interface{}{}})
 	case "opencode":
 		h.summaryOpenCode(w, r)
+	case "ollama":
+		h.summaryOllama(w, r)
 	default:
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("unknown provider: %s", provider))
 	}
@@ -5014,6 +5129,8 @@ func (h *Handler) Insights(w http.ResponseWriter, r *http.Request) {
 		h.insightsKimi(w, r, rangeDur)
 	case "opencode":
 		h.insightsOpenCode(w, r, rangeDur)
+	case "ollama":
+		h.insightsOllama(w, r, rangeDur)
 	default:
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("unknown provider: %s", provider))
 	}
@@ -5109,6 +5226,9 @@ func (h *Handler) insightsBoth(w http.ResponseWriter, r *http.Request, rangeDur 
 	}
 	if h.config.HasProvider("opencode") && providerTelemetryEnabled(visibility, "opencode") {
 		response["opencode"] = h.buildOpenCodeInsights(hidden, rangeDur)
+	}
+	if h.config.HasProvider("ollama") && providerTelemetryEnabled(visibility, "ollama") {
+		response["ollama"] = h.buildOllamaInsights(hidden, rangeDur)
 	}
 
 	respondJSON(w, http.StatusOK, response)
@@ -6007,10 +6127,16 @@ func anthropicQuotaDisplayOrder(name string) int {
 	case "seven_day_sonnet":
 		return 2
 	case "monthly_limit":
-		return 3
-	case "extra_usage":
 		return 4
+	case "extra_usage":
+		return 5
 	default:
+		// Per-model weekly buckets sit with the other weekly quotas rather than
+		// at the end - one of them is often binding. Covers both the keys
+		// promoted from limits[] and any the statusline reports directly.
+		if api.IsAnthropicPerModelWeekly(name) {
+			return 3
+		}
 		return 100
 	}
 }
@@ -7675,6 +7801,8 @@ func (h *Handler) CycleOverview(w http.ResponseWriter, r *http.Request) {
 		h.cycleOverviewKimi(w, r)
 	case "opencode":
 		h.cycleOverviewOpenCode(w, r)
+	case "ollama":
+		h.cycleOverviewOllama(w, r)
 	default:
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("unknown provider: %s", provider))
 	}
@@ -11367,6 +11495,8 @@ func (h *Handler) LoggingHistory(w http.ResponseWriter, r *http.Request) {
 		h.loggingHistoryKimi(w, r)
 	case "opencode":
 		h.loggingHistoryOpenCode(w, r)
+	case "ollama":
+		h.loggingHistoryOllama(w, r)
 	default:
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("unknown provider: %s", provider))
 	}
@@ -11592,11 +11722,18 @@ func anthropicLoggingQuotaOrder(names []string) []string {
 			delete(present, n)
 		}
 	}
+	scoped := make([]string, 0, len(present))
 	extra := make([]string, 0, len(present))
 	for n := range present {
+		if api.IsAnthropicScopedQuota(n) {
+			scoped = append(scoped, n)
+			continue
+		}
 		extra = append(extra, n)
 	}
+	sort.Strings(scoped)
 	sort.Strings(extra)
+	ordered = append(ordered, scoped...)
 	ordered = append(ordered, extra...)
 	return ordered
 }
