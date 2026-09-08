@@ -176,7 +176,7 @@ It is a thin client: it needs the onWatch daemon running (steps above) and finds
 
 - **Synthetic** -- Subscription, Search, and Tool Call quota cards
 - **Z.ai** -- Tokens, Time, and Tool Call quota cards
-- **Anthropic** -- Dynamic quota cards (5-Hour, 7-Day, 7-Day Sonnet, Monthly, etc.) with utilization percentages, OAuth token auto-refresh, and automatic rate limit bypass via token rotation
+- **Anthropic** -- Dynamic quota cards (5-Hour, 7-Day, 7-Day Sonnet, Monthly, etc.) with utilization percentages, OAuth token auto-refresh, and cross-process credential locking so a refresh never revokes a running Claude Code session
 - **Codex** -- Dynamic quota cards (LLMs, Review Requests) with OAuth auth-state refresh, historical cycle analytics, **multi-account support (Beta)** for tracking multiple ChatGPT accounts, and an **auto quota-starter (Beta, off by default)** that can start an unstarted 5h/weekly window for you (see FAQ)
 - **GitHub Copilot (Beta)** -- Premium Interactions, Chat, and Completions quota cards with monthly reset tracking
 - **MiniMax Coding Plan** -- Shared quota pool tracking for M2, M2.1, and M2.5 models with 5-hour rolling window reset cycles and **multi-account support** for tracking multiple MiniMax subscriptions via the dashboard UI
@@ -644,7 +644,7 @@ update process, testing, and the measured resource budget.
 **Container won't start:** Check `docker-compose logs -f`; verify API keys in `.env` and port 9211 availability.
 **Debugging:** The default distroless image has no shell. Use the Alpine variant (`ghcr.io/onllm-dev/onwatch:alpine`) if you need `docker exec` access, or use a sidecar: `docker run -it --rm --pid=container:onwatch --net=container:onwatch nicolaka/netshoot bash`
 
-**Anthropic 429 rate limit errors:** Anthropic's `/api/oauth/usage` endpoint has aggressive rate limits (~5 requests per token). onWatch automatically handles this by refreshing the OAuth token when rate limited, which provides a fresh rate limit window. This is transparent to users - onWatch logs "Rate limit bypassed successfully" when this occurs. The workaround requires OAuth credentials (auto-detected from Claude Code); API key authentication does not support token refresh. See [issue #16](https://github.com/onllm-dev/onWatch/issues/16) and [anthropics/claude-code#31021](https://github.com/anthropics/claude-code/issues/31021) for details.
+**Anthropic 429 rate limit errors:** Anthropic's `/api/oauth/usage` endpoint has aggressive rate limits (~5 requests per token). onWatch logs the 429 and retries on the next scheduled poll. It deliberately does **not** refresh the OAuth token to win a fresh rate-limit window: refresh tokens are one-time use, so rotating one to dodge a rate limit revokes any Claude Code session sharing the account and forces a re-login once the old access token expires. To avoid the usage API altogether, set `ANTHROPIC_SOURCE=statusline`. See [issue #16](https://github.com/onllm-dev/onWatch/issues/16) and [anthropics/claude-code#31021](https://github.com/anthropics/claude-code/issues/31021) for details.
 
 ---
 

@@ -1,11 +1,149 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"time"
 )
+
+// AnthropicRotation is the outcome of one credential rotation transaction.
+type AnthropicRotation struct {
+	// Tokens is the pair the agent should poll with. Never nil on success.
+	Tokens *OAuthTokenResponse
+	// Adopted reports that another writer had already rotated the stored
+	// credentials, so Tokens came off disk instead of from a token exchange.
+	Adopted bool
+	// Persisted reports that Tokens are already on disk. When false the caller
+	// still owns writing them - the refresh token has been consumed either way,
+	// so dropping the pair here would strand the account.
+	Persisted bool
+	// PersistErr is the write error when the transaction exchanged tokens but
+	// could not store them. Advisory: the caller retries the write itself.
+	PersistErr error
+}
+
+// remainingSeconds converts a stored expiry into an ExpiresIn value, clamping
+// unknown (zero) and past expiries to 0 rather than a negative duration.
+func remainingSeconds(expiresAt time.Time) int {
+	if expiresAt.IsZero() {
+		return 0
+	}
+	if remaining := int(time.Until(expiresAt).Seconds()); remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
+// adopt wraps another writer's stored pair as an already-persisted rotation.
+func adopt(creds *AnthropicCredentials) AnthropicRotation {
+	return AnthropicRotation{
+		Tokens: &OAuthTokenResponse{
+			AccessToken:  creds.AccessToken,
+			RefreshToken: creds.RefreshToken,
+			ExpiresIn:    remainingSeconds(creds.ExpiresAt),
+		},
+		Adopted:   true,
+		Persisted: true,
+	}
+}
+
+// RefreshAnthropicCredentialsFile serializes the complete read/exchange/write
+// transaction for one Claude credential file. If another cooperating writer
+// rotated the credentials while the caller was waiting, its pair is adopted
+// instead of reusing the now-consumed refresh token.
+func RefreshAnthropicCredentialsFile(ctx context.Context, path, expectedAccess string) (AnthropicRotation, error) {
+	unlock, err := lockAnthropicCredentials(ctx, path)
+	if err != nil {
+		return AnthropicRotation{}, fmt.Errorf("lock credentials: %w", err)
+	}
+	defer unlock()
+
+	current, err := ReadAnthropicCredentialsFile(path)
+	if err != nil {
+		return AnthropicRotation{}, err
+	}
+	if current == nil || current.RefreshToken == "" {
+		return AnthropicRotation{}, errors.New("credentials have no refresh token")
+	}
+	if expectedAccess != "" && current.AccessToken != expectedAccess {
+		return adopt(current), nil
+	}
+
+	refreshed, err := RefreshAnthropicToken(ctx, current.RefreshToken)
+	if err != nil {
+		// invalid_grant can mean a non-cooperating writer won the race. Re-read
+		// once and adopt its generation before declaring the login terminal. A
+		// pair with no refresh token is not worth adopting: it would buy one
+		// access-token lifetime and then fail terminally anyway.
+		if errors.Is(err, ErrOAuthInvalidGrant) {
+			latest, readErr := ReadAnthropicCredentialsFile(path)
+			if readErr == nil && latest != nil && latest.RefreshToken != "" &&
+				latest.AccessToken != current.AccessToken {
+				return adopt(latest), nil
+			}
+		}
+		return AnthropicRotation{}, err
+	}
+	// RFC 6749 makes refresh_token optional in a successful refresh response.
+	// Preserve the current token unless the server explicitly rotates it.
+	if refreshed.RefreshToken == "" {
+		refreshed.RefreshToken = current.RefreshToken
+	}
+	// From here the old refresh token is spent, so the pair must reach the
+	// caller even when the write fails - returning an error instead would see
+	// it discarded along with the only credentials that still work.
+	if err := WriteAnthropicCredentialsFile(path, refreshed.AccessToken, refreshed.RefreshToken, refreshed.ExpiresIn); err != nil {
+		return AnthropicRotation{Tokens: refreshed, PersistErr: err}, nil
+	}
+	return AnthropicRotation{Tokens: refreshed, Persisted: true}, nil
+}
+
+// RefreshAnthropicCredentialsAmbient runs the same serialized transaction for
+// the ambient single-account store. The lock file sits beside
+// ~/.claude/.credentials.json - the one path every Claude Code process agrees
+// on - so it coordinates with the CLI even where the effective store is a
+// keychain and the file is only a mirror.
+func RefreshAnthropicCredentialsAmbient(ctx context.Context, logger *slog.Logger, expectedAccess string) (AnthropicRotation, error) {
+	path := getCredentialsFilePath()
+	if path == "" {
+		return AnthropicRotation{}, errors.New("no ambient credentials path")
+	}
+	unlock, err := lockAnthropicCredentials(ctx, path)
+	if err != nil {
+		return AnthropicRotation{}, fmt.Errorf("lock credentials: %w", err)
+	}
+	defer unlock()
+
+	current := DetectAnthropicCredentials(logger)
+	if current == nil || current.RefreshToken == "" {
+		return AnthropicRotation{}, errors.New("credentials have no refresh token")
+	}
+	if expectedAccess != "" && current.AccessToken != expectedAccess {
+		return adopt(current), nil
+	}
+
+	refreshed, err := RefreshAnthropicToken(ctx, current.RefreshToken)
+	if err != nil {
+		if errors.Is(err, ErrOAuthInvalidGrant) {
+			if latest := DetectAnthropicCredentials(logger); latest != nil &&
+				latest.RefreshToken != "" && latest.AccessToken != current.AccessToken {
+				return adopt(latest), nil
+			}
+		}
+		return AnthropicRotation{}, err
+	}
+	if refreshed.RefreshToken == "" {
+		refreshed.RefreshToken = current.RefreshToken
+	}
+	if err := WriteAnthropicCredentials(refreshed.AccessToken, refreshed.RefreshToken, refreshed.ExpiresIn); err != nil {
+		return AnthropicRotation{Tokens: refreshed, PersistErr: err}, nil
+	}
+	return AnthropicRotation{Tokens: refreshed, Persisted: true}, nil
+}
 
 // claudeCredentials represents the Claude Code credentials JSON structure.
 type claudeCredentials struct {

@@ -110,6 +110,9 @@ if [ -d /legacy/antigravity-keyring ] && [ ! -d /auth/antigravity/default/.local
 # point, so the per-account directory has to be created here: the CLIs assume
 # an existing HOME and fail before the login prompt when it is missing.
 mkdir -p "$target_home"
+if [ "${1:-}" = "claude" ]; then
+  mkdir -p "$target_home/.claude"
+fi
 chown -R nonroot:nonroot /data /auth /tmp/onwatch-runtime
 
 exec gosu nonroot sh -c '
@@ -142,7 +145,21 @@ CODEX_CONFIG
   fi
 
   case "${1:-}" in
-    agy|codex|claude)
+    claude)
+      shift
+      # Cooperate with the onWatch per-account OAuth transaction. `flock` works
+      # across the daemon and the one-shot login containers because this lock
+      # file lives in their shared claude-auth volume. Bounded, with a distinct
+      # conflict code, so a stuck holder surfaces as a message rather than an
+      # unexplained hang.
+      status=0
+      flock -w 60 -E 75 "$HOME/.claude/.credentials.json.lock" /usr/local/bin/claude "$@" || status=$?
+      if [ "$status" -eq 75 ]; then
+        echo "claude: timed out waiting for the credential lock; is onwatch mid-refresh?" >&2
+      fi
+      exit "$status"
+      ;;
+    agy|codex)
       cli="$1"
       shift
       exec "/usr/local/bin/$cli" "$@"

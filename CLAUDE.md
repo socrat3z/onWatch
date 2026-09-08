@@ -96,12 +96,12 @@ On `go.sum` changes, update `vendorHash` in `flake.nix` (run `nix build .#onwatc
    - Do NOT use `gh release create` - the workflow handles release creation, cross-compilation (5 platforms), and binary uploads
    - Do NOT run `./app.sh --release` locally - the release must happen through the GitHub Actions pipeline
 
-**Anthropic Rate Limit Bypass:** Anthropic's usage API has aggressive rate limits (~5 requests per token, then 429 for ~5 min). onWatch bypasses this by refreshing the OAuth token when rate limited - each new access token gets a fresh rate limit window. Implementation details:
-- `internal/agent/anthropic_agent.go`: Detects 429, calls `RefreshAnthropicToken`, saves new tokens, retries
-- `internal/api/anthropic_oauth.go`: OAuth token refresh endpoint (`console.anthropic.com/v1/oauth/token`)
-- `internal/api/anthropic_token_unix.go`: Writes to macOS Keychain + file for persistence
-- `internal/api/anthropic_token_windows.go`: Writes to credentials file
-- Refresh tokens are one-time use (OAuth rotation) - MUST save new refresh token after each refresh
+**Anthropic OAuth credential rotation:** Refresh tokens are one-time use (OAuth rotation), so two processes that exchange the same token revoke each other and force an interactive re-login hours later, when the surviving access token expires. Every rotation therefore runs as one serialized transaction:
+- `internal/api/anthropic_lock.go` (+ `_unix`/`_windows`): bounded, context-aware advisory lock on `<credentials>.lock`. Non-blocking with retry, so a `claude auth login` holding the lock cannot wedge the poll goroutine.
+- `internal/api/anthropic_token.go`: `RefreshAnthropicCredentialsFile` (named accounts) and `RefreshAnthropicCredentialsAmbient` (single-account) hold the lock across read -> exchange -> write, adopt a newer stored pair instead of reusing a consumed refresh token, and preserve the existing refresh token when the server omits one (RFC 6749 section 6).
+- A rotation that could not be written is still returned to the agent (`AnthropicRotation.PersistErr`). The exchange has already spent the old token, so dropping the pair would strand the account.
+- `docker-entrypoint-with-user-env.sh`: wraps the `claude` CLI in `flock` on the same lock file, which is why coordination works across the daemon and login containers.
+- A usage-API 429 does **not** trigger a refresh. Rotating a token to win a fresh rate-limit window was the old behaviour and was the cause of the periodic logouts; onWatch now waits for the next scheduled poll. Prefer `ANTHROPIC_SOURCE=statusline` to avoid the usage API entirely.
 - See: [issue #16](https://github.com/onllm-dev/onWatch/issues/16), [anthropics/claude-code#31021](https://github.com/anthropics/claude-code/issues/31021)
 
 ## Style

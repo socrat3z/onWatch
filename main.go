@@ -1222,6 +1222,12 @@ func run() error {
 			anthropicAg.SetCredentialsRefresh(func() *api.AnthropicCredentials {
 				return api.DetectAnthropicCredentials(logger)
 			})
+			// Serialize rotation against Claude Code and any other onWatch
+			// instance sharing this store: a refresh token is one-time use, so
+			// two unsynchronized exchanges revoke each other.
+			anthropicAg.SetCredentialsRotator(func(ctx context.Context, expectedAccess string) (api.AnthropicRotation, error) {
+				return api.RefreshAnthropicCredentialsAmbient(ctx, logger, expectedAccess)
+			})
 		}
 
 		// Enable statusline bridge for "auto" and "statusline" modes

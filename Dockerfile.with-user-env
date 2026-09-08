@@ -163,6 +163,8 @@ RUN apt-get update && \
         gnome-keyring \
         gosu \
         libsecret-tools \
+        procps \
+        util-linux \
         tzdata && \
     rm -rf /var/lib/apt/lists/* && \
     curl -fsSL "$AGY_INSTALL_URL" | bash -s -- --dir /usr/local/bin

@@ -17,9 +17,11 @@ import (
 )
 
 // TestAnthropicAgent_RateLimitBackoff_OAuthEndpoint429 verifies that when the OAuth
-// refresh endpoint returns 429, the agent enters backoff and stops retrying immediately.
+// refresh endpoint returns 429 during a proactive refresh, the agent enters
+// backoff and stops retrying immediately.
 func TestAnthropicAgent_RateLimitBackoff_OAuthEndpoint429(t *testing.T) {
-	// API server always returns 429 to trigger refresh attempts
+	// The usage API always returns 429. That no longer triggers a rotation -
+	// the near-expiry credentials below drive the proactive refresh instead.
 	var apiCalls atomic.Int32
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiCalls.Add(1)
@@ -59,8 +61,8 @@ func TestAnthropicAgent_RateLimitBackoff_OAuthEndpoint429(t *testing.T) {
 		return &api.AnthropicCredentials{
 			AccessToken:  "test-token",
 			RefreshToken: "test-refresh-token",
-			ExpiresIn:    time.Hour,
-			ExpiresAt:    time.Now().Add(time.Hour),
+			ExpiresIn:    time.Minute,
+			ExpiresAt:    time.Now().Add(time.Minute),
 		}
 	})
 
@@ -80,9 +82,9 @@ func TestAnthropicAgent_RateLimitBackoff_OAuthEndpoint429(t *testing.T) {
 		t.Fatal("Agent.Run() did not return within 2s")
 	}
 
-	// The first poll triggers a 429 -> OAuth refresh -> OAuth 429
-	// After that, the agent should be in backoff and NOT call OAuth again
-	// on subsequent polls (it should just return from the backoff check).
+	// The first poll proactively refreshes the near-expiry token and gets an
+	// OAuth 429. After that the agent is in backoff and must not call OAuth
+	// again on subsequent polls.
 	oauthCount := oauthCalls.Load()
 	if oauthCount != 1 {
 		t.Errorf("Expected exactly 1 OAuth refresh attempt (then backoff), got %d", oauthCount)
@@ -104,18 +106,11 @@ func TestAnthropicAgent_RateLimitBackoff_OAuthEndpoint429(t *testing.T) {
 }
 
 // TestAnthropicAgent_RateLimitBackoff_ResetsOnSuccess verifies that a successful
-// OAuth refresh resets the backoff state.
+// proactive OAuth refresh resets the backoff state.
 func TestAnthropicAgent_RateLimitBackoff_ResetsOnSuccess(t *testing.T) {
 	var apiCallCount atomic.Int32
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := apiCallCount.Add(1)
-		if n == 1 {
-			// First call: 429 to trigger refresh
-			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"error":"rate_limited"}`))
-			return
-		}
-		// After refresh: success
+		apiCallCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(anthropicResponse(45.2, 12.8)))
 	}))
@@ -158,8 +153,8 @@ func TestAnthropicAgent_RateLimitBackoff_ResetsOnSuccess(t *testing.T) {
 		return &api.AnthropicCredentials{
 			AccessToken:  "test-token",
 			RefreshToken: "test-refresh-token",
-			ExpiresIn:    time.Hour,
-			ExpiresAt:    time.Now().Add(time.Hour),
+			ExpiresIn:    time.Minute,
+			ExpiresAt:    time.Now().Add(time.Minute),
 		}
 	})
 
@@ -245,7 +240,7 @@ func TestAnthropicAgent_RateLimitBackoff_ResetsOnCredentialChange(t *testing.T) 
 }
 
 // TestAnthropicAgent_InvalidGrant_PausesPolling verifies that an invalid_grant
-// error from OAuth pauses polling like a terminal auth error.
+// error from a proactive OAuth refresh pauses polling like a terminal auth error.
 func TestAnthropicAgent_InvalidGrant_PausesPolling(t *testing.T) {
 	var apiCalls atomic.Int32
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -281,8 +276,8 @@ func TestAnthropicAgent_InvalidGrant_PausesPolling(t *testing.T) {
 		return &api.AnthropicCredentials{
 			AccessToken:  "test-token",
 			RefreshToken: "test-refresh-token",
-			ExpiresIn:    time.Hour,
-			ExpiresAt:    time.Now().Add(time.Hour),
+			ExpiresIn:    time.Minute,
+			ExpiresAt:    time.Now().Add(time.Minute),
 		}
 	})
 
@@ -306,29 +301,28 @@ func TestAnthropicAgent_InvalidGrant_PausesPolling(t *testing.T) {
 		t.Error("Expected authPaused=true after invalid_grant")
 	}
 
-	// After the first poll triggers invalid_grant and pauses, subsequent polls
-	// should skip (authPaused check). API should still get called multiple times
-	// because each poll hits FetchQuotas before the authPaused check kicks in
-	// on the next cycle.
-	totalAPI := apiCalls.Load()
-	if totalAPI < 1 {
-		t.Errorf("Expected at least 1 API call, got %d", totalAPI)
+	// The proactive refresh runs before FetchQuotas, so the first poll pauses
+	// the agent and the usage API is never reached.
+	if totalAPI := apiCalls.Load(); totalAPI != 0 {
+		t.Errorf("Expected 0 API calls after invalid_grant paused polling, got %d", totalAPI)
 	}
 }
 
-// TestAnthropicAgent_RateLimitBackoff_DecaysOnBackoffExpiry verifies that when the
-// backoff window expires and the agent retries, rateLimitFailCount is decremented
-// first so that repeated failures don't escalate forever.
-func TestAnthropicAgent_RateLimitBackoff_DecaysOnBackoffExpiry(t *testing.T) {
+// TestAnthropicAgent_UsageRateLimit_PreservesCredentials verifies the
+// post-bypass contract for a usage-API 429: it never exchanges the refresh
+// token. Rotating a one-time token to dodge a rate limit races every other
+// Claude Code process on the account and can force a global re-login.
+func TestAnthropicAgent_UsageRateLimit_PreservesCredentials(t *testing.T) {
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		w.Write([]byte(`{"error":"rate_limited"}`))
 	}))
 	defer apiServer.Close()
 
+	var oauthCalls atomic.Int32
 	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusTooManyRequests)
-		w.Write([]byte(`{"error":"rate_limit_exceeded"}`))
+		oauthCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer oauthServer.Close()
 
@@ -348,11 +342,10 @@ func TestAnthropicAgent_RateLimitBackoff_DecaysOnBackoffExpiry(t *testing.T) {
 	agent := NewAnthropicAgent(client, str, tr, 50*time.Millisecond, logger, nil)
 	agent.isClaudeCodeRunning = func() bool { return false }
 
-	// Simulate prior backoff at fail_count=5, with backoff already expired
+	// Elevated from an earlier OAuth failure, and no longer paused.
 	agent.rateLimitFailCount = 5
-	agent.rateLimitPaused = true
-	agent.rateLimitResumeAt = time.Now().Add(-1 * time.Second) // expired
 
+	var rotations atomic.Int32
 	agent.SetCredentialsRefresh(func() *api.AnthropicCredentials {
 		return &api.AnthropicCredentials{
 			AccessToken:  "test-token",
@@ -361,12 +354,72 @@ func TestAnthropicAgent_RateLimitBackoff_DecaysOnBackoffExpiry(t *testing.T) {
 			ExpiresAt:    time.Now().Add(time.Hour),
 		}
 	})
+	agent.SetCredentialsWriter(func(access, refresh string, expires int) error {
+		rotations.Add(1)
+		return nil
+	})
 
 	ctx := context.Background()
 	agent.poll(ctx)
 
-	// failCount should be 5 (decremented to 4 on expiry, then incremented back to 5
-	// by the new 429). NOT 6 - that's the bug we fixed.
+	if got := oauthCalls.Load(); got != 0 {
+		t.Errorf("OAuth refresh attempts = %d, want 0 (a usage 429 must not rotate credentials)", got)
+	}
+	if got := rotations.Load(); got != 0 {
+		t.Errorf("credential writes = %d, want 0", got)
+	}
+	if agent.rateLimitFailCount != 5 {
+		t.Errorf("rateLimitFailCount = %d, want 5 (a usage 429 must not touch OAuth backoff)", agent.rateLimitFailCount)
+	}
+	if agent.rateLimitPaused {
+		t.Error("rateLimitPaused = true, want false")
+	}
+}
+
+// TestAnthropicAgent_RateLimitBackoff_DecaysOnBackoffExpiry verifies that once
+// an OAuth backoff window elapses, the next refresh attempt decays the failure
+// count rather than escalating from where it left off.
+func TestAnthropicAgent_RateLimitBackoff_DecaysOnBackoffExpiry(t *testing.T) {
+	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"rate_limit_exceeded"}`))
+	}))
+	defer oauthServer.Close()
+
+	api.SetOAuthURLForTest(oauthServer.URL)
+	defer api.SetOAuthURLForTest(api.AnthropicOAuthTokenURL)
+
+	str, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer str.Close()
+
+	logger := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
+	client := api.NewAnthropicClient("test-token", logger, api.WithAnthropicBaseURL("http://127.0.0.1:1/api/oauth/usage"))
+	tr := tracker.NewAnthropicTracker(str, logger)
+
+	agent := NewAnthropicAgent(client, str, tr, 50*time.Millisecond, logger, nil)
+	agent.isClaudeCodeRunning = func() bool { return false }
+
+	// Prior backoff at fail_count=5, window already elapsed.
+	agent.rateLimitFailCount = 5
+	agent.rateLimitPaused = true
+	agent.rateLimitResumeAt = time.Now().Add(-time.Second)
+
+	agent.SetCredentialsRefresh(func() *api.AnthropicCredentials {
+		return &api.AnthropicCredentials{
+			AccessToken:  "test-token",
+			RefreshToken: "test-refresh-token",
+			ExpiresIn:    time.Minute,
+			ExpiresAt:    time.Now().Add(time.Minute),
+		}
+	})
+
+	agent.poll(context.Background())
+
+	// Decayed to 4 on expiry, then re-incremented to 5 by the fresh OAuth 429.
+	// NOT 6 - the backoff level must hold rather than escalate forever.
 	if agent.rateLimitFailCount != 5 {
 		t.Errorf("rateLimitFailCount = %d, want 5 (decayed then re-incremented, not escalated to 6)", agent.rateLimitFailCount)
 	}

@@ -86,6 +86,25 @@ expect_ok "onwatch: --version"                --version
 expect_ok "onwatch: serve"                    serve
 expect_ok "onwatch: codexprofile"             codexprofile  # prefix must not match
 
+
+# The dry-run exits before dispatch, so the flock wrapping cannot be observed
+# through the argument contract. Assert it structurally instead: the `claude`
+# branch must run under a bounded flock on the same lock file the daemon's
+# rotation transaction takes, or the daemon and a login container can exchange
+# the same one-time refresh token and revoke each other.
+echo
+echo "== claude runs under the shared credential lock =="
+expect_source() {
+  want="$1"
+  if grep -qF -- "$want" "$entrypoint"; then
+    echo "ok:   entrypoint contains: $want"
+  else
+    echo "FAIL: entrypoint is missing: $want" >&2
+    failures=$((failures + 1))
+  fi
+}
+expect_source 'flock -w 60 -E 75 "$HOME/.claude/.credentials.json.lock" /usr/local/bin/claude "$@"'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "$failures check(s) failed" >&2

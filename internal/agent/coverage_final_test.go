@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -370,24 +371,15 @@ func TestAnthropicAgent_PollAuthPauseAndResume(t *testing.T) {
 	}
 }
 
-func TestAnthropicAgent_PollRateLimitBypassWithOAuthRefresh(t *testing.T) {
+// TestAnthropicAgent_ProactiveRefreshUsesRotator verifies that when an
+// account-scoped rotator is installed, the agent takes its pair without a
+// second write, and that a usage 429 alone never reaches the rotator.
+func TestAnthropicAgent_ProactiveRefreshUsesRotator(t *testing.T) {
 	setTestUserHome(t, t.TempDir())
-
-	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"token_type":"Bearer","access_token":"oauth-new-token","refresh_token":"oauth-new-refresh","expires_in":3600,"scope":"user:inference"}`)
-	}))
-	defer oauthServer.Close()
-	withAnthropicOAuthRedirect(t, oauthServer.URL)
 
 	var quotaCalls atomic.Int32
 	quotaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := quotaCalls.Add(1)
-		if n == 1 {
-			w.WriteHeader(http.StatusTooManyRequests)
-			fmt.Fprint(w, `{"error":"rate_limited"}`)
-			return
-		}
+		quotaCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, anthropicResponse(22.2, 55.5))
 	}))
@@ -407,9 +399,99 @@ func TestAnthropicAgent_PollRateLimitBypassWithOAuthRefresh(t *testing.T) {
 		return &api.AnthropicCredentials{
 			AccessToken:  "stale-token",
 			RefreshToken: "refresh-token",
-			ExpiresAt:    time.Now().Add(2 * time.Hour),
-			ExpiresIn:    2 * time.Hour,
+			ExpiresAt:    time.Now().Add(time.Minute),
+			ExpiresIn:    time.Minute,
 		}
+	})
+
+	var writes atomic.Int32
+	ag.SetCredentialsWriter(func(access, refresh string, expires int) error {
+		writes.Add(1)
+		return nil
+	})
+
+	var rotations atomic.Int32
+	ag.SetCredentialsRotator(func(ctx context.Context, expectedAccess string) (api.AnthropicRotation, error) {
+		rotations.Add(1)
+		if expectedAccess != "stale-token" {
+			t.Errorf("expectedAccess = %q, want stale-token", expectedAccess)
+		}
+		return api.AnthropicRotation{
+			Tokens: &api.OAuthTokenResponse{
+				AccessToken:  "oauth-new-token",
+				RefreshToken: "oauth-new-refresh",
+				ExpiresIn:    3600,
+			},
+			Persisted: true,
+		}, nil
+	})
+
+	ag.poll(context.Background())
+
+	if rotations.Load() != 1 {
+		t.Fatalf("rotations = %d, want 1", rotations.Load())
+	}
+	if ag.lastToken != "oauth-new-token" {
+		t.Fatalf("lastToken = %q, want oauth-new-token", ag.lastToken)
+	}
+	if writes.Load() != 0 {
+		t.Fatalf("credential writes = %d, want 0 (the rotator already persisted)", writes.Load())
+	}
+	latest, err := s.QueryLatestAnthropic()
+	if err != nil {
+		t.Fatalf("QueryLatestAnthropic: %v", err)
+	}
+	if latest == nil {
+		t.Fatal("expected snapshot after proactive refresh")
+	}
+}
+
+// TestAnthropicAgent_RotationPersistFailureKeepsPair verifies that a rotation
+// the transaction could not store is still installed and written by the agent.
+// The exchange already spent the old refresh token, so discarding the pair here
+// would strand the account until the next interactive login.
+func TestAnthropicAgent_RotationPersistFailureKeepsPair(t *testing.T) {
+	setTestUserHome(t, t.TempDir())
+
+	quotaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, anthropicResponse(10.0, 20.0))
+	}))
+	defer quotaServer.Close()
+
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	client := api.NewAnthropicClient("stale-token", slog.Default(), api.WithAnthropicBaseURL(quotaServer.URL))
+	tr := tracker.NewAnthropicTracker(s, nil)
+	ag := NewAnthropicAgent(client, s, tr, time.Second, slog.Default(), nil)
+	ag.isClaudeCodeRunning = func() bool { return false }
+	ag.SetCredentialsRefresh(func() *api.AnthropicCredentials {
+		return &api.AnthropicCredentials{
+			AccessToken:  "stale-token",
+			RefreshToken: "refresh-token",
+			ExpiresAt:    time.Now().Add(time.Minute),
+			ExpiresIn:    time.Minute,
+		}
+	})
+
+	var wroteRefresh string
+	ag.SetCredentialsWriter(func(access, refresh string, expires int) error {
+		wroteRefresh = refresh
+		return nil
+	})
+	ag.SetCredentialsRotator(func(ctx context.Context, expectedAccess string) (api.AnthropicRotation, error) {
+		return api.AnthropicRotation{
+			Tokens: &api.OAuthTokenResponse{
+				AccessToken:  "oauth-new-token",
+				RefreshToken: "oauth-new-refresh",
+				ExpiresIn:    3600,
+			},
+			PersistErr: errors.New("disk full"),
+		}, nil
 	})
 
 	ag.poll(context.Background())
@@ -417,15 +499,8 @@ func TestAnthropicAgent_PollRateLimitBypassWithOAuthRefresh(t *testing.T) {
 	if ag.lastToken != "oauth-new-token" {
 		t.Fatalf("lastToken = %q, want oauth-new-token", ag.lastToken)
 	}
-	if quotaCalls.Load() < 2 {
-		t.Fatalf("expected retry after refresh, got %d quota calls", quotaCalls.Load())
-	}
-	latest, err := s.QueryLatestAnthropic()
-	if err != nil {
-		t.Fatalf("QueryLatestAnthropic: %v", err)
-	}
-	if latest == nil {
-		t.Fatal("expected snapshot after rate-limit bypass refresh")
+	if wroteRefresh != "oauth-new-refresh" {
+		t.Fatalf("persisted refresh token = %q, want oauth-new-refresh", wroteRefresh)
 	}
 }
 

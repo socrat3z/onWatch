@@ -135,6 +135,9 @@ func (m *AnthropicAgentManager) Reload() {
 		ag.SetCredentialsWriter(func(access, refresh string, expires int) error {
 			return api.WriteAnthropicCredentialsFile(path, access, refresh, expires)
 		})
+		ag.SetCredentialsRotator(func(ctx context.Context, expectedAccess string) (api.AnthropicRotation, error) {
+			return api.RefreshAnthropicCredentialsFile(ctx, path, expectedAccess)
+		})
 		m.mu.Lock()
 		if _, raced := m.running[def.Name]; raced {
 			m.mu.Unlock()

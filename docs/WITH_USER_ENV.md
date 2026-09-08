@@ -107,6 +107,7 @@ of the two so the aliases differ.
 - [Authenticating](#authenticating)
   - [Codex](#codex)
   - [Anthropic](#anthropic)
+    - [The credential lock](#the-credential-lock)
   - [Antigravity](#antigravity)
   - [Checking and clearing a login](#checking-and-clearing-a-login)
 - [The trust boundary](#the-trust-boundary)
@@ -221,6 +222,30 @@ so it displays a code instead. **Paste that code back into the container termina
 at the prompt.
 
 Tokens land in `.credentials.json` inside the `claude-auth` volume.
+
+#### The credential lock
+
+The daemon and the `claude-login` service share that one file, and an Anthropic
+refresh token is one-time use: if both exchange the same token, whichever writes
+second is revoked, and the account is silently logged out hours later when the
+surviving access token expires.
+
+Both sides therefore serialize on `.credentials.json.lock`, next to the
+credentials in the same volume:
+
+- The daemon takes it across the whole read -> exchange -> write transaction
+  (`RefreshAnthropicCredentialsFile`), and if it finds a newer pair already
+  stored it adopts that instead of spending its own token.
+- The entrypoint runs the `claude` CLI under `flock -w 60 -E 75` on the same
+  path. `procps` and `util-linux` are in the runtime image for this (`flock`)
+  and for the Claude Code process check (`ps`).
+
+Both waits are bounded, so neither side can hang the other: the daemon gives up
+after 30s and retries on its next poll, and the login prints
+`timed out waiting for the credential lock` and exits 75.
+
+The lock is advisory and volume-local. It does not reach a Claude Code running
+outside these containers against the same account.
 
 If you would rather not run an interactive flow in the container at all, Anthropic
 also supports a long-lived token: run `claude setup-token` on a machine with a
