@@ -114,8 +114,10 @@ func scanForClaudeCode(psOutput []byte) bool {
 // (`claude daemon run`, `claude bg-spare`, `claude bg-pty-host`) is resident
 // even with no interactive session. That is intentional: those processes hold
 // the same credentials and refresh them on their own schedule, so onWatch must
-// still keep its hands off the refresh token. It does mean onWatch's own OAuth
-// recovery paths rarely run for such users.
+// still keep its hands off the refresh token. That applies to proactiveRefresh
+// only. tryOAuthRecovery deliberately ignores this signal: by the time it runs,
+// the stored token has already been rejected, so deferring would leave the
+// account paused indefinitely - which is exactly what it did.
 var IsClaudeCodeRunning = func() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), claudeCodeScanTimeout)
 	defer cancel()

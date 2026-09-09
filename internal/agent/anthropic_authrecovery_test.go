@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -117,10 +118,17 @@ func TestAnthropicAgent_AuthFailure_RefreshesBeforePausing(t *testing.T) {
 	}
 }
 
-// TestAnthropicAgent_AuthFailure_SkipsRefreshWhenClaudeCodeRunning verifies the
-// refresh-token guard still holds: onWatch must never burn Claude Code's
-// one-time-use refresh token while a session is live.
-func TestAnthropicAgent_AuthFailure_SkipsRefreshWhenClaudeCodeRunning(t *testing.T) {
+// TestAnthropicAgent_AuthFailure_RefreshesEvenWhenClaudeCodeRunning verifies
+// the recovery path does NOT defer to a resident Claude Code when the stored
+// credential is the one the server just rejected.
+//
+// Deferring here was the cause of accounts staying paused for days: Claude
+// Code's background daemon keeps `claude` resident on most developer machines,
+// so the guard was permanently on and no recovery refresh ever ran. The guard
+// exists to avoid burning a live session's one-time-use refresh token, but at
+// this point the stored token is already dead, so there is nothing left to
+// protect - and the rotation lock serializes the exchange anyway.
+func TestAnthropicAgent_AuthFailure_RefreshesEvenWhenClaudeCodeRunning(t *testing.T) {
 	f := newAuthRecoveryFixture(t, oauthSuccessHandler)
 	f.agent.isClaudeCodeRunning = func() bool { return true }
 
@@ -128,11 +136,75 @@ func TestAnthropicAgent_AuthFailure_SkipsRefreshWhenClaudeCodeRunning(t *testing
 		f.agent.poll(context.Background())
 	}
 
+	if got := f.oauthCalls.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 OAuth refresh, got %d", got)
+	}
+	if f.agent.authPaused {
+		t.Error("agent paused despite a successful OAuth refresh")
+	}
+	if f.agent.lastToken != "fresh-access-token" {
+		t.Errorf("lastToken = %q, want the refreshed token", f.agent.lastToken)
+	}
+}
+
+// TestAnthropicAgent_AuthFailure_AdoptsClaudeCodeRotation verifies that when a
+// resident Claude Code has already written a newer pair, onWatch takes it
+// instead of spending a refresh token of its own.
+func TestAnthropicAgent_AuthFailure_AdoptsClaudeCodeRotation(t *testing.T) {
+	f := newAuthRecoveryFixture(t, oauthSuccessHandler)
+	f.agent.isClaudeCodeRunning = func() bool { return true }
+
+	// Claude Code rotated the shared credential while onWatch was failing, but
+	// tokenRefresh still reports the old value (a keychain/file mirror lag).
+	f.agent.SetCredentialsRefresh(func() *api.AnthropicCredentials {
+		return &api.AnthropicCredentials{
+			AccessToken:  "fresh-access-token",
+			RefreshToken: "stored-refresh-token",
+			ExpiresIn:    8 * time.Hour,
+			ExpiresAt:    time.Now().Add(8 * time.Hour),
+		}
+	})
+
+	for i := 0; i < maxAuthFailures; i++ {
+		f.agent.poll(context.Background())
+	}
+
 	if got := f.oauthCalls.Load(); got != 0 {
-		t.Errorf("expected no OAuth refresh while Claude Code runs, got %d", got)
+		t.Errorf("expected no OAuth refresh when Claude Code already rotated, got %d", got)
+	}
+	if f.agent.authPaused {
+		t.Error("agent paused despite adoptable credentials on disk")
+	}
+	if f.agent.lastToken != "fresh-access-token" {
+		t.Errorf("lastToken = %q, want the adopted token", f.agent.lastToken)
+	}
+}
+
+// TestAnthropicAgent_AuthFailure_SkipReasonIsLogged verifies that a skipped
+// recovery states its cause. A silent skip strands the account with nothing in
+// the log to explain why polling stopped.
+func TestAnthropicAgent_AuthFailure_SkipReasonIsLogged(t *testing.T) {
+	f := newAuthRecoveryFixture(t, oauthSuccessHandler)
+	if err := f.agent.store.SetSetting(store.SettingAutoRefreshTokens, "false"); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+
+	for i := 0; i < maxAuthFailures; i++ {
+		f.agent.poll(context.Background())
+	}
+
+	if got := f.oauthCalls.Load(); got != 0 {
+		t.Errorf("expected no OAuth refresh with auto_refresh_tokens disabled, got %d", got)
 	}
 	if !f.agent.authPaused {
-		t.Error("expected polling to pause after repeated auth failures")
+		t.Error("expected polling to pause")
+	}
+	logs := f.logs.String()
+	if !strings.Contains(logs, "auto_refresh_tokens is disabled in settings") {
+		t.Errorf("skip reason missing from logs:\n%s", logs)
+	}
+	if !strings.Contains(logs, "oauth_refresh_skipped") {
+		t.Errorf("pause log does not state why no refresh rescued it:\n%s", logs)
 	}
 }
 

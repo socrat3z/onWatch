@@ -88,6 +88,10 @@ type AnthropicAgent struct {
 	// credentials are known good.
 	supersededToken string
 
+	// lastRefreshBlockReason is why the most recent OAuth refresh was skipped.
+	// Reported when polling pauses, so the pause always states its cause.
+	lastRefreshBlockReason string
+
 	// OAuth rate limit backoff (429 from the OAuth refresh endpoint)
 	rateLimitFailCount int       // consecutive OAuth 429 failures
 	rateLimitPaused    bool      // true when OAuth refresh is in backoff
@@ -362,6 +366,30 @@ func (a *AnthropicAgent) autoRefreshAllowed() bool {
 	return a.store.AutoRefreshTokensEnabled()
 }
 
+// refreshBlockReason names the guard preventing an OAuth refresh, or "" when
+// one may proceed. It exists so the reason can be reported at the point a skip
+// becomes visible - a paused account - rather than only in debug logs.
+func (a *AnthropicAgent) refreshBlockReason() string {
+	switch {
+	case a.credsRefresh == nil:
+		return "no credentials refresh configured for this account"
+	case !a.autoRefreshAllowed():
+		return "auto_refresh_tokens is disabled in settings"
+	case a.rateLimitBackoffActive():
+		return "OAuth refresh is in rate-limit backoff"
+	default:
+		return ""
+	}
+}
+
+// refreshPauseCause explains why an OAuth refresh did not rescue this pause.
+func (a *AnthropicAgent) refreshPauseCause() string {
+	if a.lastRefreshBlockReason != "" {
+		return a.lastRefreshBlockReason
+	}
+	return "the refresh was attempted and failed - see the preceding OAuth log"
+}
+
 // claudeCodeRunning reports whether the Claude Code CLI is executing, using the
 // agent's override when set and the package-level detector otherwise.
 func (a *AnthropicAgent) claudeCodeRunning() bool {
@@ -598,33 +626,48 @@ func (a *AnthropicAgent) noteOAuthRefreshFailure(err error, source string) {
 // 401/403 responses, where the stored access token has simply expired and no
 // Claude Code session is around to rotate it (issue #111).
 //
-// It applies the same guards as the 429 bypass: auto-refresh must be enabled,
-// Claude Code must not be running (refreshing burns its one-time-use refresh
-// token and logs the user out), and the OAuth backoff must not be active.
+// Auto-refresh must be enabled and the OAuth backoff must not be active. A
+// resident Claude Code is NOT a hard block here (unlike proactiveRefresh): the
+// stored token has already been rejected, so deferring to it only guarantees a
+// dead account. Every skip is logged with its reason - a silent one strands the
+// account with nothing in the log to explain it.
 // Returns true when new credentials were obtained and installed on the client.
 func (a *AnthropicAgent) tryOAuthRecovery(ctx context.Context, source string) bool {
-	if a.credsRefresh == nil {
-		a.logger.Debug("Skipping auth-failure OAuth refresh - no credentials refresh configured", "source", source)
+	if reason := a.refreshBlockReason(); reason != "" {
+		// Warn, not Debug: reaching here means polling is already failing or
+		// paused, so a silent skip leaves an operator with a dead account and
+		// no stated cause - which is exactly how this went undiagnosed.
+		a.logger.Warn("Auth-failure OAuth refresh skipped",
+			"source", source,
+			"reason", reason,
+			"resume_at", a.rateLimitResumeAt)
+		a.lastRefreshBlockReason = reason
 		return false
 	}
-	if !a.autoRefreshAllowed() {
-		a.logger.Debug("Skipping auth-failure OAuth refresh - auto_refresh_tokens disabled", "source", source)
-		return false
-	}
-	if a.claudeCodeRunning() {
-		a.logger.Debug("Skipping auth-failure OAuth refresh - Claude Code is running", "source", source)
-		return false
-	}
-	if a.rateLimitBackoffActive() {
-		a.logger.Debug("Skipping auth-failure OAuth refresh - OAuth backoff active",
-			"source", source, "resume_at", a.rateLimitResumeAt)
-		return false
-	}
+	a.lastRefreshBlockReason = ""
 
 	creds := a.credsRefresh()
 	if creds == nil || creds.RefreshToken == "" {
 		a.logger.Warn("Auth-failure OAuth refresh unavailable - no refresh token", "source", source)
+		a.lastRefreshBlockReason = "no refresh token in the credential store"
 		return false
+	}
+
+	// Claude Code holding the same credential is a reason to defer a *proactive*
+	// refresh, not this one: the stored token has already been rejected, so
+	// there is no live session token left to protect. Prefer whatever Claude
+	// Code has written since the failures started, and only exchange when the
+	// store really is still stale. The rotation lock makes that safe.
+	if a.claudeCodeRunning() {
+		if creds.AccessToken != "" && creds.AccessToken != a.lastFailedToken && creds.AccessToken != a.lastToken {
+			a.logger.Info("Claude Code is running and has rotated credentials - adopting them", "source", source)
+			a.client.SetToken(creds.AccessToken)
+			a.lastToken = creds.AccessToken
+			a.supersededToken = ""
+			return true
+		}
+		a.logger.Warn("Claude Code is running but the stored credentials are still the rejected ones - refreshing under the credential lock",
+			"source", source)
 	}
 
 	a.logger.Info("Attempting OAuth refresh to recover from auth failures", "source", source)
@@ -917,6 +960,7 @@ func (a *AnthropicAgent) poll(ctx context.Context) {
 							a.pauseAuth(retryToken)
 							a.logger.Error("Anthropic polling PAUSED due to repeated auth failures",
 								"failure_count", a.authFailCount,
+								"oauth_refresh_skipped", a.refreshPauseCause(),
 								"action", "Re-authenticate with 'claude auth' to resume polling")
 							a.sendAuthErrorNotification(
 								"Anthropic polling paused",
