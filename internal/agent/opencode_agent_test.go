@@ -60,6 +60,50 @@ func TestOpenCodeAgent_Poll_FetchErrorNoInsert(t *testing.T) {
 	}
 }
 
+func TestOpenCodeAgent_Poll_RateLimitBackoffGrowsAndResets(t *testing.T) {
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		OpenCodeGoWorkspaceID: "ws",
+		OpenCodeGoAuthCookie:  "cookie",
+	}
+	client := &stubOpenCodeClient{err: api.ErrOpenCodeRateLimited}
+	ag := NewOpenCodeAgent(client, st, nil, cfg, time.Second, slog.Default(), nil)
+
+	// First 429 arms one skipped cycle.
+	ag.poll(context.Background())
+	if client.calls != 1 || ag.backoff.failCount != 1 || ag.backoff.skipRemaining != 1 {
+		t.Fatalf("after first 429: calls=%d failCount=%d skipRemaining=%d", client.calls, ag.backoff.failCount, ag.backoff.skipRemaining)
+	}
+	ag.poll(context.Background())
+	if client.calls != 1 {
+		t.Fatalf("backoff poll made request: calls=%d, want 1", client.calls)
+	}
+
+	// The next 429 doubles the skip window.
+	ag.poll(context.Background())
+	if client.calls != 2 || ag.backoff.skipRemaining != 2 {
+		t.Fatalf("after second 429: calls=%d skipRemaining=%d, want 2 and 2", client.calls, ag.backoff.skipRemaining)
+	}
+	ag.poll(context.Background())
+	ag.poll(context.Background())
+	if client.calls != 2 {
+		t.Fatalf("backoff polls made request: calls=%d, want 2", client.calls)
+	}
+
+	// A successful fetch resets the exponential sequence.
+	client.err = nil
+	client.snapshot = &api.OpenCodeSnapshot{CapturedAt: time.Now().UTC(), PlanName: "OpenCode Go"}
+	ag.poll(context.Background())
+	if client.calls != 3 || ag.backoff.failCount != 0 || ag.backoff.skipRemaining != 0 {
+		t.Fatalf("after success: calls=%d failCount=%d skipRemaining=%d", client.calls, ag.backoff.failCount, ag.backoff.skipRemaining)
+	}
+}
+
 func TestOpenCodeAgent_Poll_SuccessInsertsAndTracks(t *testing.T) {
 	st, err := store.New(":memory:")
 	if err != nil {
@@ -107,9 +151,11 @@ func TestOpenCodeAgent_Poll_SuccessInsertsAndTracks(t *testing.T) {
 type stubOpenCodeClient struct {
 	snapshot *api.OpenCodeSnapshot
 	err      error
+	calls    int
 }
 
 func (s *stubOpenCodeClient) FetchSnapshot(_ context.Context, _, _ string) (*api.OpenCodeSnapshot, error) {
+	s.calls++
 	if s.err != nil {
 		return nil, s.err
 	}

@@ -19,12 +19,13 @@ const (
 	openCodeDashboardURLSuffix = "/go"
 	openCodeUserAgent          = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Gecko/20100101 Firefox/148.0"
 	openCodeScrapeTimeout      = 20 * time.Second // bumped from 10s: dashboard is slow under load
-	openCodeMaxBodyBytes       = 2 << 20 // 2 MiB
+	openCodeMaxBodyBytes       = 2 << 20          // 2 MiB
 )
 
 var (
 	ErrOpenCodeUnauthorized    = errors.New("opencode: unauthorized")
 	ErrOpenCodeForbidden       = errors.New("opencode: forbidden")
+	ErrOpenCodeRateLimited     = errors.New("opencode: rate limited")
 	ErrOpenCodeServerError     = errors.New("opencode: server error")
 	ErrOpenCodeNetworkError    = errors.New("opencode: network error")
 	ErrOpenCodeInvalidResponse = errors.New("opencode: invalid response")
@@ -153,6 +154,8 @@ func (c *OpenCodeClient) fetchDashboardHTML(ctx context.Context, workspaceID, au
 		return "", ErrOpenCodeUnauthorized
 	case http.StatusForbidden:
 		return "", ErrOpenCodeForbidden
+	case http.StatusTooManyRequests:
+		return "", ErrOpenCodeRateLimited
 	default:
 		if resp.StatusCode >= 500 {
 			return "", fmt.Errorf("%w: http %d", ErrOpenCodeServerError, resp.StatusCode)

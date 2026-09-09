@@ -125,6 +125,20 @@ func TestOpenCodeClient_FetchSnapshot_401(t *testing.T) {
 	}
 }
 
+func TestOpenCodeClient_FetchSnapshot_429(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("slow down"))
+	}))
+	defer srv.Close()
+
+	client := newTestOpenCodeClient(t, srv)
+	_, err := client.FetchSnapshot(context.Background(), "ws", "cookie")
+	if !errors.Is(err, ErrOpenCodeRateLimited) {
+		t.Fatalf("err = %v, want ErrOpenCodeRateLimited", err)
+	}
+}
+
 func TestOpenCodeClient_FetchSnapshot_RedirectIsUnauthorizedAndNotFollowed(t *testing.T) {
 	var redirectTargetHits int
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

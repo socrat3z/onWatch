@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -26,6 +27,7 @@ type OpenCodeAgent struct {
 	notifier     *notify.NotificationEngine
 	pollingCheck func() bool
 	cfg          *config.Config
+	backoff      pollBackoff
 }
 
 func (a *OpenCodeAgent) SetPollingCheck(fn func() bool) {
@@ -83,6 +85,10 @@ func (a *OpenCodeAgent) poll(ctx context.Context) {
 	if a.pollingCheck != nil && !a.pollingCheck() {
 		return
 	}
+	if a.backoff.ShouldSkip() {
+		a.logger.Debug("Skipping OpenCode poll - in rate limit backoff")
+		return
+	}
 
 	workspaceID := a.cfg.OpenCodeGoWorkspaceID
 	authCookie := a.cfg.OpenCodeGoAuthCookie
@@ -92,9 +98,15 @@ func (a *OpenCodeAgent) poll(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if errors.Is(err, api.ErrOpenCodeRateLimited) {
+			cycles := a.backoff.RateLimited()
+			a.logger.Warn("OpenCode rate limited, backing off", "skip_cycles", cycles)
+			return
+		}
 		a.logger.Error("Failed to fetch OpenCode quotas", "error", err)
 		return
 	}
+	a.backoff.Reset()
 
 	if _, err := a.store.InsertOpenCodeSnapshot(snapshot); err != nil {
 		a.logger.Error("Failed to insert OpenCode snapshot", "error", err)
