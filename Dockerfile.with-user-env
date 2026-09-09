@@ -192,6 +192,7 @@ ENV ONWATCH_DB_PATH=/data/onwatch.db \
     AGY_CLI_DISABLE_AUTO_UPDATE=true \
 	CODEX_AUTH_ROOT=/auth/codex \
     ANTHROPIC_AUTH_ROOT=/auth/claude \
+    ONWATCH_CLAUDE_CLI_LOCKED=1 \
     ANTIGRAVITY_AUTH_ROOT=/auth/antigravity \
     CODEX_HOME=/auth/codex/default \
     DISABLE_AUTOUPDATER=1 \

@@ -114,10 +114,11 @@ func scanForClaudeCode(psOutput []byte) bool {
 // (`claude daemon run`, `claude bg-spare`, `claude bg-pty-host`) is resident
 // even with no interactive session. That is intentional: those processes hold
 // the same credentials and refresh them on their own schedule, so onWatch must
-// still keep its hands off the refresh token. That applies to proactiveRefresh
-// only. tryOAuthRecovery deliberately ignores this signal: by the time it runs,
-// the stored token has already been rejected, so deferring would leave the
-// account paused indefinitely - which is exactly what it did.
+// still keep its hands off the refresh token. tryOAuthRecovery keeps that
+// block too - the lock is advisory, so a native `claude` takes no lock and both
+// sides would spend the same token - but it first tries to adopt whatever that
+// process has already written, and lifts the block only where the CLI is known
+// to be flock-wrapped (claudeCLISharesCredentialLock).
 var IsClaudeCodeRunning = func() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), claudeCodeScanTimeout)
 	defer cancel()

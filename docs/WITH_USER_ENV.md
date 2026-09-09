@@ -244,6 +244,12 @@ Both waits are bounded, so neither side can hang the other: the daemon gives up
 after 30s and retries on its next poll, and the login prints
 `timed out waiting for the credential lock` and exits 75.
 
+Because the bundled CLI is wrapped, the image sets `ONWATCH_CLAUDE_CLI_LOCKED=1`.
+That is what permits the daemon to refresh a rejected credential while a `claude`
+process is resident. Do not set it anywhere else: a natively installed Claude
+Code takes no lock, and onWatch exchanging underneath it would spend the same
+one-time-use refresh token and log the account out.
+
 The lock is advisory and volume-local. It does not reach a Claude Code running
 outside these containers against the same account.
 

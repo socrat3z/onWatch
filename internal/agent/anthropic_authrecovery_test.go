@@ -118,17 +118,35 @@ func TestAnthropicAgent_AuthFailure_RefreshesBeforePausing(t *testing.T) {
 	}
 }
 
-// TestAnthropicAgent_AuthFailure_RefreshesEvenWhenClaudeCodeRunning verifies
-// the recovery path does NOT defer to a resident Claude Code when the stored
-// credential is the one the server just rejected.
-//
-// Deferring here was the cause of accounts staying paused for days: Claude
-// Code's background daemon keeps `claude` resident on most developer machines,
-// so the guard was permanently on and no recovery refresh ever ran. The guard
-// exists to avoid burning a live session's one-time-use refresh token, but at
-// this point the stored token is already dead, so there is nothing left to
-// protect - and the rotation lock serializes the exchange anyway.
-func TestAnthropicAgent_AuthFailure_RefreshesEvenWhenClaudeCodeRunning(t *testing.T) {
+// TestAnthropicAgent_AuthFailure_SkipsRefreshWhenClaudeCodeUnlocked verifies
+// that a natively installed Claude Code still blocks the token exchange. The
+// credential lock is advisory: a native `claude` takes no lock, so onWatch
+// exchanging here would spend the same one-time-use refresh token and log the
+// account out again.
+func TestAnthropicAgent_AuthFailure_SkipsRefreshWhenClaudeCodeUnlocked(t *testing.T) {
+	f := newAuthRecoveryFixture(t, oauthSuccessHandler)
+	f.agent.isClaudeCodeRunning = func() bool { return true }
+
+	for i := 0; i < maxAuthFailures; i++ {
+		f.agent.poll(context.Background())
+	}
+
+	if got := f.oauthCalls.Load(); got != 0 {
+		t.Errorf("expected no OAuth refresh while an unlocked Claude Code runs, got %d", got)
+	}
+	if !f.agent.authPaused {
+		t.Error("expected polling to pause")
+	}
+	if logs := f.logs.String(); !strings.Contains(logs, "does not share the credential lock") {
+		t.Errorf("skip reason missing from logs:\n%s", logs)
+	}
+}
+
+// TestAnthropicAgent_AuthFailure_RefreshesWhenClaudeCodeSharesLock verifies the
+// with-user-env case: the bundled CLI is flock-wrapped, so every writer takes
+// the rotation lock and onWatch may exchange rather than pause forever.
+func TestAnthropicAgent_AuthFailure_RefreshesWhenClaudeCodeSharesLock(t *testing.T) {
+	t.Setenv("ONWATCH_CLAUDE_CLI_LOCKED", "1")
 	f := newAuthRecoveryFixture(t, oauthSuccessHandler)
 	f.agent.isClaudeCodeRunning = func() bool { return true }
 

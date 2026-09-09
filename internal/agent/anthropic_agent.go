@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/onllm-dev/onwatch/v2/internal/api"
@@ -366,6 +368,22 @@ func (a *AnthropicAgent) autoRefreshAllowed() bool {
 	return a.store.AutoRefreshTokensEnabled()
 }
 
+// claudeCLISharesCredentialLock reports whether every `claude` process that can
+// reach this credential store is known to take the advisory rotation lock.
+//
+// This is true only for the with-user-env image, whose entrypoint runs the
+// bundled CLI under `flock` on the same lock file. A natively installed Claude
+// Code takes no lock, so onWatch must not exchange a refresh token underneath
+// it. The image sets ONWATCH_CLAUDE_CLI_LOCKED=1; nothing else should.
+func claudeCLISharesCredentialLock() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("ONWATCH_CLAUDE_CLI_LOCKED"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // refreshBlockReason names the guard preventing an OAuth refresh, or "" when
 // one may proceed. It exists so the reason can be reported at the point a skip
 // becomes visible - a paused account - rather than only in debug logs.
@@ -653,11 +671,15 @@ func (a *AnthropicAgent) tryOAuthRecovery(ctx context.Context, source string) bo
 		return false
 	}
 
-	// Claude Code holding the same credential is a reason to defer a *proactive*
-	// refresh, not this one: the stored token has already been rejected, so
-	// there is no live session token left to protect. Prefer whatever Claude
-	// Code has written since the failures started, and only exchange when the
-	// store really is still stale. The rotation lock makes that safe.
+	// A running Claude Code is a hard block on exchanging a refresh token: the
+	// credential lock is advisory, so a natively installed `claude` takes no
+	// lock and both sides would spend the same one-time-use token, logging the
+	// account out again. Only an image whose bundled CLI is flock-wrapped can
+	// declare otherwise (ONWATCH_CLAUDE_CLI_LOCKED).
+	//
+	// Adoption is always safe and runs either way - it consumes nothing. It is
+	// also the normal recovery on a host, where a resident Claude Code rotates
+	// the shared credential on its own schedule.
 	if a.claudeCodeRunning() {
 		if creds.AccessToken != "" && creds.AccessToken != a.lastFailedToken && creds.AccessToken != a.lastToken {
 			a.logger.Info("Claude Code is running and has rotated credentials - adopting them", "source", source)
@@ -666,7 +688,16 @@ func (a *AnthropicAgent) tryOAuthRecovery(ctx context.Context, source string) bo
 			a.supersededToken = ""
 			return true
 		}
-		a.logger.Warn("Claude Code is running but the stored credentials are still the rejected ones - refreshing under the credential lock",
+		if !claudeCLISharesCredentialLock() {
+			reason := "Claude Code is running and does not share the credential lock"
+			a.logger.Warn("Auth-failure OAuth refresh skipped",
+				"source", source,
+				"reason", reason,
+				"action", "Let Claude Code rotate the credential, or stop it to let onWatch refresh")
+			a.lastRefreshBlockReason = reason
+			return false
+		}
+		a.logger.Warn("Claude Code is running but the stored credentials are still the rejected ones - refreshing under the shared credential lock",
 			"source", source)
 	}
 
