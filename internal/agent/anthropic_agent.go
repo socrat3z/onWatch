@@ -307,6 +307,7 @@ func (a *AnthropicAgent) SetCCDetectionEnabled(enabled bool) {
 // then continues at the configured interval until the context is cancelled.
 func (a *AnthropicAgent) Run(ctx context.Context) error {
 	a.logger.Info("Anthropic agent started", "interval", a.interval)
+	a.logRefreshReadiness()
 
 	// Ensure any active session is closed on exit
 	defer func() {
@@ -382,6 +383,78 @@ func claudeCLISharesCredentialLock() bool {
 	default:
 		return false
 	}
+}
+
+// logRefreshReadiness reports, once at startup, whether this agent is actually
+// able to refresh its OAuth credentials.
+//
+// Every input to that decision was previously only observable at Debug, or not
+// at all, so a misconfiguration looked identical to a healthy agent until the
+// access token expired hours later and polling paused. One line at start makes
+// the answer readable immediately after a restart.
+//
+// Deliberately does not probe for a running Claude Code: that scan forks `ps`
+// and would delay the first poll, and the state is transient anyway. It is
+// reported instead at the moment it blocks a refresh, with the process named.
+func (a *AnthropicAgent) logRefreshReadiness() {
+	attrs := []any{
+		"auto_refresh_tokens", a.autoRefreshAllowed(),
+		"credentials_readable", a.credsRefresh != nil,
+		"account_scoped_rotator", a.credsRotate != nil,
+		"cli_shares_credential_lock", claudeCLISharesCredentialLock(),
+	}
+	refreshable := a.credsRefresh != nil && a.autoRefreshAllowed()
+	if a.credsRefresh != nil {
+		if creds := a.credsRefresh(); creds != nil {
+			attrs = append(attrs,
+				"refresh_token_present", creds.RefreshToken != "",
+				"access_token_expires_at", creds.ExpiresAt.UTC(),
+				"access_token_expires_in", creds.ExpiresIn.Round(time.Second))
+			refreshable = refreshable && creds.RefreshToken != ""
+		} else {
+			attrs = append(attrs, "refresh_token_present", false)
+			refreshable = false
+		}
+	}
+
+	if refreshable {
+		a.logger.Info("Anthropic OAuth refresh is available", attrs...)
+		return
+	}
+	a.logger.Warn("Anthropic OAuth refresh is NOT available - the access token will expire and polling will pause",
+		append(attrs, "action", "Re-run the Claude login for this account, or enable auto_refresh_tokens")...)
+}
+
+// claudeCodeProcess returns the command line that made claudeCodeRunning true,
+// or "" when a test override is installed and there is nothing real to name.
+func (a *AnthropicAgent) claudeCodeProcess() string {
+	if a.isClaudeCodeRunning != nil {
+		return ""
+	}
+	return ClaudeCodeProcess()
+}
+
+// noteRefreshSkipped records and reports a refresh that did not happen.
+//
+// These used to be Debug, which is why a token could quietly expire and leave
+// nothing in the log but the 401 storm that followed. They are Warn now, and
+// deduplicated on the reason so a two-minute poll does not repeat itself for
+// the whole hour the token spends inside the refresh window.
+func (a *AnthropicAgent) noteRefreshSkipped(source, reason string, creds *api.AnthropicCredentials, process string) {
+	repeat := a.lastRefreshBlockReason == reason
+	a.lastRefreshBlockReason = reason
+	if repeat {
+		a.logger.Debug("OAuth refresh still skipped", "source", source, "reason", reason)
+		return
+	}
+	attrs := []any{"source", source, "reason", reason}
+	if creds != nil {
+		attrs = append(attrs, "expires_in", creds.ExpiresIn.Round(time.Second))
+	}
+	if process != "" {
+		attrs = append(attrs, "blocking_process", process)
+	}
+	a.logger.Warn("OAuth refresh skipped - the token will expire unless another writer rotates it", attrs...)
 }
 
 // refreshBlockReason names the guard preventing an OAuth refresh, or "" when
@@ -757,8 +830,8 @@ func (a *AnthropicAgent) tryPausedAuthRecovery(ctx context.Context) bool {
 // same refresh token (onWatch refreshes would invalidate Claude Code's pending
 // refresh and cause re-authentication).
 func (a *AnthropicAgent) proactiveRefresh(ctx context.Context, creds *api.AnthropicCredentials) {
-	if !a.autoRefreshAllowed() {
-		a.logger.Debug("Skipping proactive OAuth refresh - auto_refresh_tokens disabled")
+	if reason := a.refreshBlockReason(); reason != "" {
+		a.noteRefreshSkipped("proactive refresh", reason, creds, "")
 		return
 	}
 	// Skip if these are credentials we already refreshed away from but could
@@ -766,23 +839,20 @@ func (a *AnthropicAgent) proactiveRefresh(ctx context.Context, creds *api.Anthro
 	// agent would mint - and burn - a new one-time-use refresh token on every
 	// single poll, which invalidates Claude Code's session.
 	if creds.AccessToken != "" && creds.AccessToken == a.supersededToken {
-		a.logger.Debug("Skipping proactive OAuth refresh - stored credentials already superseded by an unsaved refresh")
+		a.noteRefreshSkipped("proactive refresh",
+			"stored credentials are already superseded by a refresh that could not be saved", creds, "")
 		return
 	}
-	// Skip if Claude Code is running - avoid competing for the same refresh token.
-	// onWatch refreshing burns Claude Code's scheduled refresh, causing invalid_grant.
+	// Skip if Claude Code is running - avoid competing for the same refresh
+	// token. onWatch refreshing burns Claude Code's scheduled refresh, causing
+	// invalid_grant. Unlike tryOAuthRecovery this has no escape hatch: the token
+	// here is still valid, so deferring costs nothing and Claude Code will
+	// rotate it on its own schedule.
 	if a.claudeCodeRunning() {
-		a.logger.Debug("Skipping proactive OAuth refresh - Claude Code is running",
-			"expires_in", creds.ExpiresIn.Round(time.Second))
+		a.noteRefreshSkipped("proactive refresh", "Claude Code is running", creds, a.claudeCodeProcess())
 		return
 	}
-
-	// Skip if in rate limit backoff
-	if a.rateLimitBackoffActive() {
-		a.logger.Debug("Skipping proactive OAuth refresh - in rate limit backoff",
-			"resume_at", a.rateLimitResumeAt)
-		return
-	}
+	a.lastRefreshBlockReason = ""
 
 	a.logger.Info("Token expiring soon, attempting proactive OAuth refresh",
 		"expires_in", creds.ExpiresIn.Round(time.Second))

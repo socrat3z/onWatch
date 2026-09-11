@@ -88,21 +88,36 @@ func isJSRuntime(base string) bool {
 	return false
 }
 
+// matchClaudeCodeProcess returns the command line of the first Claude Code CLI
+// process in a listing, or "" when there is none.
+//
+// The command line is kept so callers can name what matched. A false positive
+// here silently disables OAuth refresh, and "Claude Code is running" with no
+// evidence attached is not something an operator can act on.
+func matchClaudeCodeProcess(psOutput []byte) string {
+	for _, line := range bytes.Split(psOutput, []byte("\n")) {
+		if candidate := strings.TrimSpace(string(line)); isClaudeCodeCommandLine(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
 // scanForClaudeCode reports whether any line of a process listing is a Claude
 // Code CLI process.
 func scanForClaudeCode(psOutput []byte) bool {
-	for _, line := range bytes.Split(psOutput, []byte("\n")) {
-		if isClaudeCodeCommandLine(string(line)) {
-			return true
-		}
-	}
-	return false
+	return matchClaudeCodeProcess(psOutput) != ""
 }
 
-// IsClaudeCodeRunning checks if the Claude Code CLI is currently executing.
-// When Claude Code is running, onWatch skips OAuth refresh to avoid competing
-// for the same refresh token - a refresh by onWatch invalidates Claude Code's
-// pending refresh, causing it to get invalid_grant and re-authenticate.
+// ClaudeCodeProcess returns the command line of a running Claude Code CLI
+// process, or "" when none is running.
+//
+// When Claude Code is running, onWatch skips the OAuth token exchange to avoid
+// competing for the same refresh token - a refresh by onWatch invalidates
+// Claude Code's pending refresh, causing it to get invalid_grant and
+// re-authenticate. The command line is returned rather than a bare bool so a
+// skipped refresh can name what blocked it: a false positive here silently
+// disables refresh, which is indistinguishable from a broken login in the logs.
 // Exported as a package-level variable so tests can override it.
 //
 // On unix the full command line of every process is inspected (see
@@ -110,7 +125,7 @@ func scanForClaudeCode(psOutput []byte) bool {
 // which matched the Claude desktop app and any process referencing a .claude
 // path. See https://github.com/onllm-dev/onWatch/issues/111.
 //
-// Note this stays true on hosts where the Claude Code background daemon
+// Note this stays non-empty on hosts where the Claude Code background daemon
 // (`claude daemon run`, `claude bg-spare`, `claude bg-pty-host`) is resident
 // even with no interactive session. That is intentional: those processes hold
 // the same credentials and refresh them on their own schedule, so onWatch must
@@ -119,7 +134,7 @@ func scanForClaudeCode(psOutput []byte) bool {
 // sides would spend the same token - but it first tries to adopt whatever that
 // process has already written, and lifts the block only where the CLI is known
 // to be flock-wrapped (claudeCLISharesCredentialLock).
-var IsClaudeCodeRunning = func() bool {
+var ClaudeCodeProcess = func() string {
 	ctx, cancel := context.WithTimeout(context.Background(), claudeCodeScanTimeout)
 	defer cancel()
 
@@ -128,7 +143,10 @@ var IsClaudeCodeRunning = func() bool {
 		// WMI/PowerShell query, so this stays a process-name match. It shares
 		// the name with the desktop app, which is a known limitation.
 		cmd := exec.CommandContext(ctx, "cmd", "/C", `tasklist /FI "IMAGENAME eq claude.exe" /NH 2>nul | findstr /I "claude.exe"`)
-		return cmd.Run() == nil
+		if cmd.Run() == nil {
+			return "claude.exe"
+		}
+		return ""
 	}
 
 	// `ps -Ao args=` is POSIX and prints the full command line of every process
@@ -137,7 +155,11 @@ var IsClaudeCodeRunning = func() bool {
 	if err != nil {
 		// Treat an unusable process listing as "not running": the OAuth guards
 		// downstream (rate limit backoff, invalid_grant) still bound refreshes.
-		return false
+		return ""
 	}
-	return scanForClaudeCode(out)
+	return matchClaudeCodeProcess(out)
 }
+
+// IsClaudeCodeRunning is the boolean form of ClaudeCodeProcess. Kept as a
+// separate variable because tests override it directly.
+var IsClaudeCodeRunning = func() bool { return ClaudeCodeProcess() != "" }
