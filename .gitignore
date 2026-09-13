@@ -97,3 +97,6 @@ onwatch-test
 # mise local overrides (mise.local.toml beats mise.toml, MISE_ENV variants too)
 mise.local.toml
 mise.*.local.toml
+
+# Agent worktrees, local scratch state
+.claude/worktrees/
