@@ -33,7 +33,7 @@ RUN \
   CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
     -ldflags="-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME}" \
     -trimpath \
-    -o onwatch .
+    -o onwatch ./cmd/onwatch
 
 # Verify the binary works (only if native build)
 RUN ./onwatch --version || echo "Cross-compiled binary, skipping version check"
