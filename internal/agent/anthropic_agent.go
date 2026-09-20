@@ -1125,6 +1125,7 @@ processResponse:
 				QuotaKey:    q.Name,
 				AccountID:   notifyAccountID(a.accountID),
 				Utilization: q.Utilization,
+				ResetAt:     derefTime(q.ResetsAt),
 			})
 		}
 	}

@@ -9,7 +9,7 @@ Background daemon (<50MB RAM) tracking: Anthropic, Synthetic, Z.ai, Copilot, Cod
 ## Code Map
 
 ```
-main.go                     # CLI entry, daemon lifecycle
+cmd/onwatch/                # CLI entry, daemon lifecycle (main.go, setup.go, service_cmd.go, menubar_*.go)
 internal/
 ├── api/                    # HTTP clients + types per provider
 │   └── {provider}_client.go, {provider}_types.go
@@ -75,7 +75,7 @@ On `go.sum` changes, update `vendorHash` in `flake.nix` (run `nix build .#onwatc
 5. Add to `internal/web/handlers.go` endpoints
 6. Update dashboard JS in `internal/web/static/app.js`
 
-**API Docs:** See `docs/` for provider-specific setup (MULTI_ACCOUNT.md for multiple accounts per provider, WITH_USER_ENV.md for the fork container image, COPILOT_SETUP.md, CODEX_SETUP.md, ANTIGRAVITY_SETUP.md, GEMINI_SETUP.md, CURSOR_SETUP.md, KIMI_SETUP.md, GROK_SETUP.md, MOONSHOT_SETUP.md, DEEPSEEK_SETUP.md, OPENCODE_SETUP.md, OLLAMA_SETUP.md)
+**API Docs:** See `docs/` for provider-specific setup (MULTI_ACCOUNT.md for multiple accounts per provider, WITH_USER_ENV.md for the fork container image, COPILOT_SETUP.md, CODEX_SETUP.md, ANTIGRAVITY_SETUP.md, GEMINI_SETUP.md, CURSOR_SETUP.md, KIMI_SETUP.md, GROK_SETUP.md, MOONSHOT_SETUP.md, DEEPSEEK_SETUP.md, OPENCODE_SETUP.md, OLLAMA_SETUP.md) and WEBHOOK_SETUP.md for outbound HTTP notifications
 
 **Containers:** `IsDockerEnvironment()` in `config.go` detects Docker/K8s. Containers run foreground only.
 

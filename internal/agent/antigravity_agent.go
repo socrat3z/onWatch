@@ -217,6 +217,7 @@ func (a *AntigravityAgent) poll(ctx context.Context) {
 				AccountID:   notifyAccountID(a.accountID),
 				Utilization: utilization,
 				Limit:       100, // Percentage-based
+				ResetAt:     derefTime(g.ResetTime),
 			})
 		}
 	}

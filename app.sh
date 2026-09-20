@@ -197,14 +197,14 @@ build_native_binary() {
         CGO_ENABLED=1 CGO_LDFLAGS="$DARWIN_CGO_LDFLAGS" go build \
             -tags "$DARWIN_FULL_TAGS" \
             -ldflags="-s -w -X main.version=$VERSION" \
-            -o "$output" .
+            -o "$output" ./cmd/onwatch
         return
     fi
 
     go build \
         -tags "$DESKTOP_TAGS" \
         -ldflags="-s -w -X main.version=$VERSION" \
-        -o "$output" .
+        -o "$output" ./cmd/onwatch
 }
 
 build_darwin() {
@@ -221,7 +221,7 @@ build_darwin() {
         CGO_ENABLED=1 CGO_LDFLAGS="$DARWIN_CGO_LDFLAGS" GOOS=darwin GOARCH="$arch" go build \
             -tags "$DARWIN_FULL_TAGS" \
             -ldflags="-s -w -X main.version=$VERSION" \
-            -o "$SCRIPT_DIR/$output" .
+            -o "$SCRIPT_DIR/$output" ./cmd/onwatch
     done
 
     success "Built macOS binaries in dist/"
@@ -286,7 +286,7 @@ do_release() {
         CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build \
             -tags "$DESKTOP_TAGS" \
             -ldflags="-s -w -X main.version=$VERSION" \
-            -o "$SCRIPT_DIR/$output" .
+            -o "$SCRIPT_DIR/$output" ./cmd/onwatch
     done
 
     success "Release build complete. Binaries in dist/:"

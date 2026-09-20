@@ -121,6 +121,7 @@ func (a *KimiAgent) poll(ctx context.Context) {
 			Provider:    "kimi",
 			QuotaKey:    q.Name,
 			Utilization: q.Utilization,
+			ResetAt:     derefTime(q.ResetsAt),
 		})
 	}
 
