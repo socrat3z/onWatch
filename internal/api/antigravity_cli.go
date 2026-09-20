@@ -128,11 +128,42 @@ func (r *AntigravityCLIRunner) evict(limit int) {
 	r.teardownLocked()
 }
 
+// agyOutputBuffer captures recent bytes of PTY output from agy and is bounded to prevent unbounded memory growth.
+type agyOutputBuffer struct {
+	mu     sync.Mutex
+	buf    []byte
+	maxCap int
+}
+
+func newAgyOutputBuffer(maxCap int) *agyOutputBuffer {
+	if maxCap <= 0 {
+		maxCap = 8192
+	}
+	return &agyOutputBuffer{maxCap: maxCap}
+}
+
+func (b *agyOutputBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.maxCap {
+		b.buf = b.buf[len(b.buf)-b.maxCap:]
+	}
+	return len(p), nil
+}
+
+func (b *agyOutputBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
+}
+
 // agySession holds a live, managed agy process and its verified connection.
 type agySession struct {
-	pty  pty.Pty
-	cmd  *pty.Cmd
-	conn *AntigravityConnection
+	pty    pty.Pty
+	cmd    *pty.Cmd
+	conn   *AntigravityConnection
+	output *agyOutputBuffer
 }
 
 // AntigravityCLIRunner manages a bounded warm agy process so onWatch can read
@@ -167,7 +198,11 @@ func NewAntigravityCLIRunner(logger *slog.Logger) *AntigravityCLIRunner {
 // inherit from the daemon. os.Environ() is deliberately never passed through:
 // the daemon's .env holds every configured provider's API key, and agy is a
 // third-party binary outside that trust boundary.
-var agyEnvAllowlist = []string{"PATH", "TERM", "LANG", "LC_ALL", "AGY_CLI_DISABLE_AUTO_UPDATE"}
+var agyEnvAllowlist = []string{
+	"PATH", "TERM", "LANG", "LC_ALL", "AGY_CLI_DISABLE_AUTO_UPDATE",
+	"DBUS_SESSION_BUS_ADDRESS", "GNOME_KEYRING_CONTROL", "XDG_RUNTIME_DIR",
+	"SSL_CERT_FILE", "SSL_CERT_DIR",
+}
 
 // buildAgyEnv resolves the allowlisted ambient variables and layers the
 // caller's account-specific overrides (HOME, XDG_RUNTIME_DIR, and any agy
@@ -342,7 +377,7 @@ func (r *AntigravityCLIRunner) ensureLocked(ctx context.Context) error {
 	return nil
 }
 
-// launch starts agy inside a pseudo-terminal and drains its output.
+// launch starts agy inside a pseudo-terminal and captures its output.
 func (r *AntigravityCLIRunner) launch(binPath string) (*agySession, error) {
 	p, err := pty.New()
 	if err != nil {
@@ -354,10 +389,48 @@ func (r *AntigravityCLIRunner) launch(binPath string) (*agySession, error) {
 		_ = p.Close()
 		return nil, fmt.Errorf("antigravity cli: start agy: %w", err)
 	}
-	// Drain PTY output so the process is not blocked on a full buffer.
-	go func() { _, _ = io.Copy(io.Discard, p) }()
+	outBuf := newAgyOutputBuffer(8192)
+	go r.drainPTY(p, outBuf, cmd.Process.Pid)
 	r.logger.Debug("launched managed agy", "pid", cmd.Process.Pid, "path", binPath)
-	return &agySession{pty: p, cmd: cmd}, nil
+	return &agySession{pty: p, cmd: cmd, output: outBuf}, nil
+}
+
+// drainPTY reads PTY output, writes to outBuf, and logs if agy requires interactive authentication.
+func (r *AntigravityCLIRunner) drainPTY(p pty.Pty, out *agyOutputBuffer, pid int) {
+	buf := make([]byte, 1024)
+	var lineBuf strings.Builder
+	var warned sync.Once
+	for {
+		n, err := p.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			_, _ = out.Write(chunk)
+			for _, b := range chunk {
+				if b == '\n' || b == '\r' {
+					line := strings.TrimSpace(lineBuf.String())
+					lineBuf.Reset()
+					if line != "" {
+						lower := strings.ToLower(line)
+						if strings.Contains(lower, "accounts.google.com") ||
+							strings.Contains(lower, "please visit") ||
+							strings.Contains(lower, "auth login") ||
+							strings.Contains(lower, "failed to persist token") ||
+							strings.Contains(lower, "login expired") {
+							warned.Do(func() {
+								r.logger.Warn("agy process requires interactive authentication or reported auth error",
+									"pid", pid, "output", line)
+							})
+						}
+					}
+				} else if lineBuf.Len() < 512 {
+					lineBuf.WriteByte(b)
+				}
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // awaitReady polls until the quota endpoint parses, since a fresh agy can bind
@@ -381,6 +454,11 @@ func (r *AntigravityCLIRunner) awaitReady(ctx context.Context, sess *agySession)
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(agyReadinessPoll):
+		}
+	}
+	if sess != nil && sess.output != nil {
+		if recent := strings.TrimSpace(sess.output.String()); recent != "" {
+			r.logger.Warn("agy quota service did not become ready before timeout", "pid", pid, "recent_output", recent)
 		}
 	}
 	return nil, ErrAgyNotReady

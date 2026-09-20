@@ -159,3 +159,16 @@ func TestResolveAgyPath_EnvMissingFileErrors(t *testing.T) {
 		t.Error("expected error when ANTIGRAVITY_CLI_PATH points at a missing file")
 	}
 }
+func TestAgyOutputBuffer_CapsAndStrings(t *testing.T) {
+	buf := newAgyOutputBuffer(20)
+	n, err := buf.Write([]byte("hello world! 1234567890"))
+	if err != nil || n != 23 {
+		t.Fatalf("Write: n=%d, err=%v", n, err)
+	}
+	// Capacity is 20, so only the last 20 bytes should be retained
+	got := buf.String()
+	want := "lo world! 1234567890"
+	if got != want {
+		t.Errorf("buf.String() = %q, want %q", got, want)
+	}
+}

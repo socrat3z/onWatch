@@ -130,7 +130,8 @@ func TestBuildAgyEnvExcludesSecretsAndMatchesAllowlist(t *testing.T) {
 	t.Setenv("SYNTHETIC_API_KEY", "also-should-not-leak")
 	t.Setenv("PATH", "/usr/bin")
 	t.Setenv("TERM", "xterm")
-
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/test-dbus")
+	t.Setenv("GNOME_KEYRING_CONTROL", "/tmp/test-keyring")
 	env := buildAgyEnv(map[string]string{
 		"HOME":            "/home/work",
 		"XDG_RUNTIME_DIR": "/tmp/onwatch-runtime/antigravity/work",
@@ -157,6 +158,8 @@ func TestBuildAgyEnvExcludesSecretsAndMatchesAllowlist(t *testing.T) {
 	allowed := map[string]bool{
 		"PATH": true, "TERM": true, "LANG": true, "LC_ALL": true,
 		"AGY_CLI_DISABLE_AUTO_UPDATE": true, "HOME": true, "XDG_RUNTIME_DIR": true,
+		"DBUS_SESSION_BUS_ADDRESS": true, "GNOME_KEYRING_CONTROL": true,
+		"SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
 	}
 	for key := range seen {
 		if !allowed[key] {
@@ -172,6 +175,12 @@ func TestBuildAgyEnvExcludesSecretsAndMatchesAllowlist(t *testing.T) {
 	}
 	if seen["PATH"] != "/usr/bin" {
 		t.Fatalf("PATH not inherited from ambient env: got %q", seen["PATH"])
+	}
+	if seen["DBUS_SESSION_BUS_ADDRESS"] != "unix:path=/tmp/test-dbus" {
+		t.Fatalf("DBUS_SESSION_BUS_ADDRESS not inherited: got %q", seen["DBUS_SESSION_BUS_ADDRESS"])
+	}
+	if seen["GNOME_KEYRING_CONTROL"] != "/tmp/test-keyring" {
+		t.Fatalf("GNOME_KEYRING_CONTROL not inherited: got %q", seen["GNOME_KEYRING_CONTROL"])
 	}
 }
 

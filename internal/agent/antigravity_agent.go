@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -199,6 +200,8 @@ func (a *AntigravityAgent) poll(ctx context.Context) {
 	snapshot.AccountID = a.accountID
 	if _, err := a.store.InsertAntigravitySnapshot(snapshot); err != nil {
 		a.logger.Error("Failed to insert Antigravity snapshot", "error", err)
+	} else if a.accountID > 0 {
+		_ = a.store.SetProviderAccountCredentialHealth(a.accountID, store.AccountCredentialsOK, "")
 	}
 
 	// Process with tracker
@@ -271,6 +274,11 @@ func (a *AntigravityAgent) fetchSnapshot(ctx context.Context, source string) (*a
 				return snap, nil
 			}
 			a.logger.Debug("agy CLI source unavailable, falling back to IDE", "error", err)
+			ideSnap, ideErr := a.fetchIDE(ctx)
+			if ideErr != nil {
+				return nil, fmt.Errorf("cli: %w; ide: %v", err, ideErr)
+			}
+			return ideSnap, nil
 		}
 		return a.fetchIDE(ctx)
 	}
