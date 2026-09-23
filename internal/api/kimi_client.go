@@ -33,6 +33,8 @@ type KimiClient struct {
 	logger     *slog.Logger
 	// optional static token (Docker / env override). When empty, loads from disk + refresh.
 	staticToken string
+	// cliRunning reports a live kimi-code process. nil uses IsKimiCodeRunning.
+	cliRunning func(context.Context) bool
 }
 
 // KimiOption configures a KimiClient.
@@ -56,6 +58,21 @@ func WithKimiTimeout(d time.Duration) KimiOption {
 // WithKimiStaticToken forces a bearer token (skips disk credentials / refresh).
 func WithKimiStaticToken(token string) KimiOption {
 	return func(c *KimiClient) { c.staticToken = strings.TrimSpace(token) }
+}
+
+// WithKimiCLIRunning overrides live kimi-code process detection (tests).
+func WithKimiCLIRunning(fn func(context.Context) bool) KimiOption {
+	return func(c *KimiClient) { c.cliRunning = fn }
+}
+
+// kimiCLIRunning scans the process table. Resolve it once per FetchSnapshot and
+// thread the result: each call forks a full `ps`, and a CLI that starts midway
+// through a poll would otherwise flip the answer between decisions.
+func (c *KimiClient) kimiCLIRunning(ctx context.Context) bool {
+	if c.cliRunning != nil {
+		return c.cliRunning(ctx)
+	}
+	return IsKimiCodeRunning(ctx)
 }
 
 // NewKimiClient creates a Kimi Code API client.
@@ -101,7 +118,10 @@ func NewKimiClient(token string, logger *slog.Logger, opts ...KimiOption) *KimiC
 
 // FetchSnapshot retrieves current Kimi Code quotas and returns a snapshot.
 func (c *KimiClient) FetchSnapshot(ctx context.Context) (*KimiSnapshot, error) {
-	token, err := c.resolveAccessToken(ctx)
+	// One process scan per poll, reused by every decision below.
+	liveCLI := c.staticToken == "" && c.kimiCLIRunning(ctx)
+
+	token, err := c.resolveAccessToken(ctx, liveCLI)
 	if err != nil {
 		return nil, err
 	}
@@ -109,18 +129,19 @@ func (c *KimiClient) FetchSnapshot(ctx context.Context) (*KimiSnapshot, error) {
 	body, err := c.getUsages(ctx, token)
 	if err != nil {
 		// On 401 with OAuth disk credentials (not a static Docker token):
-		//  1) re-read kimi-code store (CLI may have rotated tokens)
-		//  2) if still failing, force-refresh — 401 means the access token is
-		//     dead even when expires_at still claims it is valid
-		// kimi-cli is never consulted; only the single kimi-code store is used.
+		//  1) re-read kimi-code store (CLI may have rotated tokens onto disk)
+		//  2) if the CLI is NOT running and still failing, force-refresh -
+		//     401 means the access token is dead even when expires_at claims
+		//     it is valid. Never OAuth-refresh while kimi-code is alive:
+		//     rotation would invalidate the live session's refresh token.
 		if errors.Is(err, ErrKimiUnauthorized) && c.staticToken == "" {
 			InvalidateKimiCredentialsCache()
 			creds := LoadKimiCredentialsCached(c.logger, true)
 			if creds != nil && creds.AccessToken != "" && creds.AccessToken != token {
 				body, err = c.getUsages(ctx, creds.AccessToken)
 			}
-			if err != nil && creds != nil && creds.RefreshToken != "" {
-				if rerr := c.refreshAndPersist(ctx, creds, true); rerr != nil {
+			if err != nil && !liveCLI && creds != nil && creds.RefreshToken != "" {
+				if rerr := c.refreshAndPersist(ctx, creds, true, liveCLI); rerr != nil {
 					c.logger.Debug("kimi: force-refresh after 401 failed",
 						"source", creds.Source,
 						"expires_in_sec", creds.SecondsUntilExpiry(),
@@ -131,6 +152,9 @@ func (c *KimiClient) FetchSnapshot(ctx context.Context) (*KimiSnapshot, error) {
 						body, err = c.getUsages(ctx, creds.AccessToken)
 					}
 				}
+			}
+			if err != nil && liveCLI {
+				c.logger.Info("kimi: live kimi-code token rejected; skipping OAuth so the CLI keeps its refresh token")
 			}
 		}
 		if err != nil {
@@ -185,13 +209,23 @@ func (c *KimiClient) getUsages(ctx context.Context, token string) ([]byte, error
 	}
 }
 
-func (c *KimiClient) resolveAccessToken(ctx context.Context) (string, error) {
+func (c *KimiClient) resolveAccessToken(ctx context.Context, liveCLI bool) (string, error) {
 	if c.staticToken != "" {
 		return c.staticToken, nil
 	}
-	creds := LoadKimiCredentialsCached(c.logger, false)
+	// Live CLI may have just written credentials; skip the 30s cache.
+	creds := LoadKimiCredentialsCached(c.logger, liveCLI)
 	if creds == nil {
 		return "", ErrKimiNoCredentials
+	}
+	// Live kimi-code owns OAuth. Adopt whatever access token it last persisted
+	// (even if expires_at has elapsed) and never rotate the refresh token.
+	if liveCLI && creds.AccessToken != "" {
+		c.logger.Debug("kimi: adopting access token from live kimi-code credentials",
+			"source", creds.Source,
+			"expired", creds.Expired(),
+			"expires_in_sec", creds.SecondsUntilExpiry())
+		return creds.AccessToken, nil
 	}
 	// Still valid → never refresh. Harness owns auth for live sessions.
 	if !creds.Expired() && creds.AccessToken != "" {
@@ -201,7 +235,7 @@ func (c *KimiClient) resolveAccessToken(ctx context.Context) (string, error) {
 		return creds.AccessToken, nil
 	}
 	// Access expired (or missing): try OAuth refresh on THIS store only.
-	if err := c.refreshAndPersist(ctx, creds, false); err != nil {
+	if err := c.refreshAndPersist(ctx, creds, false, liveCLI); err != nil {
 		// Last resort: send the stale access token (some APIs still accept it briefly).
 		if creds.AccessToken != "" {
 			c.logger.Warn("kimi: access expired and refresh failed, trying existing access token",
@@ -220,7 +254,7 @@ func (c *KimiClient) resolveAccessToken(ctx context.Context) (string, error) {
 // refreshAndPersist refreshes the single kimi-code credential store.
 // When force is false, unexpired access tokens are left alone (CLI owns live sessions).
 // When force is true (API returned 401), refresh even if expires_at has not elapsed.
-func (c *KimiClient) refreshAndPersist(ctx context.Context, creds *KimiCredentials, force bool) error {
+func (c *KimiClient) refreshAndPersist(ctx context.Context, creds *KimiCredentials, force, liveCLI bool) error {
 	if creds == nil {
 		creds = DetectKimiCredentials(c.logger)
 	}
@@ -231,6 +265,14 @@ func (c *KimiClient) refreshAndPersist(ctx context.Context, creds *KimiCredentia
 		c.logger.Debug("kimi: refreshAndPersist no-op; access not expired",
 			"source", creds.Source, "expires_in_sec", creds.SecondsUntilExpiry())
 		return nil
+	}
+	if liveCLI {
+		c.logger.Info("kimi: skipping OAuth refresh - live kimi-code owns the refresh token",
+			"source", creds.Source, "force", force)
+		if creds.AccessToken != "" {
+			return nil
+		}
+		return ErrKimiUnauthorized
 	}
 	if creds.RefreshToken == "" {
 		return ErrKimiUnauthorized

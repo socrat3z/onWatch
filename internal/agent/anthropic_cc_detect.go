@@ -1,18 +1,12 @@
 package agent
 
 import (
-	"bytes"
-	"context"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
-)
 
-// claudeCodeScanTimeout bounds the process listing used by IsClaudeCodeRunning
-// so a wedged `ps` can never stall a poll cycle.
-const claudeCodeScanTimeout = 5 * time.Second
+	"github.com/onllm-dev/onwatch/v2/internal/procscan"
+)
 
 // isClaudeCodeCommandLine reports whether a full process command line belongs to
 // the Claude Code CLI.
@@ -88,27 +82,6 @@ func isJSRuntime(base string) bool {
 	return false
 }
 
-// matchClaudeCodeProcess returns the command line of the first Claude Code CLI
-// process in a listing, or "" when there is none.
-//
-// The command line is kept so callers can name what matched. A false positive
-// here silently disables OAuth refresh, and "Claude Code is running" with no
-// evidence attached is not something an operator can act on.
-func matchClaudeCodeProcess(psOutput []byte) string {
-	for _, line := range bytes.Split(psOutput, []byte("\n")) {
-		if candidate := strings.TrimSpace(string(line)); isClaudeCodeCommandLine(candidate) {
-			return candidate
-		}
-	}
-	return ""
-}
-
-// scanForClaudeCode reports whether any line of a process listing is a Claude
-// Code CLI process.
-func scanForClaudeCode(psOutput []byte) bool {
-	return matchClaudeCodeProcess(psOutput) != ""
-}
-
 // ClaudeCodeProcess returns the command line of a running Claude Code CLI
 // process, or "" when none is running.
 //
@@ -135,29 +108,7 @@ func scanForClaudeCode(psOutput []byte) bool {
 // process has already written, and lifts the block only where the CLI is known
 // to be flock-wrapped (claudeCLISharesCredentialLock).
 var ClaudeCodeProcess = func() string {
-	ctx, cancel := context.WithTimeout(context.Background(), claudeCodeScanTimeout)
-	defer cancel()
-
-	if runtime.GOOS == "windows" {
-		// Windows tasklist cannot report command lines without a much heavier
-		// WMI/PowerShell query, so this stays a process-name match. It shares
-		// the name with the desktop app, which is a known limitation.
-		cmd := exec.CommandContext(ctx, "cmd", "/C", `tasklist /FI "IMAGENAME eq claude.exe" /NH 2>nul | findstr /I "claude.exe"`)
-		if cmd.Run() == nil {
-			return "claude.exe"
-		}
-		return ""
-	}
-
-	// `ps -Ao args=` is POSIX and prints the full command line of every process
-	// on both macOS and Linux.
-	out, err := exec.CommandContext(ctx, "ps", "-Ao", "args=").Output()
-	if err != nil {
-		// Treat an unusable process listing as "not running": the OAuth guards
-		// downstream (rate limit backoff, invalid_grant) still bound refreshes.
-		return ""
-	}
-	return matchClaudeCodeProcess(out)
+	return procscan.Match("claude.exe", isClaudeCodeCommandLine)
 }
 
 // IsClaudeCodeRunning is the boolean form of ClaudeCodeProcess. Kept as a

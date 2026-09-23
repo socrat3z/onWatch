@@ -880,6 +880,48 @@ func (s *Store) createTables() error {
 		CREATE INDEX IF NOT EXISTS idx_ollama_cycles_name_start ON ollama_reset_cycles(quota_name, cycle_start);
 		CREATE INDEX IF NOT EXISTS idx_ollama_cycles_name_active ON ollama_reset_cycles(quota_name, cycle_end) WHERE cycle_end IS NULL;
 
+		-- Muse coding-plan tables
+		CREATE TABLE IF NOT EXISTS muse_snapshots (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			captured_at TEXT NOT NULL,
+			raw_json TEXT NOT NULL DEFAULT '',
+			tier TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			window_used REAL NOT NULL DEFAULT 0,
+			window_resets_at TEXT,
+			window_duration_mins INTEGER NOT NULL DEFAULT 0,
+			weekly_used REAL NOT NULL DEFAULT 0,
+			weekly_resets_at TEXT,
+			quota_count INTEGER NOT NULL DEFAULT 0
+		);
+
+		CREATE TABLE IF NOT EXISTS muse_quota_values (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			snapshot_id INTEGER NOT NULL,
+			quota_name TEXT NOT NULL,
+			used REAL NOT NULL DEFAULT 0,
+			limit_value REAL NOT NULL DEFAULT 0,
+			utilization REAL NOT NULL DEFAULT 0,
+			format TEXT NOT NULL DEFAULT 'percent',
+			resets_at TEXT,
+			FOREIGN KEY (snapshot_id) REFERENCES muse_snapshots(id)
+		);
+
+		CREATE TABLE IF NOT EXISTS muse_reset_cycles (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			quota_name TEXT NOT NULL,
+			cycle_start TEXT NOT NULL,
+			cycle_end TEXT,
+			resets_at TEXT,
+			peak_utilization REAL NOT NULL DEFAULT 0,
+			total_delta REAL NOT NULL DEFAULT 0
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_muse_snapshots_captured ON muse_snapshots(captured_at);
+		CREATE INDEX IF NOT EXISTS idx_muse_quota_values_snapshot ON muse_quota_values(snapshot_id);
+		CREATE INDEX IF NOT EXISTS idx_muse_cycles_name_start ON muse_reset_cycles(quota_name, cycle_start);
+		CREATE INDEX IF NOT EXISTS idx_muse_cycles_name_active ON muse_reset_cycles(quota_name, cycle_end) WHERE cycle_end IS NULL;
+
 		-- API integrations telemetry ingestion tables
 		CREATE TABLE IF NOT EXISTS api_integration_usage_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1871,6 +1913,16 @@ func (s *Store) QuerySyntheticCycleOverview(groupBy string, limit int) ([]CycleO
 
 // Setting key for OAuth auto-refresh of coding-harness credentials.
 const SettingAutoRefreshTokens = "auto_refresh_tokens"
+
+// SettingMuseCLIActiveAt records when the Muse agent last skipped a poll
+// because a live `muse` CLI would have been rate-limited by the probe. The
+// dashboard reads it so a paused provider explains itself instead of silently
+// ageing into "stale".
+const SettingMuseCLIActiveAt = "muse_cli_active_at"
+
+// MuseCLIActiveWindow is how long a recorded skip keeps the provider in the
+// paused state. It must exceed a poll interval so a single skip does not flap.
+const MuseCLIActiveWindow = 5 * time.Minute
 
 // GetSetting returns the value for a setting key. Returns "" if not found.
 func (s *Store) GetSetting(key string) (string, error) {

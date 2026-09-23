@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -45,6 +46,13 @@ func TestMain(m *testing.M) {
 	inContainer = func() bool { return false }
 	// Setup wizard key verification must never hit ollama.com from tests.
 	verifyOllamaKey = func(string) (string, error) { return "free", nil }
+	// Muse key verification must never hit api.meta.ai from tests.
+	verifyMuseKey = func(string, string) (string, error) { return "5h 1.0% used / weekly 2.0% used", nil }
+	// Muse credential detection must never read the developer's keychain or
+	// login file: on a machine with real credentials the setup wizard takes
+	// its auto-detected branch, asks one question instead of two, and the
+	// scripted prompt input in the wizard tests desyncs from there on.
+	detectMuseCredentialsFunc = func(*slog.Logger) *api.MuseCredentials { return nil }
 
 	code := m.Run()
 	cleanup()

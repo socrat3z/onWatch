@@ -53,10 +53,17 @@ type Config struct {
 	OllamaAPIKey       string  // OLLAMA_API_KEY from ollama.com/settings/keys
 	OllamaMonthlyLimit float64 // OLLAMA_MONTHLY_LIMIT: included usage cap in USD (overrides the plan default; 0 = derive from plan)
 	OllamaResetDay     int     // OLLAMA_RESET_DAY: day of month the included usage resets (1-31; 0 = account anniversary)
-	CodexShowAvailable string  // CODEX_SHOW_AVAILABLE: "usage" | "available", default "usage" (Codex-specific override)
-	CodexAutoStart5h   bool    // CODEX_AUTO_START_5H: auto-send a starter ping when the 5h window resets (Beta, default off)
-	CodexAutoStart7d   bool    // CODEX_AUTO_START_7D: auto-send a starter ping when the weekly window resets (Beta, default off)
-	DisplayMode        string  // ONWATCH_DISPLAY_MODE: "usage" | "available", default "usage" (global, applies to all providers)
+	// Muse coding-plan provider configuration (auto-detected from `muse login` or META_API_KEY)
+	MuseAPIKey         string // META_API_KEY or auto-detected Muse login key
+	MuseAutoToken      bool   // true if key was auto-detected from local Muse credentials
+	MuseModel          string // META_MUSE_MODEL or Muse settings model (default muse-spark-1.3)
+	MuseEnabled        bool   // true if MUSE_ENABLED=true or key present (unless explicitly false)
+	MuseBaseURL        string // MUSE_BASE_URL override for proxy setups (default https://api.meta.ai)
+	MuseDisabled       bool   // true if MUSE_ENABLED=false explicitly opted out
+	CodexShowAvailable string // CODEX_SHOW_AVAILABLE: "usage" | "available", default "usage" (Codex-specific override)
+	CodexAutoStart5h   bool   // CODEX_AUTO_START_5H: auto-send a starter ping when the 5h window resets (Beta, default off)
+	CodexAutoStart7d   bool   // CODEX_AUTO_START_7D: auto-send a starter ping when the weekly window resets (Beta, default off)
+	DisplayMode        string // ONWATCH_DISPLAY_MODE: "usage" | "available", default "usage" (global, applies to all providers)
 
 	// Antigravity provider configuration (auto-detected from local process)
 	AntigravityBaseURL   string // ANTIGRAVITY_BASE_URL (for Docker)
@@ -238,6 +245,10 @@ var onwatchEnvKeys = []string{
 	"OLLAMA_API_KEY",
 	"OLLAMA_MONTHLY_LIMIT",
 	"OLLAMA_RESET_DAY",
+	"META_API_KEY",
+	"META_MUSE_MODEL",
+	"MUSE_ENABLED",
+	"MUSE_BASE_URL",
 	"ANTIGRAVITY_ENABLED",
 	"MINIMAX_API_KEY",
 	"OPENROUTER_API_KEY",
@@ -445,6 +456,18 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 		cfg.KimiEnabled = true
 	}
 	// File-based auto-detection (DetectKimiCredentials) happens later in main.go preflight
+
+	// Muse coding-plan provider (primary via `muse login` credentials; explicit key for Docker)
+	cfg.MuseAPIKey = strings.TrimSpace(os.Getenv("META_API_KEY"))
+	cfg.MuseModel = strings.TrimSpace(os.Getenv("META_MUSE_MODEL"))
+	cfg.MuseBaseURL = strings.TrimSpace(os.Getenv("MUSE_BASE_URL"))
+	if os.Getenv("MUSE_ENABLED") == "false" {
+		cfg.MuseEnabled = false
+		cfg.MuseDisabled = true
+	} else if os.Getenv("MUSE_ENABLED") == "true" || cfg.MuseAPIKey != "" {
+		cfg.MuseEnabled = true
+	}
+	// File-based auto-detection (DetectMuseCredentials) happens later in main.go preflight
 
 	// Custom API Integrations telemetry ingestion
 	cfg.APIIntegrationsDir = strings.TrimSpace(os.Getenv("ONWATCH_API_INTEGRATIONS_DIR"))
@@ -752,6 +775,9 @@ func (c *Config) AvailableProviders() []string {
 	if c.OllamaAPIKey != "" {
 		providers = append(providers, "ollama")
 	}
+	if c.MuseAPIKey != "" || c.MuseEnabled {
+		providers = append(providers, "muse")
+	}
 	return providers
 }
 
@@ -790,6 +816,12 @@ func (c *Config) HasProvider(name string) bool {
 		return c.OpenCodeGoWorkspaceID != "" && c.OpenCodeGoAuthCookie != ""
 	case "ollama":
 		return c.OllamaAPIKey != ""
+	case "muse":
+		// MuseEnabled is the only consent signal: it is set by an explicit
+		// META_API_KEY, MUSE_ENABLED=true, or the setup wizard. A key merely
+		// auto-detected from `muse login` must not start polling, because every
+		// Muse poll spends a prompt from the user's own 5h window.
+		return !c.MuseDisabled && c.MuseEnabled
 	}
 	return false
 }
@@ -843,6 +875,9 @@ func (c *Config) HasMultipleProviders() bool {
 		count++
 	}
 	if c.OllamaAPIKey != "" {
+		count++
+	}
+	if c.MuseAPIKey != "" || c.MuseEnabled {
 		count++
 	}
 	return count > 1
@@ -926,6 +961,16 @@ func (c *Config) String() string {
 	}
 	if c.OllamaResetDay > 0 {
 		fmt.Fprintf(&sb, "  OllamaResetDay: %d,\n", c.OllamaResetDay)
+	}
+	fmt.Fprintf(&sb, "  MuseAPIKey: %s,\n", redactAPIKey(c.MuseAPIKey, ""))
+	if c.MuseAutoToken {
+		fmt.Fprintf(&sb, "  MuseAutoToken: true,\n")
+	}
+	if c.MuseModel != "" {
+		fmt.Fprintf(&sb, "  MuseModel: %s,\n", c.MuseModel)
+	}
+	if c.MuseEnabled {
+		fmt.Fprintf(&sb, "  MuseEnabled: true,\n")
 	}
 	if c.KimiAutoToken {
 		fmt.Fprintf(&sb, "  KimiAutoToken: true,\n")
