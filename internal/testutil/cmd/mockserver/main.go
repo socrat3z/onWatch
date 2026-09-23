@@ -42,7 +42,7 @@ func main() {
 
 	srv := newStandaloneServer(*synKey, *zaiKey, *anthToken)
 
-	addr := fmt.Sprintf(":%d", *port)
+	addr := fmt.Sprintf("127.0.0.1:%d", *port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatalf("failed to listen on %s: %v", addr, err)

@@ -43,6 +43,9 @@ func TestAntigravityCommandHelpers(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("discover ports linux uses ss", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("linux-only port discovery")
+		}
 		dir := t.TempDir()
 		writeExecutable(t, dir, "ss", "#!/bin/sh\ncat <<'EOF'\nLISTEN 0 4096 127.0.0.1:4242 0.0.0.0:* users:((\"language_server\",pid=777,fd=9))\nEOF\n")
 		writeExecutable(t, dir, "netstat", "#!/bin/sh\nexit 1\n")
@@ -58,6 +61,9 @@ func TestAntigravityCommandHelpers(t *testing.T) {
 	})
 
 	t.Run("discover ports linux falls back to netstat", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("linux-only port discovery")
+		}
 		dir := t.TempDir()
 		writeExecutable(t, dir, "ss", "#!/bin/sh\ncat <<'EOF'\nLISTEN 0 4096 127.0.0.1:9999 0.0.0.0:* users:((\"other\",pid=1,fd=1))\nEOF\n")
 		writeExecutable(t, dir, "netstat", "#!/bin/sh\ncat <<'EOF'\ntcp        0      0 127.0.0.1:5151      0.0.0.0:*         LISTEN      777/language_server\nEOF\n")
@@ -112,7 +118,7 @@ func TestAntigravityCommandHelpers(t *testing.T) {
 		dir := t.TempDir()
 		script := "#!/bin/sh\ncase \"$*\" in\n  *\"Get-Process\"*)\n    printf '[{\"Id\":4321}]'\n    ;;\n  *\"ProcessId = 4321\"*)\n    printf 'C:/Users/test/antigravity/language_server.exe --csrf_token ps --extension_server_port 8558'\n    ;;\n  *)\n    exit 1\n    ;;\nesac\n"
 		if runtime.GOOS == "windows" {
-			script = "@echo off\r\nset \"args=%*\"\r\nif not \"%args:Get-Process=%\"==\"%args%\" (\r\n  echo [{\"Id\":4321}]\r\n  exit /b 0\r\n)\r\nif not \"%args:ProcessId = 4321=%\"==\"%args%\" (\r\n  echo C:/Users/test/antigravity/language_server.exe --csrf_token ps --extension_server_port 8558\r\n  exit /b 0\r\n)\r\nexit /b 1\r\n"
+			script = "@echo off\r\nif \"%~1\"==\"-NoProfile\" (\r\n  echo [{\"Id\":4321}]\r\n  exit /b 0\r\n)\r\necho C:/Users/test/antigravity/language_server.exe --csrf_token ps --extension_server_port 8558\r\nexit /b 0\r\n"
 		}
 		writeExecutable(t, dir, "powershell", script)
 		withPathDir(t, dir)

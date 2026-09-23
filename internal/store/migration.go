@@ -372,6 +372,13 @@ func (s *Store) recalculateAnthropicCycle(cycle *AnthropicResetCycle, quotaName 
 		"originalDuration", cycle.CycleEnd.Sub(cycle.CycleStart),
 	)
 
+	accountID := cycle.AccountID
+	if accountID <= 0 {
+		if id, err := s.defaultProviderAccountID("anthropic"); err == nil {
+			accountID = id
+		}
+	}
+
 	// Start transaction
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -406,8 +413,9 @@ func (s *Store) recalculateAnthropicCycle(cycle *AnthropicResetCycle, quotaName 
 		// Insert the new cycle
 		_, err := tx.Exec(`
 			INSERT INTO anthropic_reset_cycles
-			(quota_name, cycle_start, cycle_end, resets_at, peak_utilization, total_delta)
-			VALUES (?, ?, ?, ?, ?, ?)`,
+			(account_id, quota_name, cycle_start, cycle_end, resets_at, peak_utilization, total_delta)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			accountID,
 			quotaName,
 			prevBoundary.Format(time.RFC3339Nano),
 			boundary.Time.Format(time.RFC3339Nano),
@@ -443,8 +451,9 @@ func (s *Store) recalculateAnthropicCycle(cycle *AnthropicResetCycle, quotaName 
 
 		_, err := tx.Exec(`
 			INSERT INTO anthropic_reset_cycles
-			(quota_name, cycle_start, cycle_end, resets_at, peak_utilization, total_delta)
-			VALUES (?, ?, ?, ?, ?, ?)`,
+			(account_id, quota_name, cycle_start, cycle_end, resets_at, peak_utilization, total_delta)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			accountID,
 			quotaName,
 			prevBoundary.Format(time.RFC3339Nano),
 			cycle.CycleEnd.Format(time.RFC3339Nano),

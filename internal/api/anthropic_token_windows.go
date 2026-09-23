@@ -82,6 +82,9 @@ func WriteAnthropicCredentials(accessToken, refreshToken string, expiresIn int) 
 	}
 	data, err := os.ReadFile(credPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 

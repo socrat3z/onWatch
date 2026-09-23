@@ -75,7 +75,7 @@ func newAutostartHarness(t *testing.T) *autostartHarness {
 func isolateHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t, home)
 	prevPID := pidFile
 	pidFile = filepath.Join(home, "onwatch.pid")
 	t.Cleanup(func() { pidFile = prevPID })

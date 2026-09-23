@@ -171,8 +171,12 @@ func New(dbPath string) (*Store, error) {
 	// write lock at BEGIN instead of at the first write, so a transaction that
 	// reads before it writes can't be preempted mid-transaction into
 	// SQLITE_BUSY_SNAPSHOT, which busy_timeout does not retry.
-	dsn := dbPath +
-		"?_pragma=busy_timeout(5000)" +
+	sep := "?"
+	if strings.Contains(dbPath, "?") {
+		sep = "&"
+	}
+	dsn := dbPath + sep +
+		"_pragma=busy_timeout(5000)" +
 		"&_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(NORMAL)" +
 		"&_pragma=foreign_keys(ON)" +

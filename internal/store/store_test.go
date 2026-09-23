@@ -251,7 +251,7 @@ func TestStoreNew_SQLiteFileURI(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "uri-open.db")
-	dbURI := fmt.Sprintf("file:%s?cache=shared", dbPath)
+	dbURI := fmt.Sprintf("file:%s?cache=shared", filepath.ToSlash(dbPath))
 
 	s, err := New(dbURI)
 	if err != nil {

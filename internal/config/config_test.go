@@ -1,6 +1,7 @@
 package config
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1089,6 +1090,9 @@ func TestConfig_LogWriter_TestMode(t *testing.T) {
 	writer, err := cfg.LogWriter()
 	if err != nil {
 		t.Fatalf("LogWriter() failed: %v", err)
+	}
+	if closer, ok := writer.(io.Closer); ok {
+		defer closer.Close()
 	}
 	if writer == os.Stdout {
 		t.Error("TestMode background should not return os.Stdout")

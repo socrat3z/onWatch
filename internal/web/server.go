@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,7 +42,11 @@ func NewServer(port int, handler *Handler, logger *slog.Logger, username, passwo
 		port = 9211 // default port
 	}
 	if host == "" {
-		host = "0.0.0.0" // default bind address
+		if runtime.GOOS == "windows" {
+			host = "127.0.0.1"
+		} else {
+			host = "0.0.0.0" // default bind address
+		}
 	}
 
 	// Helper to prefix routes with base path

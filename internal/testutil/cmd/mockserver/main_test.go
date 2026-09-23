@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -193,6 +194,9 @@ func TestStandaloneServer_AdminEndpointsValidateMethodBodyAndProvider(t *testing
 }
 
 func TestMain_StartsAndShutsDownOnSignal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Interrupt signaling of subprocess is not supported on Windows")
+	}
 	if os.Getenv("ONWATCH_MOCKSERVER_MAIN_HELPER") == "1" {
 		os.Args = []string{"mockserver", "-port=0", "-syn-key=helper-syn", "-zai-key=helper-zai", "-anth-token=helper-anth"}
 		main()

@@ -110,7 +110,7 @@ func TestKimiCredentials_ExpiredSkew(t *testing.T) {
 
 func TestLoadKimiCredentialsCached_ReloadsWhenFileChanges(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t, home)
 	t.Setenv("KIMI_CODE_HOME", "")
 	t.Setenv("KIMI_CODE_CREDENTIALS", "")
 	t.Setenv("KIMI_CREDENTIALS", "")

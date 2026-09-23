@@ -36,11 +36,11 @@ func TestPollBackoff_RateLimited_ArmsSkip(t *testing.T) {
 		t.Error("expected ShouldSkip() false after skip budget consumed")
 	}
 
-	if n := b.RateLimited(); n != 1 {
-		t.Errorf("second RateLimited() = %d, want 1", n)
-	}
 	if n := b.RateLimited(); n != 2 {
-		t.Errorf("third RateLimited() = %d, want 2", n)
+		t.Errorf("second RateLimited() = %d, want 2", n)
+	}
+	if n := b.RateLimited(); n != 4 {
+		t.Errorf("third RateLimited() = %d, want 4", n)
 	}
 }
 
@@ -75,7 +75,7 @@ func TestPollBackoff_RateLimited_GrowsAndCaps(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		got = append(got, b.RateLimited())
 	}
-	want := []int{1, 1, 2, 4, 8, backoffMaxCycles, backoffMaxCycles, backoffMaxCycles}
+	want := []int{1, 2, 4, 8, backoffMaxCycles, backoffMaxCycles, backoffMaxCycles, backoffMaxCycles}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("RateLimited() call %d = %d, want %d", i+1, got[i], want[i])

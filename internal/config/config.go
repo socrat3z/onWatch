@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -530,7 +531,9 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 
 	// Host (bind address)
 	cfg.Host = envWithFallback("ONWATCH_HOST", "SYNTRACK_HOST")
-
+	if cfg.Host == "" && (cfg.TestMode || runtime.GOOS == "windows") {
+		cfg.Host = "127.0.0.1"
+	}
 	// Secure Cookies
 	if env := envWithFallback("ONWATCH_SECURE_COOKIES", "SYNTRACK_SECURE_COOKIES"); env != "" {
 		cfg.SecureCookies = strings.ToLower(env) == "true" || env == "1"

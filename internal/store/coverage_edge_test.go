@@ -54,8 +54,13 @@ func TestDroppedTable_QueryAnthropicRange_QuotaValuesError(t *testing.T) {
 	defer s.Close()
 
 	now := time.Now().UTC()
+	accountID, _ := s.defaultProviderAccountID("anthropic")
+	if accountID == 0 {
+		accountID = 1
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO anthropic_snapshots (captured_at, raw_json, quota_count) VALUES (?, '{}', 0)`,
+		`INSERT INTO anthropic_snapshots (account_id, captured_at, raw_json, quota_count) VALUES (?, ?, '{}', 0)`,
+		accountID,
 		now.Format(time.RFC3339Nano),
 	)
 	if err != nil {
@@ -172,8 +177,13 @@ func TestDroppedTable_QueryAntigravityRange_ModelValuesError(t *testing.T) {
 	defer s.Close()
 
 	now := time.Now().UTC()
+	accountID, _ := s.defaultProviderAccountID("antigravity")
+	if accountID == 0 {
+		accountID = 1
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO antigravity_snapshots (captured_at, model_count) VALUES (?, 0)`,
+		`INSERT INTO antigravity_snapshots (account_id, captured_at, model_count) VALUES (?, ?, 0)`,
+		accountID,
 		now.Format(time.RFC3339Nano),
 	)
 	if err != nil {

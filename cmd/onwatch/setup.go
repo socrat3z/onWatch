@@ -912,7 +912,11 @@ func promptYesNo(reader *bufio.Reader, prompt string, defaultYes bool) bool {
 		suffix = "(Y/n)"
 	}
 	fmt.Printf("  %s %s: ", prompt, suffix)
-	input := strings.ToLower(readLine(reader))
+	line, err := reader.ReadString('\n')
+	if err != nil && len(line) == 0 {
+		return false
+	}
+	input := strings.ToLower(strings.TrimSpace(line))
 	if input == "" {
 		return defaultYes
 	}
@@ -922,11 +926,15 @@ func promptYesNo(reader *bufio.Reader, prompt string, defaultYes bool) bool {
 func promptSecret(reader *bufio.Reader, prompt string) string {
 	for {
 		fmt.Printf("  %s: ", prompt)
-		val := readLine(reader)
+		line, err := reader.ReadString('\n')
+		val := strings.TrimSpace(line)
 		if val != "" {
 			masked := maskValue(val)
 			fmt.Printf("  %s ok %s  %s%s%s\n", colorGreen, colorReset, colorDim, masked, colorReset)
 			return val
+		}
+		if err != nil {
+			return ""
 		}
 		fmt.Printf("  %sCannot be empty%s\n", colorRed, colorReset)
 	}
@@ -939,10 +947,14 @@ func promptChoice(reader *bufio.Reader, prompt string, options []string) int {
 	}
 	for {
 		fmt.Printf("  %s>%s ", colorBold, colorReset)
-		input := readLine(reader)
-		n, err := strconv.Atoi(input)
-		if err == nil && n >= 1 && n <= len(options) {
+		line, err := reader.ReadString('\n')
+		val := strings.TrimSpace(line)
+		n, parseErr := strconv.Atoi(val)
+		if parseErr == nil && n >= 1 && n <= len(options) {
 			return n
+		}
+		if err != nil {
+			return 1
 		}
 		fmt.Printf("  %sPlease enter 1-%d%s\n", colorRed, len(options), colorReset)
 	}

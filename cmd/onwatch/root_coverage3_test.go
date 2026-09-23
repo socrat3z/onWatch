@@ -1765,8 +1765,14 @@ func TestRunSetup_ExistingEnvSomeProviders_AddsMore(t *testing.T) {
 		"n", // skip zai
 		"n", // skip anthropic
 		"n", // skip codex
+		"n", // skip opencode
 		"n", // skip antigravity
 		"n", // skip gemini
+		"n", // skip grok
+		"n", // skip ollama
+		"n", // skip muse
+		"n", // skip autostart
+		"n", // skip github star
 	}, "\n") + "\n"
 
 	withStdin(t, input, func() {
@@ -2024,6 +2030,9 @@ func TestDaemonize_ViaSubprocess(t *testing.T) {
 		"COPILOT_TOKEN=",
 		"CODEX_TOKEN=",
 		"HOME="+home,
+		"USERPROFILE="+home,
+		"LOCALAPPDATA="+filepath.Join(home, "AppData", "Local"),
+		"ONWATCH_HOST=127.0.0.1",
 		fmt.Sprintf("ONWATCH_PORT=%d", port),
 		"ONWATCH_DB_PATH="+dbPath,
 		"ONWATCH_ADMIN_PASS=testpass",
@@ -2049,10 +2058,14 @@ func TestDaemonize_ViaSubprocess(t *testing.T) {
 	// Kill any spawned daemon children
 	// PID file goes to $HOME/.onwatch/onwatch.pid (not dbDir)
 	pidPath := filepath.Join(home, ".onwatch", "onwatch.pid")
+	if runtime.GOOS == "windows" {
+		pidPath = filepath.Join(home, "AppData", "Local", "onwatch", "onwatch.pid")
+	}
 	if data, err := os.ReadFile(pidPath); err == nil {
 		if pid, err := strconv.Atoi(strings.Split(strings.TrimSpace(string(data)), ":")[0]); err == nil && pid > 0 {
 			if proc, err := os.FindProcess(pid); err == nil {
-				proc.Kill()
+				terminateProcess(proc)
+				_, _ = proc.Wait()
 			}
 		}
 	}
@@ -3642,8 +3655,8 @@ func TestRun_InProcessDaemonChild_ServerBindFails(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 
-	// Occupy a port on 0.0.0.0 so the server (which binds 0.0.0.0:port) fails
-	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	// Occupy a port on 127.0.0.1 so the server fails to bind
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -3705,8 +3718,8 @@ func TestRun_InProcessDaemonChild_AllProviders(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 
-	// Occupy a port on 0.0.0.0 so the server fails to bind
-	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	// Occupy a port on 127.0.0.1 so the server fails to bind
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}

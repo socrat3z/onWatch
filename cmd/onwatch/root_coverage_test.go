@@ -14,7 +14,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -34,16 +33,18 @@ func captureStdout(t *testing.T, fn func()) string {
 	defer r.Close()
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
+	outCh := make(chan []byte, 1)
+	go func() {
+		out, _ := io.ReadAll(r)
+		outCh <- out
+	}()
 
 	fn()
 
 	if err := w.Close(); err != nil {
 		t.Fatalf("close writer: %v", err)
 	}
-	out, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read stdout: %v", err)
-	}
+	out := <-outCh
 	return string(out)
 }
 
@@ -740,7 +741,8 @@ func TestDaemonize_SuccessAndLogOpenError(t *testing.T) {
 			}
 			if pid := parsePIDContent(string(data)); pid > 0 && pid != os.Getpid() {
 				if proc, err := os.FindProcess(pid); err == nil {
-					_ = proc.Signal(syscall.SIGTERM)
+					terminateProcess(proc)
+					_, _ = proc.Wait()
 				}
 			}
 		})

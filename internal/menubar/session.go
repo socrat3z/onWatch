@@ -55,7 +55,7 @@ func linuxSessionAvailable(getenv func(string) string, exists func(string) bool)
 		return true
 	}
 	if dir := strings.TrimSpace(getenv("XDG_RUNTIME_DIR")); dir != "" {
-		return exists(filepath.Join(dir, "bus"))
+		return exists(filepath.ToSlash(filepath.Join(dir, "bus")))
 	}
 	return false
 }

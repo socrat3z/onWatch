@@ -816,6 +816,11 @@ func listCodexProfiles() ([]CodexProfile, error) {
 		return nil, fmt.Errorf("could not determine home directory")
 	}
 
+	info, statErr := os.Stat(profilesDir)
+	if statErr == nil && !info.IsDir() {
+		return nil, fmt.Errorf("failed to read profiles directory: %s is not a directory", profilesDir)
+	}
+
 	entries, err := os.ReadDir(profilesDir)
 	if os.IsNotExist(err) {
 		return nil, nil

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -345,7 +346,7 @@ func TestWriteEnvFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat env file: %v", err)
 	}
-	if stat.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && stat.Mode().Perm() != 0o600 {
 		t.Fatalf("expected mode 0600, got %o", stat.Mode().Perm())
 	}
 }

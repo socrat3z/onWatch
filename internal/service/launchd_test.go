@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -57,7 +58,7 @@ func TestPlistPathUsesLaunchAgents(t *testing.T) {
 		t.Fatalf("PlistPath: %v", err)
 	}
 	want := "/Users/tester/Library/LaunchAgents/dev.onllm.onwatch.plist"
-	if got != want {
+	if filepath.ToSlash(got) != want {
 		t.Errorf("PlistPath = %q, want %q", got, want)
 	}
 }
@@ -339,6 +340,9 @@ func TestInstallCreatesDirectoriesLaunchdNeeds(t *testing.T) {
 // leave launchd retrying a binary that `brew upgrade` deletes, so the stable
 // symlink must be preserved.
 func TestResolveExeKeepsStableSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require SeCreateSymbolicLinkPrivilege on Windows")
+	}
 	dir := t.TempDir()
 	real := filepath.Join(dir, "Cellar", "onwatch", "1.2.3", "bin", "onwatch")
 	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {

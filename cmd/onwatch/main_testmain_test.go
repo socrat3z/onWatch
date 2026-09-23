@@ -18,6 +18,7 @@ import (
 // mutate the developer's real credentials or onWatch data.
 func TestMain(m *testing.M) {
 	api.SetTestMode(true)
+	os.Setenv("ONWATCH_HOST", "127.0.0.1")
 	cleanup, err := testenv.IsolateProcessUserEnvironment()
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "isolate test user environment: %v\n", err)
@@ -103,6 +104,7 @@ func isolateSpawnedDaemonChild() {
 	}
 	_ = os.MkdirAll(filepath.Join(dir, ".onwatch", "data"), 0o755)
 	os.Setenv("HOME", dir)
+	os.Setenv("ONWATCH_HOST", "127.0.0.1")
 	os.Setenv("ONWATCH_DB_PATH", filepath.Join(dir, "onwatch.db"))
 	if port, err := freePort(); err == nil {
 		os.Setenv("ONWATCH_PORT", fmt.Sprintf("%d", port))

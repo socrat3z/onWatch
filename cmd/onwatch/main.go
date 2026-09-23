@@ -720,6 +720,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if (testMode || runtime.GOOS == "windows") && (cfg.Host == "" || cfg.Host == "0.0.0.0") && os.Getenv("ONWATCH_HOST") == "" {
+		cfg.Host = "127.0.0.1"
+	}
 
 	// Resolve auth tokens before any banner output so displayed providers
 	// match the providers that will actually start.

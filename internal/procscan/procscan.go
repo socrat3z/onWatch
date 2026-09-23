@@ -60,7 +60,7 @@ func MatchContext(ctx context.Context, windowsImage string, match func(cmdline s
 		}
 		// tasklist always exits 0; findstr verifies a real match.
 		query := `tasklist /FI "IMAGENAME eq ` + windowsImage + `" /NH 2>nul | findstr /I "` + windowsImage + `"`
-		if exec.CommandContext(ctx, "cmd", "/C", query).Run() == nil {
+		if _, err := execCommandContext(ctx, "cmd", "/C", query); err == nil {
 			return windowsImage
 		}
 		return ""

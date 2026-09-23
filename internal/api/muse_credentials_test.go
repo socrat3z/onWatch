@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -47,6 +48,9 @@ func TestDetectMuseCredentialsFromAuthFile(t *testing.T) {
 }
 
 func TestMuseAuthFileRejectsPermissiveMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows ACLs are not represented in fs.FileMode")
+	}
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
 	if err := os.WriteFile(authPath, []byte(`{"providers":{"meta":{"api_key":"x"}}}`), 0o644); err != nil {

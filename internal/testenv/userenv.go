@@ -101,6 +101,7 @@ func isolatedUserEnvironment(home string) map[string]string {
 		"XDG_DATA_HOME":   dataHome,
 		"XDG_CACHE_HOME":  filepath.Join(home, ".cache"),
 		"XDG_STATE_HOME":  filepath.Join(home, ".local", "state"),
+		"ONWATCH_HOST":    "127.0.0.1",
 	}
 }
 

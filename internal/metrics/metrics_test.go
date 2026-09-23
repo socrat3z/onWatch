@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -91,6 +92,18 @@ func TestMetrics_ScrapeExportsUsedPercentagesAndNoMisleadingCounters(t *testing.
 		t.Fatalf("Gather: %v", err)
 	}
 
+	codexAcc, err := s.ResolveDefaultProviderAccount("codex")
+	if err != nil {
+		t.Fatalf("ResolveDefaultProviderAccount(codex): %v", err)
+	}
+	codexAccountID := strconv.FormatInt(codexAcc.ID, 10)
+
+	antiAcc, err := s.ResolveDefaultProviderAccount("antigravity")
+	if err != nil {
+		t.Fatalf("ResolveDefaultProviderAccount(antigravity): %v", err)
+	}
+	antiAccountID := strconv.FormatInt(antiAcc.ID, 10)
+
 	assertGaugeValue(t, families, "onwatch_quota_utilization_percent", map[string]string{
 		"provider":   "copilot",
 		"quota_type": "premium_interactions",
@@ -99,12 +112,12 @@ func TestMetrics_ScrapeExportsUsedPercentagesAndNoMisleadingCounters(t *testing.
 	assertGaugeValue(t, families, "onwatch_quota_utilization_percent", map[string]string{
 		"provider":   "codex",
 		"quota_type": "five_hour",
-		"account_id": "1",
+		"account_id": codexAccountID,
 	}, 35)
 	assertGaugeValue(t, families, "onwatch_quota_utilization_percent", map[string]string{
 		"provider":   "antigravity",
 		"quota_type": "model-a",
-		"account_id": "default",
+		"account_id": antiAccountID,
 	}, 60)
 	assertGaugeValue(t, families, "onwatch_quota_utilization_percent", map[string]string{
 		"provider":   "gemini",
@@ -126,7 +139,7 @@ func TestMetrics_ScrapeExportsUsedPercentagesAndNoMisleadingCounters(t *testing.
 	assertGaugeValue(t, families, "onwatch_quota_reset_timestamp_seconds", map[string]string{
 		"provider":   "antigravity",
 		"quota_type": "model-a",
-		"account_id": "default",
+		"account_id": antiAccountID,
 	}, float64(futureReset.Unix()))
 
 	// #6: a reset time in the past no longer emits a 0 series - the series is absent.

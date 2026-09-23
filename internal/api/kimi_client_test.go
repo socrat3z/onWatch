@@ -166,7 +166,7 @@ func kimiUsagesOK(w http.ResponseWriter, used string) {
 func setupKimiCodeCreds(t *testing.T, access, refresh string, expiresAt float64) string {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestUserHome(t, home)
 	t.Setenv("KIMI_CODE_HOME", "")
 	t.Setenv("KIMI_CODE_CREDENTIALS", "")
 	t.Setenv("KIMI_CREDENTIALS", "")

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -145,7 +146,7 @@ func TestRefreshCodexProfile_SameAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat profile: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("profile permissions = %o, want 600", info.Mode().Perm())
 	}
 }
