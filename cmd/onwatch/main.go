@@ -1212,17 +1212,7 @@ func run() error {
 	}
 
 	var anthropicAg *agent.AnthropicAgent
-	var anthropicMgr *agent.AnthropicAgentManager
-	if cfg.AnthropicAuthRoot != "" {
-		anthropicMgr = agent.NewAnthropicAgentManager(db, cfg.PollInterval, logger)
-		anthropicMgr.SetAuthRoot(cfg.AnthropicAuthRoot)
-		logger.Info("Anthropic named account discovery configured", "root", cfg.AnthropicAuthRoot)
-		if cfg.AnthropicToken != "" {
-			logger.Warn("ANTHROPIC_TOKEN is ignored while ANTHROPIC_AUTH_ROOT is set",
-				"reason", "each named account authenticates from its own <root>/<alias>/.claude/.credentials.json",
-				"root", cfg.AnthropicAuthRoot)
-		}
-	}
+	anthropicMgr := setupAnthropicAccountManager(cfg, db, logger)
 	if anthropicClient != nil {
 		// Load provider settings from DB (overrides .env)
 		if db != nil {
@@ -1405,18 +1395,7 @@ func run() error {
 	}
 
 	var antigravityAg *agent.AntigravityAgent
-	var antigravityMgr *agent.AntigravityAgentManager
-	if cfg.AntigravityAuthRoot != "" {
-		antigravityMgr = agent.NewAntigravityAgentManager(db, cfg.PollInterval, logger)
-		antigravityMgr.SetAuthRoot(cfg.AntigravityAuthRoot)
-		logger.Info("Antigravity named account discovery configured", "root", cfg.AntigravityAuthRoot)
-		if cfg.AntigravitySource != api.AntigravitySourceCLI {
-			logger.Warn("ANTIGRAVITY_SOURCE is ignored while ANTIGRAVITY_AUTH_ROOT is set",
-				"ignored_value", cfg.AntigravitySource,
-				"effective_source", api.AntigravitySourceCLI,
-				"reason", "the IDE probe cannot be scoped to one account home, so every named account polls through the agy CLI")
-		}
-	}
+	antigravityMgr := setupAntigravityAccountManager(cfg, db, logger)
 	if antigravityClient != nil {
 		antigravitySm := agent.NewSessionManager(db, "antigravity", idleTimeout, logger)
 		antigravityAg = agent.NewAntigravityAgent(antigravityClient, db, antigravityTr, cfg.PollInterval, logger, antigravitySm)
@@ -2694,27 +2673,3 @@ func initEncryptionSalt(db *store.Store, logger *slog.Logger) error {
 	return nil
 }
 
-// isAccountPollingEnabled mirrors the dashboard's provider visibility model for
-// dynamic account managers. A per-account setting always wins over the provider
-// toggle, so users can pause a work alias without losing its history.
-func isAccountPollingEnabled(db *store.Store, provider string, accountID int64) bool {
-	value, err := db.GetSetting("provider_visibility")
-	if err != nil || value == "" {
-		return true
-	}
-	var visibility map[string]interface{}
-	if json.Unmarshal([]byte(value), &visibility) != nil {
-		return true
-	}
-	if entry, ok := visibility[fmt.Sprintf("%s:%d", provider, accountID)].(map[string]interface{}); ok {
-		if enabled, exists := entry["polling"].(bool); exists {
-			return enabled
-		}
-	}
-	if entry, ok := visibility[provider].(map[string]interface{}); ok {
-		if enabled, exists := entry["polling"].(bool); exists {
-			return enabled
-		}
-	}
-	return true
-}
