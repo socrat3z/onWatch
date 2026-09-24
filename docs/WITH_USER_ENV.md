@@ -410,8 +410,10 @@ guarantee that `auth.json` is the only file present.
 
 ## Updating the pinned CLIs
 
-Codex and Claude Code are pinned by version **and** SHA-256 in
-`Dockerfile.with-user-env`. Change them together, in one reviewable commit.
+Antigravity is pinned by version and **SHA-512**; Codex and Claude Code are
+pinned by version and **SHA-256** in `Dockerfile.with-user-env`. Change a CLI's
+version, release locator, and both architecture checksums together in one
+reviewable commit.
 
 1. Pick the new version and record both architectures' checksums:
 
@@ -427,7 +429,16 @@ Codex and Claude Code are pinned by version **and** SHA-256 in
    done
    ```
 
-2. Update `CODEX_VERSION`, `CLAUDE_VERSION`, and all four `*_SHA256_*` build args.
+   Antigravity publishes the equivalent values in its platform manifests:
+
+   ```bash
+   curl -s https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json
+   curl -s https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_arm64.json
+   ```
+
+2. Update the applicable `*_VERSION`, release locator, and architecture checksum
+   build args. For Antigravity these are `AGY_VERSION`, `AGY_RELEASE_ID`, and the
+   two `AGY_SHA512_*` values.
 3. Build both architectures: `./scripts/test-with-user-env-image.sh --all-arch`.
 4. Read the upstream release notes for changes to authentication, subcommand names,
    or credential paths. **If a login command changed, update the allowlist in
@@ -441,6 +452,7 @@ Finding the current versions:
 ```bash
 curl -s https://registry.npmjs.org/@openai/codex/latest        | grep -o '"version":"[^"]*"'
 curl -s https://registry.npmjs.org/@anthropic-ai/claude-code/latest | grep -o '"version":"[^"]*"'
+curl -s https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json
 ```
 
 ---
@@ -573,10 +585,6 @@ service point at the same volume, and that the provider is enabled in `.env`
 
 ## Known limitations
 
-- **The Antigravity CLI cannot be pinned.** Its bootstrapper publishes no versioned
-  artifact and no checksum, so `agy` always installs the current build at image
-  build time. `AGY_CLI_DISABLE_AUTO_UPDATE=true` at least keeps it fixed for the
-  life of an image. Codex and Claude Code are fully pinned.
 - **The Debian base image is not pinned by digest.** Pinning it would freeze
   security updates unless the repository adopts a regular refresh process.
 - **Login TUI memory is unmeasured.** See

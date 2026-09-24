@@ -186,6 +186,8 @@ type AntigravityCLIRunner struct {
 	failures int
 	watchdog sync.Once
 	env      []string
+
+	csrfToken string // fork overlay: see antigravity_csrf_overlay.go
 }
 
 // NewAntigravityCLIRunner creates a runner. It does not launch agy until the
@@ -383,7 +385,7 @@ func (r *AntigravityCLIRunner) launch(binPath string) (*agySession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("antigravity cli: open pty: %w", err)
 	}
-	cmd := p.CommandContext(r.rootCtx, binPath)
+	cmd := p.CommandContext(r.rootCtx, binPath, r.agyCSRFArgs(binPath)...)
 	cmd.Env = append(r.env, "TERM=xterm-256color")
 	if err := cmd.Start(); err != nil {
 		_ = p.Close()
@@ -444,9 +446,11 @@ func (r *AntigravityCLIRunner) awaitReady(ctx context.Context, sess *agySession)
 		}
 		ports, err := r.client.discoverPorts(ctx, pid)
 		if err == nil && len(ports) > 0 {
-			if conn, _ := r.client.probeForConnectAPI(ctx, ports, ""); conn != nil {
-				if _, status, perr := r.post(ctx, conn.BaseURL, agyQuotaSummaryRPC); perr == nil && status == http.StatusOK {
+			if conn, _ := r.client.probeForConnectAPI(ctx, ports, r.csrfToken); conn != nil {
+				if body, status, perr := r.post(ctx, conn.BaseURL, agyQuotaSummaryRPC); perr == nil && status == http.StatusOK {
 					return conn, nil
+				} else if perr == nil && isAgyCSRFRejection(status, body) {
+					return nil, ErrAgyCSRFRejected
 				}
 			}
 		}
@@ -475,8 +479,8 @@ func (r *AntigravityCLIRunner) sessionHealthy(ctx context.Context) bool {
 	return err == nil && status == http.StatusOK
 }
 
-// post issues a Connect-RPC POST against the agy language server. No CSRF token
-// is required for the CLI's server.
+// post issues a Connect-RPC POST against the agy language server. agy >= 1.2.2
+// requires the session CSRF token (see antigravity_csrf_overlay.go).
 func (r *AntigravityCLIRunner) post(ctx context.Context, baseURL, rpcPath string) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+rpcPath, strings.NewReader(agyMetadataBody))
 	if err != nil {
@@ -484,6 +488,7 @@ func (r *AntigravityCLIRunner) post(ctx context.Context, baseURL, rpcPath string
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Connect-Protocol-Version", "1")
+	setAgyCSRFHeader(req, r.csrfToken)
 
 	resp, err := r.client.httpClient.Do(req)
 	if err != nil {
