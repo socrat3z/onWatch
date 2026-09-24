@@ -42,6 +42,11 @@ To eliminate divergence entropy, the repository must transition from **invasive 
       return err
   }
   ```
+- **Current HTTP boundary**: `internal/web/server.go` calls
+  `registerForkOverlayRoutes` once. All downstream routes are registered in
+  `internal/web/server_overlay.go`. Fork-only account response/session helpers
+  live in `internal/web/current_accounts_overlay.go` rather than the monolithic
+  upstream handler file.
 
 ### Principle 4: Decoupled Database Migrations (Isolated DDL Sequences)
 - **Do not interleave fork schema changes into upstream's linear `migrateSchema()` version numbers.**
@@ -49,6 +54,10 @@ To eliminate divergence entropy, the repository must transition from **invasive 
 - **Pattern**:
   1. Let upstream run its `migrateSchema(db)` untouched.
   2. Execute a secondary fork migration runner: `migrateForkOverlaySchema(db)` using either independent version tracking (`fork_schema_version`) or strictly idempotent `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE ... ADD COLUMN` statements with column existence checks.
+- **Current boundary**: `internal/store/store.go` contains only the post-upstream
+  invocation. Fork DDL, indexes, and data backfills live in
+  `internal/store/fork_schema_overlay.go`; its boundary test verifies that the
+  upstream runner does not apply fork columns and that the overlay is idempotent.
 
 ### Principle 5: Overlay Asset Architecture (CSS & JavaScript)
 - Monolithic frontend files (`app.js`, `style.css`, `dashboard.html`) are the highest-conflict files in web applications.
@@ -74,6 +83,9 @@ To eliminate divergence entropy, the repository must transition from **invasive 
     }
     ```
   - This allows upstream to freely refactor `AnthropicAgent` internals without breaking the outer manager.
+- **Current startup boundary**: `cmd/onwatch/main_overlay.go` coordinates all
+  fork account managers. The upstream startup path has one hook each for
+  construction, notifier wiring, and agent registration.
 
 ### Principle 7: Hermetic & Portable Testing
 - Tests added by the fork must respect the strict isolation rules:

@@ -352,7 +352,6 @@ func (s *Store) createTables() error {
 		-- Anthropic-specific tables
 		CREATE TABLE IF NOT EXISTS anthropic_snapshots (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			account_id INTEGER NOT NULL DEFAULT 0,
 			captured_at TEXT NOT NULL,
 			raw_json TEXT NOT NULL DEFAULT '',
 			quota_count INTEGER NOT NULL DEFAULT 0
@@ -369,7 +368,6 @@ func (s *Store) createTables() error {
 
 		CREATE TABLE IF NOT EXISTS anthropic_reset_cycles (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			account_id INTEGER NOT NULL DEFAULT 0,
 			quota_name TEXT NOT NULL,
 			cycle_start TEXT NOT NULL,
 			cycle_end TEXT,
@@ -497,7 +495,6 @@ func (s *Store) createTables() error {
 		-- Antigravity-specific tables
 		CREATE TABLE IF NOT EXISTS antigravity_snapshots (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			account_id INTEGER NOT NULL DEFAULT 0,
 			captured_at TEXT NOT NULL,
 			email TEXT,
 			plan_name TEXT,
@@ -522,7 +519,6 @@ func (s *Store) createTables() error {
 
 		CREATE TABLE IF NOT EXISTS antigravity_reset_cycles (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			account_id INTEGER NOT NULL DEFAULT 0,
 			model_id TEXT NOT NULL,
 			cycle_start TEXT NOT NULL,
 			cycle_end TEXT,
@@ -570,7 +566,7 @@ func (s *Store) createTables() error {
 		CREATE INDEX IF NOT EXISTS idx_antigravity_model_values_model_id ON antigravity_model_values(model_id);
 		CREATE INDEX IF NOT EXISTS idx_antigravity_model_values_model_snapshot ON antigravity_model_values(model_id, snapshot_id);
 		CREATE INDEX IF NOT EXISTS idx_antigravity_cycles_model_start ON antigravity_reset_cycles(model_id, cycle_start);
-		CREATE UNIQUE INDEX IF NOT EXISTS idx_antigravity_cycles_model_active_unique ON antigravity_reset_cycles(account_id, model_id) WHERE cycle_end IS NULL;
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_antigravity_cycles_model_active_unique ON antigravity_reset_cycles(model_id) WHERE cycle_end IS NULL;
 
 		-- MiniMax-specific tables
 		CREATE TABLE IF NOT EXISTS minimax_snapshots (
@@ -657,9 +653,6 @@ func (s *Store) createTables() error {
 			usage_monthly REAL NOT NULL DEFAULT 0,
 			credit_limit REAL,
 			limit_remaining REAL,
-			account_credits REAL,
-			account_usage REAL,
-			account_balance REAL,
 			is_free_tier INTEGER NOT NULL DEFAULT 0,
 			rate_limit_requests INTEGER NOT NULL DEFAULT 0,
 			rate_limit_interval TEXT NOT NULL DEFAULT ''
@@ -970,6 +963,9 @@ func (s *Store) createTables() error {
 	if err := s.migrateSchema(); err != nil {
 		return fmt.Errorf("failed to migrate schema: %w", err)
 	}
+	if err := s.migrateForkOverlaySchema(); err != nil {
+		return fmt.Errorf("failed to migrate fork overlay schema: %w", err)
+	}
 
 	return nil
 }
@@ -1163,11 +1159,6 @@ func (s *Store) migrateSchema() error {
 		}
 	}
 
-	// Fork overlay schema extensions (multi-account scoping, OpenRouter credits)
-	if err := s.migrateForkOverlaySchema(); err != nil {
-		return err
-	}
-
 	// Add account_id column to minimax_snapshots for multi-account support.
 	// Uses placeholder 0 initially, then backfills to the real provider_accounts.id.
 	if _, err := s.db.Exec(`
@@ -1257,7 +1248,6 @@ func (s *Store) migrateSchema() error {
 			}
 		}
 	}
-
 
 	// Drop raw_line column from api_integration_usage_events - no longer stored.
 	// Ignore "no such column" (new DB or already migrated) and "no such table"

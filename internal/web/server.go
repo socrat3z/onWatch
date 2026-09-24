@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,13 +40,7 @@ func NewServer(port int, handler *Handler, logger *slog.Logger, username, passwo
 	if port == 0 {
 		port = 9211 // default port
 	}
-	if host == "" {
-		if runtime.GOOS == "windows" {
-			host = "127.0.0.1"
-		} else {
-			host = "0.0.0.0" // default bind address
-		}
-	}
+	host = forkDefaultServerHost(host)
 
 	// Helper to prefix routes with base path
 	bp := basePath // e.g. "" or "/onwatch"
@@ -105,7 +98,7 @@ func NewServer(port int, handler *Handler, logger *slog.Logger, username, passwo
 	})
 	mux.HandleFunc(p("/api/minimax/accounts"), handler.MiniMaxAccounts)
 	mux.HandleFunc(p("/api/minimax/accounts/usage"), handler.MiniMaxAccountsUsage)
-	mux.HandleFunc(p("/api/accounts"), handler.ProviderAccounts)
+	registerForkOverlayRoutes(mux, p, handler)
 	mux.HandleFunc(p("/api/api-integrations/current"), handler.APIIntegrationsCurrent)
 	mux.HandleFunc(p("/api/api-integrations/history"), handler.APIIntegrationsHistory)
 	mux.HandleFunc(p("/api/api-integrations/health"), handler.APIIntegrationsHealth)

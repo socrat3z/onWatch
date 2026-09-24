@@ -1212,7 +1212,7 @@ func run() error {
 	}
 
 	var anthropicAg *agent.AnthropicAgent
-	anthropicMgr := setupAnthropicAccountManager(cfg, db, logger)
+	forkManagers := setupForkAccountManagers(cfg, db, logger)
 	if anthropicClient != nil {
 		// Load provider settings from DB (overrides .env)
 		if db != nil {
@@ -1395,7 +1395,6 @@ func run() error {
 	}
 
 	var antigravityAg *agent.AntigravityAgent
-	antigravityMgr := setupAntigravityAccountManager(cfg, db, logger)
 	if antigravityClient != nil {
 		antigravitySm := agent.NewSessionManager(db, "antigravity", idleTimeout, logger)
 		antigravityAg = agent.NewAntigravityAgent(antigravityClient, db, antigravityTr, cfg.PollInterval, logger, antigravitySm)
@@ -1519,10 +1518,7 @@ func run() error {
 	if anthropicAg != nil {
 		anthropicAg.SetNotifier(notifier)
 	}
-	if anthropicMgr != nil {
-		anthropicMgr.SetNotifier(notifier)
-		anthropicMgr.SetAccountPollingCheck(func(accountID int64) bool { return isAccountPollingEnabled(db, "anthropic", accountID) })
-	}
+	forkManagers.SetNotifier(notifier)
 	if copilotAg != nil {
 		copilotAg.SetNotifier(notifier)
 	}
@@ -1531,10 +1527,6 @@ func run() error {
 	}
 	if antigravityAg != nil {
 		antigravityAg.SetNotifier(notifier)
-	}
-	if antigravityMgr != nil {
-		antigravityMgr.SetNotifier(notifier)
-		antigravityMgr.SetAccountPollingCheck(func(accountID int64) bool { return isAccountPollingEnabled(db, "antigravity", accountID) })
 	}
 	if minimaxMgr != nil {
 		minimaxMgr.SetNotifier(notifier)
@@ -1882,9 +1874,6 @@ func run() error {
 	if anthropicAg != nil {
 		agentMgr.RegisterFactory("anthropic", func() (agent.AgentRunner, error) { return anthropicAg, nil })
 	}
-	if anthropicMgr != nil {
-		agentMgr.RegisterFactory("anthropic", func() (agent.AgentRunner, error) { return anthropicMgr, nil })
-	}
 	if copilotAg != nil {
 		agentMgr.RegisterFactory("copilot", func() (agent.AgentRunner, error) { return copilotAg, nil })
 	}
@@ -1894,9 +1883,7 @@ func run() error {
 	if antigravityAg != nil {
 		agentMgr.RegisterFactory("antigravity", func() (agent.AgentRunner, error) { return antigravityAg, nil })
 	}
-	if antigravityMgr != nil {
-		agentMgr.RegisterFactory("antigravity", func() (agent.AgentRunner, error) { return antigravityMgr, nil })
-	}
+	forkManagers.Register(agentMgr)
 	if minimaxMgr != nil {
 		agentMgr.RegisterFactory("minimax", func() (agent.AgentRunner, error) { return minimaxMgr, nil })
 	}
@@ -2672,4 +2659,3 @@ func initEncryptionSalt(db *store.Store, logger *slog.Logger) error {
 	logger.Info("Generated and stored new encryption salt")
 	return nil
 }
-

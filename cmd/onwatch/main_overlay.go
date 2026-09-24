@@ -8,8 +8,50 @@ import (
 	"github.com/onllm-dev/onwatch/v2/internal/agent"
 	"github.com/onllm-dev/onwatch/v2/internal/api"
 	"github.com/onllm-dev/onwatch/v2/internal/config"
+	"github.com/onllm-dev/onwatch/v2/internal/notify"
 	"github.com/onllm-dev/onwatch/v2/internal/store"
 )
+
+// forkAccountManagers owns the downstream multi-account lifecycle hooks. The
+// upstream startup path only needs to create, configure, and register this one
+// coordinator as new fork-managed providers are added.
+type forkAccountManagers struct {
+	db          *store.Store
+	anthropic   *agent.AnthropicAgentManager
+	antigravity *agent.AntigravityAgentManager
+}
+
+func setupForkAccountManagers(cfg *config.Config, db *store.Store, logger *slog.Logger) *forkAccountManagers {
+	return &forkAccountManagers{
+		db:          db,
+		anthropic:   setupAnthropicAccountManager(cfg, db, logger),
+		antigravity: setupAntigravityAccountManager(cfg, db, logger),
+	}
+}
+
+func (m *forkAccountManagers) SetNotifier(notifier *notify.NotificationEngine) {
+	if m.anthropic != nil {
+		m.anthropic.SetNotifier(notifier)
+		m.anthropic.SetAccountPollingCheck(func(accountID int64) bool {
+			return isAccountPollingEnabled(m.db, "anthropic", accountID)
+		})
+	}
+	if m.antigravity != nil {
+		m.antigravity.SetNotifier(notifier)
+		m.antigravity.SetAccountPollingCheck(func(accountID int64) bool {
+			return isAccountPollingEnabled(m.db, "antigravity", accountID)
+		})
+	}
+}
+
+func (m *forkAccountManagers) Register(manager *agent.AgentManager) {
+	if m.anthropic != nil {
+		manager.RegisterFactory("anthropic", func() (agent.AgentRunner, error) { return m.anthropic, nil })
+	}
+	if m.antigravity != nil {
+		manager.RegisterFactory("antigravity", func() (agent.AgentRunner, error) { return m.antigravity, nil })
+	}
+}
 
 // setupAnthropicAccountManager initializes multi-account management for Anthropic
 // when ANTHROPIC_AUTH_ROOT is configured.

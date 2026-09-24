@@ -23,9 +23,16 @@ Upstream supports at most one account per provider (single API key or single CLI
   - `internal/agent/antigravity_agent_manager.go`
   - `internal/agent/codex_agent_manager.go`
   - Instead of running a single global polling agent per provider, agent managers supervise an independent sub-agent per configured account, isolating rate limits, token rotations, and quota polling cycles.
+  - `cmd/onwatch/main_overlay.go` owns their downstream startup, notifier, and
+    registry integration behind three stable hooks in the upstream entrypoint.
 
 ### Database Schema Extensions
-- **File**: `internal/store/provider_account_helpers.go`, `internal/store/store.go`, `internal/store/migration.go`
+- **Files**:
+  - `internal/store/fork_schema_overlay.go`: Idempotent fork-only DDL, indexes,
+    and legacy account backfills, run after upstream migrations.
+  - `internal/store/provider_account_helpers.go`: Account lookup and mutation helpers.
+  - `internal/store/store.go`: One post-upstream migration hook only.
+  - `internal/store/migration.go`: Account-aware cycle recalculation.
 - **Table**: `provider_accounts`
   - `id INTEGER PRIMARY KEY AUTOINCREMENT`
   - `provider TEXT NOT NULL`
@@ -54,6 +61,10 @@ Upstream supports at most one account per provider (single API key or single CLI
   - Warning and collision detection between native and legacy profiles (`task-12`).
 
 ### Web UI & HTTP API
+- **Route overlay**: `internal/web/server_overlay.go` owns downstream route
+  registration through one hook in the upstream server constructor.
+- **Current-data overlay**: `internal/web/current_accounts_overlay.go` owns
+  account-scoped session fallback and Antigravity account response assembly.
 - **Endpoints**:
   - `GET /api/accounts?provider=<provider>`: List accounts for provider.
   - `POST /api/accounts/switch`: Switch active account.
