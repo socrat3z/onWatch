@@ -2,7 +2,6 @@
 package account
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,17 +14,9 @@ var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
 // Definition identifies credential state without ever carrying credential data.
 type Definition struct {
-	Provider   string
-	Name       string
-	AuthRoot   string
-	ExternalID string
-	Metadata   map[string]string
-}
-
-// Source reports account membership for one provider.
-type Source interface {
-	Provider() string
-	List(context.Context) ([]Definition, error)
+	Name     string
+	AuthRoot string
+	Metadata map[string]string
 }
 
 // ValidateName permits aliases that are safe as stable labels and path segments.

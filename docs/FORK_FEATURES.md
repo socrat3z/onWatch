@@ -12,8 +12,7 @@ Upstream supports at most one account per provider (single API key or single CLI
 - **Package**: `internal/account/`
   - `Account` struct: Represents a provider account (`ID`, `Provider`, `Name`, `AuthType`, `IsDefault`, `Status`, `Metadata`, timestamps).
   - `AccountStore` interface: Methods for listing, resolving defaults, switching, soft-deleting, and updating accounts.
-  - `SourceAccountDetector` interface: Automatically detects active accounts from local configurations (e.g., Anthropic config profiles, Antigravity/Windsurf profiles, Codex auth files).
-  - `anthropic_source.go`, `antigravity_source.go`: Provider-specific source detectors.
+  - `anthropic_source.go`, `antigravity_source.go`: Provider-specific detectors that list account directories without loading credentials into the account model.
 - **Dynamic Reconciler**: `internal/agent/account_reconcile.go`
   - Periodically reconciles detected system accounts with persistent store entries.
   - Detects newly added CLI profiles without requiring service restarts.

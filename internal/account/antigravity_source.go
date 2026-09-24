@@ -10,8 +10,6 @@ import (
 // keyring secrets during discovery.
 type AntigravitySource struct{ Root string }
 
-func (s AntigravitySource) Provider() string { return "antigravity" }
-
 func (s AntigravitySource) List(ctx context.Context) ([]Definition, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -22,7 +20,7 @@ func (s AntigravitySource) List(ctx context.Context) ([]Definition, error) {
 	}
 	definitions := make([]Definition, 0, len(names))
 	for _, name := range names {
-		definitions = append(definitions, Definition{Provider: s.Provider(), Name: name, AuthRoot: filepath.Join(s.Root, name), Metadata: map[string]string{"credentials": "unverified"}})
+		definitions = append(definitions, Definition{Name: name, AuthRoot: filepath.Join(s.Root, name), Metadata: map[string]string{"credentials": "unverified"}})
 	}
 	return definitions, nil
 }

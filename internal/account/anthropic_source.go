@@ -11,8 +11,6 @@ import (
 // unhealthy without accidentally deleting the user's historical telemetry.
 type AnthropicSource struct{ Root string }
 
-func (s AnthropicSource) Provider() string { return "anthropic" }
-
 func (s AnthropicSource) List(ctx context.Context) ([]Definition, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -38,7 +36,7 @@ func (s AnthropicSource) List(ctx context.Context) ([]Definition, error) {
 		if info, statErr := os.Lstat(path); statErr == nil && resolveErr == nil && pathWithin(resolvedRoot, resolved) && info.Mode()&os.ModeSymlink == 0 && !info.IsDir() {
 			state = "present"
 		}
-		definitions = append(definitions, Definition{Provider: s.Provider(), Name: name, AuthRoot: filepath.Join(s.Root, name), Metadata: map[string]string{"credentials": state}})
+		definitions = append(definitions, Definition{Name: name, AuthRoot: filepath.Join(s.Root, name), Metadata: map[string]string{"credentials": state}})
 	}
 	return definitions, nil
 }
