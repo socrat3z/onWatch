@@ -23,16 +23,25 @@ To eliminate divergence entropy, the repository must transition from **invasive 
 - Additive files (new files in existing directories or dedicated subpackages like `internal/account/`) merge with upstream with **0% conflict probability**. Git never conflicts on new files added solely in a fork.
 - Any new struct, handler, helper, or test should be placed in an additive file rather than appended to an existing upstream file.
 
+#### The Function Placement Invariant (What Belongs Where)
+To maintain a predictable codebase and avoid catastrophic merge conflicts:
+1. **Only NEW functions and overlay-specific types belong in new files**:
+   - Entirely new functions, new types, new HTTP handlers, and overlay registration hooks belong in `*_overlay.go`, `fork_overlay.js`, `fork_overlay.css`, or dedicated packages (`internal/account/`).
+2. **Existing upstream functions with additions MUST remain in their original main files**:
+   - If a function already existed in upstream and receives additions, extensions, or parameter adaptations for fork features, **it must remain in the upstream file**.
+   - **Anti-Pattern (PROHIBITED)**: Moving an existing upstream function into an `*_overlay.go` file to artificially minimize the diff of the upstream file. This destroys `git blame`, causes three-way merge conflicts (`delete/modify` collisions) on every future upstream pull, and scatters standard package behavior.
+   - **Proper Pattern**: Keep the upstream function in place. If the fork-specific logic within it is substantial, extract *only the new helper function* into an overlay file and invoke it from the original upstream function.
+
 ### Principle 2: Minimal-Touch Boundary (Single-Line Hooks)
-- When upstream execution flow must invoke fork functionality, the intrusion into the upstream file must be reduced to a **minimal hook point** (ideally 1 to 3 lines):
+- When upstream execution flow must invoke fork functionality, the intrusion into upstream structural files must be reduced to a **minimal hook point** (ideally 1 to 3 lines):
   ```go
   // GOOD: Single-line hook in upstream server.go
-  overlay.RegisterRoutes(mux, s.store, s.logger)
+  registerForkOverlayRoutes(mux, s.store, s.logger)
   ```
   ```go
   // BAD: 80 lines of custom route handlers and switch cases pasted directly into upstream handlers.go
   ```
-
+- Note: Minimal-touch boundaries apply to **structural integration points** (server route registration, startup hooks, schema runner dispatch). They do not mandate moving existing upstream business logic functions into overlay files.
 ### Principle 3: Pluggable Registries Over Monolithic Switches
 - Upstream dispatchers often use hardcoded `switch` statements (e.g., matching CLI commands, provider names, or HTTP routes).
 - Do not add new `case` branches directly inside upstream switches.
@@ -97,20 +106,21 @@ To eliminate divergence entropy, the repository must transition from **invasive 
 
 ## 3. The 10 Fork PR & Refactoring Evaluation Criteria
 
-When reviewing changes or designing new fork features, evaluate against these 10 criteria:
+When reviewing changes or designing new fork features, evaluate against these criteria:
 
 | # | Criterion | Target | Verification Check |
 |---|---|---|---|
-| **C1** | **Upstream Touchpoint Minimization** | $\le 5$ touched lines per upstream file | `git diff upstream/main --stat` shows minimal edits on existing files. |
-| **C2** | **Additive File Segregation** | $> 90\%$ of new code in dedicated files | Fork code lives in `*_overlay.go`, `*_ext.go`, or dedicated packages (`internal/account/`). |
-| **C3** | **Isolated Schema Migrations** | 0 interleaved versions in `migrateSchema` | Fork migrations execute in `migrateForkSchema` with idempotent guards. |
-| **C4** | **Decoupled Frontend Assets** | No monolithic script bloat | Custom UI logic and styling isolated in `fork_overlay.js` and `fork_overlay.css`. |
-| **C5** | **Pluggable Command/Route Registry** | Single delegate entry point | Subcommands and custom HTTP endpoints registered via delegate hooks. |
-| **C6** | **Non-Invasive Config Extension** | Clean separation of fork config | Fork configuration options grouped cleanly or parsed via overlay helpers. |
-| **C7** | **Hermetic Test Isolation** | Zero developer profile leakage | Tests pass on Linux, macOS, and Windows with `SetTestUserHome`. |
-| **C8** | **Zero Firewall Intrusiveness** | 100% loopback binding | All test listeners and mock servers bind explicitly to `127.0.0.1`. |
-| **C9** | **Documented Fork Delta** | 100% features documented | Every added capability described in `docs/FORK_FEATURES.md`. |
-| **C10**| **Automated Verification Gate** | Clean pass in $< 30\text{s}$ | `./app.sh --smoke` passes cleanly without timeouts or flakiness. |
+| **C1** | **Structural Touchpoint Minimization** | $\le 5$ touched lines per structural file | Structural files (`server.go`, `main.go`, `store.go`) contain only hook invocations. |
+| **C2** | **Upstream Function Integrity** | 100% upstream functions stay in place | Zero functions from `upstream/main` relocated to `*_overlay.go` files. |
+| **C3** | **Additive File Segregation** | $> 90\%$ of new code in dedicated files | Genuinely new code lives in `*_overlay.go`, `*_ext.go`, or dedicated packages (`internal/account/`). |
+| **C4** | **Isolated Schema Migrations** | 0 interleaved versions in `migrateSchema` | Fork migrations execute in `migrateForkSchema` with idempotent guards. |
+| **C5** | **Decoupled Frontend Assets** | No monolithic script/style bloat | Custom UI logic and styling isolated in `fork_overlay.js` and `fork_overlay.css`. |
+| **C6** | **Pluggable Command/Route Registry** | Single delegate entry point | Subcommands and custom HTTP endpoints registered via delegate hooks. |
+| **C7** | **Non-Invasive Config Extension** | Clean separation of fork config | Fork configuration options grouped cleanly or parsed via overlay helpers. |
+| **C8** | **Hermetic Test Isolation** | Zero developer profile leakage | Tests pass on Linux, macOS, and Windows with `SetTestUserHome`. |
+| **C9** | **Zero Firewall Intrusiveness** | 100% loopback binding | All test listeners and mock servers bind explicitly to `127.0.0.1`. |
+| **C10**| **Documented Fork Delta** | 100% features documented | Every added capability described in `docs/FORK_FEATURES.md`. |
+| **C11**| **Automated Verification Gate** | Clean pass in $< 35\text{s}$ | `./app.sh --smoke` passes cleanly without timeouts or flakiness. |
 
 ---
 
@@ -132,8 +142,10 @@ comm -12 <(git diff --name-only $(git merge-base HEAD upstream/main)..upstream/m
 # 4. Perform the merge
 git merge upstream/main
 
-# 5. Resolve conflicts using the Minimal Touch principle
-#    If an upstream file conflicted, ask: Can this fork logic be moved to an additive file?
+# 5. Resolve conflicts respecting the Function Placement Invariant
+#    - If a conflict occurs within an existing upstream function, resolve it directly in the upstream file.
+#    - NEVER delete or move an upstream function into an overlay file during conflict resolution.
+#    - If an upstream file conflicted on brand-new fork functions, move ONLY those new functions into an overlay file.
 
 # 6. Verify immediately with the smoke suite
 ./app.sh --smoke
@@ -148,8 +160,9 @@ git commit -m "chore(upstream): merge upstream/main into fork-overlay"
 
 To instantly distinguish upstream code from fork extensions:
 - **`internal/account/`**: Multi-account domain models, account detection, and storage.
-- **`*_overlay.go`**: Any extension to an upstream package that provides hook registration or facade wrappers.
+- **`*_overlay.go`**: Extensions to upstream packages that provide hook registration, new types, or new facade wrappers.
+  - **Strict Constraint**: Must contain **ONLY new functions and types**. Never move an existing upstream function here.
 - **`*_overlay_test.go`**: Unit tests verifying the overlay hook points without mocking upstream internals.
-- **`internal/web/static/fork_overlay.js`**: Frontend JavaScript enhancements.
+- **`internal/web/static/fork_overlay.js`**: Frontend JavaScript enhancements (DOM observers, account pickers, freshness banners).
 - **`internal/web/static/fork_overlay.css`**: Frontend CSS rules for fork UI elements.
 - **`docs/FORK_*.md`**: Fork architectural documentation and feature specifications.

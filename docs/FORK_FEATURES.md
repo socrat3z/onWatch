@@ -62,6 +62,8 @@ Upstream supports at most one account per provider (single API key or single CLI
 ### Web UI & HTTP API
 - **Route overlay**: `internal/web/server_overlay.go` owns downstream route
   registration through one hook in the upstream server constructor.
+- **Account handlers overlay**: `internal/web/accounts_overlay.go` owns multi-account
+  REST API endpoints and payload serialization.
 - **Current-data overlay**: `internal/web/current_accounts_overlay.go` owns
   account-scoped session fallback and Antigravity account response assembly.
 - **Endpoints**:
@@ -75,7 +77,6 @@ Upstream supports at most one account per provider (single API key or single CLI
   - In-app account rename modal dialog (`task-10`).
   - Account badges and indicators on homepage provider cards.
   - Account identity in notification deduplication and alert bodies (`task-11`).
-
 ---
 
 ## 2. Docker `with-user-env` Container Environment
@@ -169,11 +170,12 @@ When both `onwatch` daemon and the developer's interactive CLI (e.g. `claude`) r
 ## 8. Dashboard UI/UX Enhancements
 
 - **Files**:
-  - `internal/web/static/app.js`
-  - `internal/web/static/style.css`
+  - `internal/web/static/fork_overlay.js`: Additive UI logic for account picker dropdowns, rename modals, freshness age calculations, and masonry card layout.
+  - `internal/web/static/fork_overlay.css`: Additive styling for account badges, dialogs, cards, and freshness indicators.
+  - `internal/web/templates/layout.html`: Non-invasive asset linking for `fork_overlay.css` and `fork_overlay.js`.
+  - `internal/web/static/app.js`, `internal/web/static/style.css`: Minimal upstream integration points.
   - `internal/web/templates/dashboard.html`
   - `internal/web/freshness_test.go`
-- **Enhancements**:
   - **Freshness Banner**: Live indicator showing snapshot age and polling status on homepage.
   - **Limits Reset Countdowns**: Live ticking countdown timers to quota resets.
   - **Balanced Provider Cards**: Symmetrical card layout and graceful handling of empty/no-data states.
