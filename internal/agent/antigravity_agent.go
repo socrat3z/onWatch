@@ -79,6 +79,11 @@ func (a *AntigravityAgent) SetNotifier(n *notify.NotificationEngine) {
 func (a *AntigravityAgent) SetSourceCheck(fn func() string) {
 	a.sourceCheck = fn
 }
+
+// SetAccountContext isolates snapshots and managed CLI state for a named account.
+func (a *AntigravityAgent) SetAccountContext(accountID int64, accountName, accountHome string) {
+	a.accountID, a.accountName, a.accountHome = accountID, accountName, accountHome
+}
 // NewAntigravityAgent creates a new AntigravityAgent with the given dependencies.
 // For Docker environments, use WithAntigravityManualConfig to set connection details.
 func NewAntigravityAgent(

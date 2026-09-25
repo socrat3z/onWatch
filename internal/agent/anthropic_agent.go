@@ -22,6 +22,8 @@ type TokenRefreshFunc func() string
 
 // CredentialsRefreshFunc returns the full credentials for proactive OAuth refresh.
 type CredentialsRefreshFunc func() *api.AnthropicCredentials
+type CredentialsWriteFunc func(accessToken, refreshToken string, expiresIn int) error
+type CredentialsRotateFunc func(context.Context, string) (api.AnthropicRotation, error)
 
 // maxAuthFailures is the number of consecutive auth failures before pausing polling.
 const maxAuthFailures = 3
@@ -139,6 +141,13 @@ func (a *AnthropicAgent) SetPollingCheck(fn func() bool) {
 	a.pollingCheck = fn
 }
 
+// SetAccountContext assigns every stored snapshot and log entry to one
+// provider-account record. The ambient agent retains the zero/default value.
+func (a *AnthropicAgent) SetAccountContext(accountID int64, accountName string) {
+	a.accountID = accountID
+	a.accountName = accountName
+}
+
 // SetNotifier sets the notification engine for sending alerts.
 func (a *AnthropicAgent) SetNotifier(n *notify.NotificationEngine) {
 	a.notifier = n
@@ -184,6 +193,14 @@ func (a *AnthropicAgent) SetTokenRefresh(fn TokenRefreshFunc) {
 func (a *AnthropicAgent) SetCredentialsRefresh(fn CredentialsRefreshFunc) {
 	a.credsRefresh = fn
 }
+
+// SetCredentialsWriter persists OAuth rotation for this agent's exact account.
+func (a *AnthropicAgent) SetCredentialsWriter(fn CredentialsWriteFunc) { a.credsWrite = fn }
+
+// SetCredentialsRotator installs an account-scoped, cross-process-safe OAuth
+// transaction. The string argument is the access-token generation the caller
+// observed; the bool result reports that a newer stored generation was adopted.
+func (a *AnthropicAgent) SetCredentialsRotator(fn CredentialsRotateFunc) { a.credsRotate = fn }
 
 // EnableStatuslineBridge activates the statusline file bridge for zero-429
 // Anthropic monitoring. When enabled, the agent checks a shared file written

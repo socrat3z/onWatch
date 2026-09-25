@@ -127,6 +127,40 @@ func (s *Store) QueryLatestAnthropic(accountIDs ...int64) (*api.AnthropicSnapsho
 	return &snapshot, rows.Err()
 }
 
+// QueryAnthropicRangeForAccount returns only the chosen account's history.
+// It keeps the legacy method intact while the dashboard transitions to account IDs.
+func (s *Store) QueryAnthropicRangeForAccount(accountID int64, start, end time.Time, limit ...int) ([]*api.AnthropicSnapshot, error) {
+	accountID, err := s.scopedProviderAccountID("anthropic", []int64{accountID})
+	if err != nil {
+		return nil, err
+	}
+	return s.queryAnthropicRange(accountID, start, end, limit...)
+}
+
+func (s *Store) QueryAnthropicUtilizationSeriesForAccount(accountID int64, quotaName string, since time.Time) ([]UtilizationPoint, error) {
+	var err error
+	accountID, err = s.scopedProviderAccountID("anthropic", []int64{accountID})
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`SELECT s.captured_at, qv.utilization FROM anthropic_quota_values qv JOIN anthropic_snapshots s ON s.id = qv.snapshot_id WHERE s.account_id = ? AND qv.quota_name = ? AND s.captured_at >= ? ORDER BY s.captured_at ASC`, accountID, quotaName, since.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query account utilization series: %w", err)
+	}
+	defer rows.Close()
+	var points []UtilizationPoint
+	for rows.Next() {
+		var captured string
+		var point UtilizationPoint
+		if err := rows.Scan(&captured, &point.Utilization); err != nil {
+			return nil, err
+		}
+		point.CapturedAt, _ = time.Parse(time.RFC3339Nano, captured)
+		points = append(points, point)
+	}
+	return points, rows.Err()
+}
+
 // QueryAnthropicRange returns the provider default account's Anthropic snapshots
 // within a time range. It resolves an account rather than accepting the absence
 // of one: an exported query that can run with no account predicate is what let
@@ -372,6 +406,14 @@ func (s *Store) queryAnthropicCycleHistory(accountID int64, quotaName string, li
 
 	return cycles, rows.Err()
 }
+func (s *Store) QueryAnthropicCycleHistoryForAccount(accountID int64, quotaName string, limit ...int) ([]*AnthropicResetCycle, error) {
+	accountID, err := s.scopedProviderAccountID("anthropic", []int64{accountID})
+	if err != nil {
+		return nil, err
+	}
+	return s.queryAnthropicCycleHistory(accountID, quotaName, limit...)
+}
+
 // QueryAnthropicCyclesSince returns completed cycles for a quota since a given time.
 func (s *Store) QueryAnthropicCyclesSince(quotaName string, since time.Time) ([]*AnthropicResetCycle, error) {
 	rows, err := s.db.Query(

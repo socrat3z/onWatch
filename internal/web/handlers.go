@@ -138,6 +138,18 @@ type Handler struct {
 // DefaultCodexAccountID is the default account ID for single-account setups.
 const DefaultCodexAccountID int64 = 1
 
+// parseCodexAccountID extracts the account ID from query params, defaulting to 1.
+func parseCodexAccountID(r *http.Request) int64 {
+	accountStr := r.URL.Query().Get("account")
+	if accountStr == "" {
+		return DefaultCodexAccountID
+	}
+	accountID, err := strconv.ParseInt(accountStr, 10, 64)
+	if err != nil || accountID <= 0 {
+		return DefaultCodexAccountID
+	}
+	return accountID
+}
 
 // CodexProfile represents a saved Codex credential profile (mirrors agent.CodexProfile).
 type CodexProfile struct {
@@ -566,6 +578,49 @@ func (h *Handler) codexProfileRefresh(w http.ResponseWriter, r *http.Request) {
 		"accountID": creds.AccountID,
 	})
 }
+
+func (h *Handler) codexUsageAccounts() []map[string]interface{} {
+	if h.store == nil {
+		return []map[string]interface{}{}
+	}
+
+	// Only active (non-deleted) accounts are rendered.
+	usages := h.providerAccountUsages("codex", h.buildCodexCurrent, func() int64 { return DefaultCodexAccountID })
+	if usages == nil {
+		return []map[string]interface{}{}
+	}
+	return usages
+}
+
+func codexUsageAccountID(usage map[string]interface{}) int64 {
+	if usage == nil {
+		return DefaultCodexAccountID
+	}
+	switch v := usage["accountId"].(type) {
+	case int64:
+		if v > 0 {
+			return v
+		}
+	case int:
+		if v > 0 {
+			return int64(v)
+		}
+	case float64:
+		if v > 0 {
+			return int64(v)
+		}
+	}
+	return DefaultCodexAccountID
+}
+
+func codexUsageAccountName(usage map[string]interface{}) string {
+	if usage == nil {
+		return ""
+	}
+	name, _ := usage["accountName"].(string)
+	return name
+}
+
 
 func codexIsFreePlan(planType string) bool {
 	return strings.EqualFold(strings.TrimSpace(planType), "free")
@@ -1040,6 +1095,9 @@ func providerTelemetryEnabled(visibility map[string]interface{}, providerKey str
 	return true
 }
 
+func codexAccountTelemetryEnabled(visibility map[string]interface{}, accountID int64) bool {
+	return accountTelemetryEnabled(visibility, "codex", accountID)
+}
 
 type providerCatalogItem struct {
 	Key            string
