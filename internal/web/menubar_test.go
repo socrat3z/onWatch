@@ -975,3 +975,39 @@ func TestSecurityHeadersFrameDenyExemptsQuickViewOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateMenubarProviderHistory(t *testing.T) {
+	t.Parallel()
+	settings := menubar.DefaultSettings()
+	settings.VisibleProviders = []string{"anthropic", "codex:1"}
+	if !updateMenubarProviderHistory(settings, []string{"anthropic", "codex", "commandcode"}) {
+		t.Fatal("legacy history must be initialized")
+	}
+	if got := settings.VisibleProviders; len(got) != 3 || got[2] != "commandcode" {
+		t.Fatalf("visible = %v, want only Command Code appended", got)
+	}
+	if updateMenubarProviderHistory(settings, []string{"anthropic", "codex", "commandcode"}) {
+		t.Fatal("unchanged providers must not rewrite settings")
+	}
+	settings.VisibleProviders = []string{"anthropic", "codex:1"}
+	if updateMenubarProviderHistory(settings, []string{"anthropic", "codex", "commandcode"}) {
+		t.Fatal("hiding Command Code must remain hidden")
+	}
+	if got := settings.VisibleProviders; len(got) != 2 {
+		t.Fatalf("hidden provider was restored: %v", got)
+	}
+	if !updateMenubarProviderHistory(settings, []string{"anthropic", "codex", "commandcode", "grok"}) {
+		t.Fatal("newly configured Grok must be recorded")
+	}
+	if got := settings.VisibleProviders; len(got) != 3 || got[2] != "grok" {
+		t.Fatalf("visible = %v, want only Grok appended", got)
+	}
+
+	showAll := menubar.DefaultSettings()
+	if !updateMenubarProviderHistory(showAll, []string{"anthropic", "commandcode"}) {
+		t.Fatal("show-all settings still need provider history")
+	}
+	if len(showAll.VisibleProviders) != 0 {
+		t.Fatalf("show-all list changed: %v", showAll.VisibleProviders)
+	}
+}

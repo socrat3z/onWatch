@@ -70,9 +70,7 @@ func TestAntigravityManagerStartsRemovesAndRestoresAccounts(t *testing.T) {
 	}
 	first := accountByName(t, fx.store, "antigravity", "work")
 
-	if err := os.RemoveAll(filepath.Join(fx.root, "work")); err != nil {
-		t.Fatalf("remove home: %v", err)
-	}
+	removeAllWithRetry(t, filepath.Join(fx.root, "work"))
 	fx.manager.Reload()
 
 	fx.manager.mu.Lock()

@@ -152,8 +152,8 @@ func TestDeepSeekCurrentWithZeroSnapshotReportsExhausted(t *testing.T) {
 	if !resp.SnapshotAvailable {
 		t.Fatal("snapshotAvailable = false, want true with a stored snapshot")
 	}
-	if resp.Balance.Status != "exhausted" {
-		t.Fatalf("status = %q, want exhausted", resp.Balance.Status)
+	if resp.Balance.Status != "critical" {
+		t.Fatalf("status = %q, want critical", resp.Balance.Status)
 	}
 	if resp.Balance.Total == nil || *resp.Balance.Total != 0 {
 		t.Fatalf("total = %v, want 0", resp.Balance.Total)

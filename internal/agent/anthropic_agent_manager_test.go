@@ -102,9 +102,7 @@ func TestAnthropicManagerSoftDeletesAccountThatNeverStarted(t *testing.T) {
 		t.Fatalf("credential-less account must not start an agent, got %d running", running)
 	}
 
-	if err := os.RemoveAll(filepath.Join(fx.root, "work")); err != nil {
-		t.Fatalf("remove home: %v", err)
-	}
+	removeAllWithRetry(t, filepath.Join(fx.root, "work"))
 	fx.manager.Reload()
 
 	if acc := accountByName(t, fx.store, "anthropic", "work"); acc.DeletedAt == nil {
@@ -125,9 +123,7 @@ func TestAnthropicManagerSoftDeletesRunningAccountOnRemoval(t *testing.T) {
 		t.Fatal("an account with readable credentials must start an agent")
 	}
 
-	if err := os.RemoveAll(filepath.Join(fx.root, "work")); err != nil {
-		t.Fatalf("remove home: %v", err)
-	}
+	removeAllWithRetry(t, filepath.Join(fx.root, "work"))
 	fx.manager.Reload()
 
 	fx.manager.mu.Lock()
@@ -148,9 +144,7 @@ func TestAnthropicManagerRestoresAccountWhenDirectoryReappears(t *testing.T) {
 	fx.manager.Reload()
 	first := accountByName(t, fx.store, "anthropic", "work")
 
-	if err := os.RemoveAll(filepath.Join(fx.root, "work")); err != nil {
-		t.Fatalf("remove home: %v", err)
-	}
+	removeAllWithRetry(t, filepath.Join(fx.root, "work"))
 	fx.manager.Reload()
 	if acc := accountByName(t, fx.store, "anthropic", "work"); acc.DeletedAt == nil {
 		t.Fatal("expected soft delete before restore")
@@ -279,4 +273,17 @@ func TestAnthropicManagerSettersAreSafeDuringReload(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func removeAllWithRetry(t *testing.T, path string) {
+	t.Helper()
+	var err error
+	for range 30 {
+		err = os.RemoveAll(path)
+		if err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("remove %s: %v", path, err)
 }

@@ -28,7 +28,7 @@ func TestForkAccountManagersRegisterThroughOneCoordinator(t *testing.T) {
 	registry := agent.NewAgentManager(slog.Default())
 	managers.Register(registry)
 
-	want := []string{"antigravity", "anthropic"}
+	want := []string{"anthropic", "antigravity"}
 	if got := registry.RegisteredProviders(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("registered providers = %v, want %v", got, want)
 	}

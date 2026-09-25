@@ -159,7 +159,7 @@ func (h *Handler) MenubarTest(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) MenubarPreferences(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		settings, err := h.menubarSettings()
+		settings, err := h.reconcileMenubarSettings()
 		if err != nil {
 			h.logger.Error("failed to load menubar preferences", "error", err)
 			respondError(w, http.StatusInternalServerError, "failed to load menubar preferences")
@@ -189,7 +189,7 @@ func (h *Handler) MenubarPreferences(w http.ResponseWriter, r *http.Request) {
 		}
 		normalized := settings.Normalize()
 		normalized.DefaultView = normalizeMenubarView(string(normalized.DefaultView), menubar.ViewStandard)
-		if err := h.store.SetMenubarSettings(normalized); err != nil {
+		if err := h.saveMenubarSettings(normalized); err != nil {
 			h.logger.Error("failed to save menubar preferences", "error", err)
 			respondError(w, http.StatusInternalServerError, "failed to save menubar preferences")
 			return
@@ -237,7 +237,7 @@ func isLocalMenubarPublicPath(path string) bool {
 
 // BuildMenubarSnapshot constructs the shared menubar UI contract.
 func (h *Handler) BuildMenubarSnapshot() (*menubar.Snapshot, error) {
-	settings, err := h.menubarSettings()
+	settings, err := h.reconcileMenubarSettings()
 	if err != nil {
 		return nil, err
 	}
@@ -432,6 +432,15 @@ func (h *Handler) buildMenubarProviders(settings *menubar.Settings, includeHidde
 			}
 		}
 	}
+	if h.config != nil && h.config.HasProvider("commandcode") && h.providerDashboardVisible("commandcode", visibility) {
+		payload := h.buildCommandCodeCurrent()
+		if card := normalizeProviderCard("commandcode", resolveProviderTabLabel("commandcode", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
+			providers = append(providers, *card)
+			if captured := parseCapturedAt(payload); captured.After(latest) {
+				latest = captured
+			}
+		}
+	}
 	if h.config != nil && h.config.HasProvider("cursor") && h.providerDashboardVisible("cursor", visibility) {
 		payload := h.buildCursorCurrent()
 		if card := normalizeProviderCard("cursor", resolveProviderTabLabel("cursor", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
@@ -447,6 +456,74 @@ func (h *Handler) buildMenubarProviders(settings *menubar.Settings, includeHidde
 		providers = filterMenubarProviders(providers, normalized.VisibleProviders)
 	}
 	return providers, latest
+}
+
+// updateMenubarProviderHistory changes one settings value so provider history
+// and automatic visibility are saved together. A nil history marks settings
+// written before provider discovery was tracked.
+func updateMenubarProviderHistory(settings *menubar.Settings, configured []string) bool {
+	changed := settings.KnownProviders == nil
+	if settings.KnownProviders == nil {
+		settings.KnownProviders = []string{}
+		for _, provider := range configured {
+			if provider != "commandcode" {
+				settings.KnownProviders = append(settings.KnownProviders, provider)
+			}
+		}
+	}
+	for _, provider := range configured {
+		if menubarSettingsKeyAllows(provider, settings.KnownProviders) {
+			continue
+		}
+		settings.KnownProviders = append(settings.KnownProviders, provider)
+		if len(settings.VisibleProviders) > 0 && !menubarSettingsKeyAllows(provider, settings.VisibleProviders) {
+			settings.VisibleProviders = append(settings.VisibleProviders, provider)
+		}
+		changed = true
+	}
+	return changed
+}
+
+func (h *Handler) configuredMenubarProviders() []string {
+	if h.config == nil {
+		return nil
+	}
+	configured := make([]string, 0, len(providerCatalog()))
+	for _, provider := range providerCatalog() {
+		if h.config.HasProvider(provider.Key) {
+			configured = append(configured, provider.Key)
+		}
+	}
+	return configured
+}
+
+func (h *Handler) reconcileMenubarSettings() (*menubar.Settings, error) {
+	h.menubarSettingsMu.Lock()
+	defer h.menubarSettingsMu.Unlock()
+	settings, err := h.menubarSettings()
+	if err != nil || h.store == nil {
+		return settings, err
+	}
+	if updateMenubarProviderHistory(settings, h.configuredMenubarProviders()) {
+		if err := h.store.SetMenubarSettings(settings); err != nil {
+			return nil, err
+		}
+	}
+	return settings, nil
+}
+
+// saveMenubarSettings keeps discovery history when either settings API writes
+// a client supplied settings object. The submitted visibility is explicit.
+func (h *Handler) saveMenubarSettings(settings *menubar.Settings) error {
+	h.menubarSettingsMu.Lock()
+	defer h.menubarSettingsMu.Unlock()
+	current, err := h.menubarSettings()
+	if err != nil {
+		return err
+	}
+	updateMenubarProviderHistory(current, h.configuredMenubarProviders())
+	settings.KnownProviders = append([]string{}, current.KnownProviders...)
+	return h.store.SetMenubarSettings(settings)
 }
 
 // menubarAccountLabel builds multi-account menubar titles using the dashboard
@@ -500,7 +577,7 @@ func (h *Handler) renderMenubarHTML(view menubar.ViewType, settings *menubar.Set
 func (h *Handler) buildMenubarProviderOptions(settings *menubar.Settings) ([]menubarProviderOption, error) {
 	normalized := settings.Normalize()
 	providers, _ := h.buildMenubarProviders(normalized, true)
-	visibleKeys := append([]string(nil), normalized.VisibleProviders...)
+	visibleKeys := normalized.VisibleProviders
 	options := make([]menubarProviderOption, 0, len(providers))
 	for _, provider := range providers {
 		quotaOptions := make([]menubarQuotaOption, 0, len(provider.Quotas))
