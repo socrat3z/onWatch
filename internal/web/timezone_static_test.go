@@ -11,6 +11,10 @@ func readStaticAppJS(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("read static/app.js: %v", err)
 	}
+	overlay, err := staticFS.ReadFile("static/fork_overlay.js")
+	if err == nil {
+		return string(data) + "\n" + string(overlay)
+	}
 	return string(data)
 }
 

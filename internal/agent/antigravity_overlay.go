@@ -29,3 +29,8 @@ func accountCLIEnv(accountHome, accountName string, logger *slog.Logger) map[str
 	env["XDG_RUNTIME_DIR"] = runtimeDir
 	return env
 }
+
+// SetAccountContext isolates snapshots and managed CLI state for a named account.
+func (a *AntigravityAgent) SetAccountContext(accountID int64, accountName, accountHome string) {
+	a.accountID, a.accountName, a.accountHome = accountID, accountName, accountHome
+}

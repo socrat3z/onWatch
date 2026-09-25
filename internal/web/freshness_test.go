@@ -107,9 +107,9 @@ func TestAppJSRendersProviderFreshness(t *testing.T) {
 func TestStyleCSSStylesFreshnessStates(t *testing.T) {
 	t.Parallel()
 
-	data, err := staticFS.ReadFile("static/style.css")
+	data, err := staticFS.ReadFile("static/fork_overlay.css")
 	if err != nil {
-		t.Fatalf("read static/style.css: %v", err)
+		t.Fatalf("read static/fork_overlay.css: %v", err)
 	}
 	css := string(data)
 	for _, required := range []string{

@@ -275,17 +275,6 @@ func (s *Store) queryAntigravityRange(accountID int64, start, end time.Time, lim
 	return snapshots, nil
 }
 
-// QueryAntigravityRangeForAccount filters history to one account. Model values
-// continue to join through their parent snapshot, so no quota data can cross
-// an account boundary.
-func (s *Store) QueryAntigravityRangeForAccount(accountID int64, start, end time.Time, limit ...int) ([]*api.AntigravitySnapshot, error) {
-	accountID, err := s.scopedProviderAccountID("antigravity", []int64{accountID})
-	if err != nil {
-		return nil, err
-	}
-	return s.queryAntigravityRange(accountID, start, end, limit...)
-}
-
 // CreateAntigravityCycle creates a new Antigravity reset cycle.
 func (s *Store) CreateAntigravityCycle(modelID string, cycleStart time.Time, resetTime *time.Time, accountIDs ...int64) (int64, error) {
 	accountID, err := s.scopedProviderAccountID("antigravity", accountIDs)
@@ -442,15 +431,6 @@ func (s *Store) queryAntigravityCycleHistory(accountID int64, modelID string, li
 
 	return cycles, rows.Err()
 }
-
-func (s *Store) QueryAntigravityCycleHistoryForAccount(accountID int64, modelID string, limit ...int) ([]*AntigravityResetCycle, error) {
-	accountID, err := s.scopedProviderAccountID("antigravity", []int64{accountID})
-	if err != nil {
-		return nil, err
-	}
-	return s.queryAntigravityCycleHistory(accountID, modelID, limit...)
-}
-
 // QueryAntigravityUsageSeries returns per-model usage points since a given time.
 func (s *Store) QueryAntigravityUsageSeries(modelID string, since time.Time) ([]AntigravityUsagePoint, error) {
 	rows, err := s.db.Query(
