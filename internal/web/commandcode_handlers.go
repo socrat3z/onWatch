@@ -188,6 +188,7 @@ func (h *Handler) buildCommandCodeCurrent() map[string]interface{} {
 	}
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 	if latest.AccountName != "" {
 		response["accountName"] = latest.AccountName
 	}

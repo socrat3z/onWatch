@@ -191,6 +191,7 @@ func (h *Handler) buildOllamaCurrent() map[string]interface{} {
 	}
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 	response["plan"] = latest.Plan
 	response["accountName"] = latest.AccountName
 	response["monthlyUsedUsd"] = latest.MonthlyUsedUSD

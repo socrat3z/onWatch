@@ -212,6 +212,7 @@ func (h *Handler) buildMuseCurrent() map[string]interface{} {
 	}
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
+	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 	if tier := api.MuseDisplayTier(latest.Tier); tier != "" {
 		response["tier"] = tier
 	}

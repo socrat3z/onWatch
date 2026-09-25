@@ -3321,8 +3321,9 @@ function formatCurrencyUSD(num) {
 }
 
 function parseDateValue(value) {
+  if (!value) return null;
   const d = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(d.getTime()) ? null : d;
+  return (Number.isNaN(d.getTime()) || d.getTime() <= 0) ? null : d;
 }
 
 function formatDateTime(isoString) {
@@ -6890,6 +6891,53 @@ function normalizeBothQuotas(provider, payload) {
       })
       .filter(Boolean);
   }
+  if (provider === 'commandcode' && Array.isArray(payload.quotas)) {
+    return payload.quotas.map((quota) => {
+      const isAvailable = quota.cardLabel === 'Remaining';
+      const name = quota.name || 'monthly';
+      const used = Number(quota.used) || 0;
+      const limit = Number(quota.limit) || 0;
+      const percent = quota.cardPercent != null
+        ? quota.cardPercent
+        : (quota.utilization != null ? quota.utilization : 0);
+
+      let formattedValue = '';
+      if (name === 'monthly') {
+        if (isAvailable) {
+          formattedValue = quota.remaining != null
+            ? `${commandCodeUsd(quota.remaining)} remaining`
+            : `${percent.toFixed(1)}%`;
+        } else if (quota.limitUnknown || limit <= 0) {
+          formattedValue = `${commandCodeUsd(quota.remaining != null ? quota.remaining : used)} remaining`;
+        } else {
+          formattedValue = `${commandCodeUsd(used)} / ${commandCodeUsd(limit)}`;
+        }
+      } else {
+        const credits = (v) => (Number(v) || 0).toFixed(2);
+        if (isAvailable) {
+          const rem = quota.remaining != null ? quota.remaining : Math.max(0, limit - used);
+          formattedValue = limit > 0 ? `${credits(rem)} / ${credits(limit)} cr` : `${credits(rem)} cr`;
+        } else if (limit <= 0) {
+          formattedValue = `${credits(used)} credits`;
+        } else {
+          formattedValue = `${credits(used)} / ${credits(limit)} cr`;
+        }
+      }
+
+      return {
+        ...quota,
+        cardPercent: percent,
+        formattedValue,
+        used: isAvailable ? Math.max(0, limit - used) : used,
+        total: limit,
+        displayName: quota.displayName || commandCodeDisplayNames[name] || name,
+        cardLabel: quota.cardLabel || (limit > 0 ? (isAvailable ? 'Remaining' : 'Utilization') : 'Remaining'),
+        status: quota.status || 'healthy',
+        timeUntilResetSeconds: quota.timeUntilResetSeconds || 0,
+        resetsAt: quota.resetsAt || quota.renewsAt || quota.resets_at || quota.resetAt || '',
+      };
+    });
+  }
 
   if (!Array.isArray(payload.quotas)) return [];
   const rawQuotas = provider === 'codex'
@@ -7972,9 +8020,13 @@ function renderHomepageMetricsHTML(quotas) {
 
     const percent = Math.max(0, Math.min(100, Number(quota.cardPercent ?? 0)));
     const hasCounts = Number.isFinite(Number(quota.used)) && Number.isFinite(Number(quota.total)) && Number(quota.total) > 0;
-    const value = hasCounts
-      ? `${formatNumber(Number(quota.used))} / ${formatNumber(Number(quota.total))}`
-      : `${percent.toFixed(1)}%`;
+    const value = quota.formattedValue
+      ? quota.formattedValue
+      : (hasCounts
+        ? (quota.cardLabel === 'Remaining'
+          ? `${formatNumber(Math.max(0, Number(quota.total) - Number(quota.used)))} / ${formatNumber(Number(quota.total))}`
+          : `${formatNumber(Number(quota.used))} / ${formatNumber(Number(quota.total))}`)
+        : `${percent.toFixed(1)}%`);
     return `<div class="homepage-harness-metric" data-status="${escapeHTML(status)}">
       <div class="homepage-harness-metric-top">
         <span class="homepage-harness-label">${escapeHTML(label)}</span>
