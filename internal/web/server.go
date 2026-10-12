@@ -196,7 +196,7 @@ func contentTypeHandler(next http.Handler) http.Handler {
 				w.Header().Set("Content-Type", "image/svg+xml")
 			}
 		}
-		if strings.HasSuffix(r.URL.Path, "app.js") {
+		if strings.HasSuffix(r.URL.Path, "app.js") || strings.Contains(r.URL.Path, "/fork_overlay.") {
 			// app.js must revalidate so frontend behavior updates are visible immediately.
 			w.Header().Set("Cache-Control", "no-cache")
 		} else {
