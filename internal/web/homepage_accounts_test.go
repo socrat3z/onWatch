@@ -16,45 +16,6 @@ import (
 func TestCurrentBothListsEveryAccountPerProvider(t *testing.T) {
 	t.Parallel()
 
-	t.Run("anthropic", func(t *testing.T) {
-		s, _ := store.New(":memory:")
-		defer s.Close()
-		def, err := s.ResolveDefaultProviderAccount("anthropic")
-		if err != nil {
-			t.Fatal(err)
-		}
-		other, err := s.CreateOrRestoreProviderAccount("anthropic", "personal")
-		if err != nil {
-			t.Fatal(err)
-		}
-		now := time.Now().UTC()
-		for _, snap := range []*api.AnthropicSnapshot{
-			{AccountID: def.ID, CapturedAt: now.Add(-time.Minute), Quotas: []api.AnthropicQuota{{Name: "five_hour", Utilization: 11}}},
-			{AccountID: other.ID, CapturedAt: now, Quotas: []api.AnthropicQuota{{Name: "five_hour", Utilization: 88}}},
-		} {
-			if _, err := s.InsertAnthropicSnapshot(snap); err != nil {
-				t.Fatal(err)
-			}
-		}
-		h := NewHandler(s, nil, nil, nil, multiProviderTestConfig())
-
-		response := currentResponse(t, h, "/api/current?provider=both")
-		if _, ok := response["anthropic"]; ok {
-			t.Fatal("multi-account Anthropic must not also report an unattributed default payload")
-		}
-		accounts := accountPayloads(t, response, "anthropicAccounts")
-		if len(accounts) != 2 {
-			t.Fatalf("anthropicAccounts = %d entries, want 2", len(accounts))
-		}
-		byName := map[string]float64{}
-		for _, account := range accounts {
-			byName[account["accountName"].(string)] = firstQuotaUtilizationOf(t, account)
-		}
-		if byName["default"] != 11 || byName["personal"] != 88 {
-			t.Fatalf("per-account utilization = %v, want default 11 and personal 88", byName)
-		}
-	})
-
 	t.Run("antigravity", func(t *testing.T) {
 		s, _ := store.New(":memory:")
 		defer s.Close()
@@ -101,25 +62,25 @@ func TestCurrentBothKeepsFlatPayloadForOneAccount(t *testing.T) {
 
 	s, _ := store.New(":memory:")
 	defer s.Close()
-	def, err := s.ResolveDefaultProviderAccount("anthropic")
+	def, err := s.ResolveDefaultProviderAccount("antigravity")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.InsertAnthropicSnapshot(&api.AnthropicSnapshot{
+	if _, err := s.InsertAntigravitySnapshot(&api.AntigravitySnapshot{
 		AccountID:  def.ID,
 		CapturedAt: time.Now().UTC(),
-		Quotas:     []api.AnthropicQuota{{Name: "five_hour", Utilization: 42}},
+		Email:      "default@example.com",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	h := NewHandler(s, nil, nil, nil, multiProviderTestConfig())
 
 	response := currentResponse(t, h, "/api/current?provider=both")
-	if _, ok := response["anthropicAccounts"]; ok {
+	if _, ok := response["antigravityAccounts"]; ok {
 		t.Fatal("single-account install must not switch to the grouped payload")
 	}
-	if _, ok := response["anthropic"].(map[string]interface{}); !ok {
-		t.Fatalf("anthropic payload = %#v, want the flat map", response["anthropic"])
+	if _, ok := response["antigravity"].(map[string]interface{}); !ok {
+		t.Fatalf("antigravity payload = %#v, want the flat map", response["antigravity"])
 	}
 }
 
@@ -129,19 +90,19 @@ func TestCurrentBothUsesDisplayAliasForAccountName(t *testing.T) {
 
 	s, _ := store.New(":memory:")
 	defer s.Close()
-	if _, err := s.ResolveDefaultProviderAccount("anthropic"); err != nil {
+	if _, err := s.ResolveDefaultProviderAccount("antigravity"); err != nil {
 		t.Fatal(err)
 	}
-	other, err := s.CreateOrRestoreProviderAccount("anthropic", "personal")
+	other, err := s.CreateOrRestoreProviderAccount("antigravity", "personal")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpdateProviderAccountAlias("anthropic", other.ID, "Acme work"); err != nil {
+	if err := s.UpdateProviderAccountAlias("antigravity", other.ID, "Acme work"); err != nil {
 		t.Fatal(err)
 	}
 	h := NewHandler(s, nil, nil, nil, multiProviderTestConfig())
 
-	accounts := accountPayloads(t, currentResponse(t, h, "/api/current?provider=both"), "anthropicAccounts")
+	accounts := accountPayloads(t, currentResponse(t, h, "/api/current?provider=both"), "antigravityAccounts")
 	found := false
 	for _, account := range accounts {
 		if account["accountName"] == "Acme work" {
@@ -223,7 +184,7 @@ func TestAppJSHomepageRendersEveryProfileWidget(t *testing.T) {
 func TestCurrentBothAccountNameIsTheAliasForEveryProvider(t *testing.T) {
 	t.Parallel()
 
-	for _, provider := range []string{"anthropic", "antigravity", "codex", "minimax"} {
+	for _, provider := range []string{"antigravity", "codex", "minimax"} {
 		t.Run(provider, func(t *testing.T) {
 			s, _ := store.New(":memory:")
 			defer s.Close()
@@ -260,7 +221,7 @@ func TestCurrentBothAccountNameIsTheAliasForEveryProvider(t *testing.T) {
 func TestCurrentBothFlatPayloadCarriesAccountIdentity(t *testing.T) {
 	t.Parallel()
 
-	for _, provider := range []string{"anthropic", "antigravity", "codex", "minimax"} {
+	for _, provider := range []string{"antigravity", "codex", "minimax"} {
 		t.Run(provider, func(t *testing.T) {
 			s, _ := store.New(":memory:")
 			defer s.Close()
@@ -293,7 +254,7 @@ func TestCurrentBothFlatPayloadCarriesAccountIdentity(t *testing.T) {
 func TestCurrentBothHonoursPerAccountVisibility(t *testing.T) {
 	t.Parallel()
 
-	for _, provider := range []string{"anthropic", "antigravity", "codex", "minimax"} {
+	for _, provider := range []string{"antigravity", "codex", "minimax"} {
 		t.Run(provider, func(t *testing.T) {
 			s, _ := store.New(":memory:")
 			defer s.Close()

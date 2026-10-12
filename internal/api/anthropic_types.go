@@ -265,7 +265,6 @@ type AnthropicQuota struct {
 // AnthropicSnapshot represents a point-in-time capture of all Anthropic quotas.
 type AnthropicSnapshot struct {
 	ID         int64
-	AccountID  int64
 	CapturedAt time.Time
 	Quotas     []AnthropicQuota
 	RawJSON    string

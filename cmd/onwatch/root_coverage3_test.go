@@ -135,7 +135,7 @@ func TestRun_DaemonChildStartupError(t *testing.T) {
 	t.Setenv("ANTIGRAVITY_BASE_URL", "")
 	t.Setenv("ANTIGRAVITY_CSRF_TOKEN", "")
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	// The data directory is created on demand now, so block it with a regular
 	// file to keep exercising the "logging setup fails" path.
 	if err := os.MkdirAll(filepath.Join(home, ".onwatch"), 0o755); err != nil {
@@ -221,7 +221,7 @@ func TestFreshSetup_ZaiOnly(t *testing.T) {
 
 func TestFreshSetup_AllProviders(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 	// Disable keychain tools so no auto-detect occurs for anthropic/codex
 	t.Setenv("PATH", "")
@@ -273,7 +273,7 @@ func TestFreshSetup_AllProviders(t *testing.T) {
 
 func TestFreshSetup_MultipleProviders_Choice6(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 	// Disable keychain tools so no auto-detect occurs
 	t.Setenv("PATH", "")
@@ -317,7 +317,7 @@ func TestFreshSetup_MultipleProviders_Choice6(t *testing.T) {
 
 func TestFreshSetup_AnthropicOnly(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	// Disable keychain tools and PATH so no auto-detect occurs
 	t.Setenv("PATH", "")
 
@@ -343,7 +343,7 @@ func TestFreshSetup_AnthropicOnly(t *testing.T) {
 
 func TestFreshSetup_CodexOnly(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 
 	// No codex auth file -> fallback to manual entry
@@ -372,7 +372,7 @@ func TestFreshSetup_CodexOnly(t *testing.T) {
 
 func TestAddMissingProviders_AllSkipped(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 	// Disable keychain tools so no auto-detect occurs
 	t.Setenv("PATH", "")
@@ -419,7 +419,7 @@ func TestAddMissingProviders_AllSkipped(t *testing.T) {
 
 func TestAddMissingProviders_ZaiSkippedAnthropicAdded(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 	// Disable keychain tools so no auto-detect occurs
 	t.Setenv("PATH", "")
@@ -461,7 +461,7 @@ func TestAddMissingProviders_ZaiSkippedAnthropicAdded(t *testing.T) {
 func TestCollectAnthropicToken_AutoDetect_Accept(t *testing.T) {
 
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	// Disable keychain lookup tools so file fallback is used
 	t.Setenv("PATH", "")
 
@@ -487,7 +487,7 @@ func TestCollectAnthropicToken_AutoDetect_Accept(t *testing.T) {
 func TestCollectAnthropicToken_AutoDetect_Decline(t *testing.T) {
 
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	// Disable keychain lookup tools so file fallback is used
 	t.Setenv("PATH", "")
 
@@ -784,7 +784,7 @@ func TestRunStatus_SelfPIDRunning(t *testing.T) {
 func TestAddMissingProviders_AnthropicAutoDetected(t *testing.T) {
 
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 	// Disable keychain lookup tools so file fallback is used
 	t.Setenv("PATH", "")
@@ -834,7 +834,7 @@ func TestAddMissingProviders_AnthropicAutoDetected(t *testing.T) {
 
 func TestAddMissingProviders_FileOpenError(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 	t.Setenv("PATH", "")
 
@@ -858,7 +858,7 @@ func TestAddMissingProviders_FileOpenError(t *testing.T) {
 
 func TestAddMissingProviders_ZaiAdded(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 	t.Setenv("PATH", "")
 
@@ -899,7 +899,7 @@ func TestAddMissingProviders_ZaiAdded(t *testing.T) {
 
 func TestAddMissingProviders_AntigravityAdded(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 	t.Setenv("PATH", "")
 
@@ -1004,7 +1004,7 @@ func TestAddMissingProviders_GeminiAutoDetectedFromHome(t *testing.T) {
 
 func TestAddMissingProviders_CodexManualPath(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 	t.Setenv("PATH", "")
 
@@ -1045,7 +1045,7 @@ func TestAddMissingProviders_CodexManualPath(t *testing.T) {
 func TestAddMissingProviders_AnthropicAutoDetectDeclined(t *testing.T) {
 
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 	t.Setenv("PATH", "")
 
@@ -1095,7 +1095,7 @@ func TestAddMissingProviders_AnthropicAutoDetectDeclined(t *testing.T) {
 
 func TestAddMissingProviders_CodexAutoDetectDeclined(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
@@ -1141,7 +1141,7 @@ func TestAddMissingProviders_CodexAutoDetectDeclined(t *testing.T) {
 
 func TestAddMissingProviders_SyntheticAdded(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 	t.Setenv("PATH", "")
 
@@ -1181,7 +1181,7 @@ func TestAddMissingProviders_SyntheticAdded(t *testing.T) {
 
 func TestAddMissingProviders_CodexAutoDetected(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
@@ -1282,7 +1282,7 @@ func TestStopPreviousInstance_WithSelfPIDFile(t *testing.T) {
 
 func TestMigrateDBLocation_NewAlreadyExists(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	// Create both old and new DB
 	oldDB := filepath.Join(home, ".onwatch", "onwatch.db")
@@ -1311,7 +1311,7 @@ func TestMigrateDBLocation_NewAlreadyExists(t *testing.T) {
 
 func TestMigrateDBLocation_OldPathEqualsNew(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	// newPath == one of the oldPaths -> should skip (continue branch)
 	newDB := filepath.Join(home, ".onwatch", "onwatch.db")
@@ -1336,7 +1336,7 @@ func TestMigrateDBLocation_OldPathEqualsNew(t *testing.T) {
 func TestFreshSetup_NoProviderSelected_ReturnsError(t *testing.T) {
 	// Provide choice 7 (Multiple), answer "n" to everything.
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 	// Disable keychain tools so no auto-detect occurs
 	t.Setenv("PATH", "")
@@ -1763,7 +1763,7 @@ func TestRunStatus_LegacyPIDFormat(t *testing.T) {
 
 func TestRunSetup_ExistingEnvNoProviders_FreshSetup(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("PATH", "")
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 
@@ -1809,7 +1809,7 @@ func TestRunSetup_ExistingEnvNoProviders_FreshSetup(t *testing.T) {
 
 func TestRunSetup_ExistingEnvSomeProviders_AddsMore(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("PATH", "")
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 
@@ -1853,7 +1853,7 @@ func TestRunSetup_ExistingEnvSomeProviders_AddsMore(t *testing.T) {
 
 func TestCollectMultipleProviders_AllNo(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("PATH", "")
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 
@@ -1882,7 +1882,7 @@ func TestCollectMultipleProviders_AllNo(t *testing.T) {
 
 func TestCollectMultipleProviders_AnthropicAndCodexAdded(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("PATH", "")
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 
@@ -2475,7 +2475,7 @@ func TestStopPreviousInstance_WithLivePIDLegacyFormat(t *testing.T) {
 
 func TestMigrateDBLocation_MkdirFails(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	// Create a file where the old DB is expected - to simulate "file exists" but in wrong place
 	oldDB := filepath.Join(home, ".onwatch", "onwatch.db")
@@ -2500,7 +2500,7 @@ func TestMigrateDBLocation_MkdirFails(t *testing.T) {
 
 func TestMigrateDBLocation_RenameFails(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	// Create old DB
 	oldDB := filepath.Join(home, ".onwatch", "onwatch.db")
@@ -3363,7 +3363,7 @@ func TestFixExplicitDBPath_ExplicitNotExist(t *testing.T) {
 	// test the case where explicit path doesn't exist by pointing cfg.DBPath
 	// to a nonexistent file within the temp home.
 	tmpHome := filepath.Dir(filepath.Dir(canonDir)) // the temp dir itself
-	setTestUserHome(t, tmpHome)
+	testhome.SetTestHome(t, tmpHome)
 
 	cfg := &config.Config{
 		DBPath: filepath.Join(t.TempDir(), "nonexistent.db"),
@@ -3655,7 +3655,7 @@ func TestRun_SetupCommand(t *testing.T) {
 	// "all providers configured" early return instead of entering the
 	// interactive wizard (which loops forever on EOF stdin in CI).
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	installDir := filepath.Join(home, ".onwatch")
 	if err := os.MkdirAll(filepath.Join(installDir, "data"), 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -3709,7 +3709,7 @@ func TestRun_InProcessDaemonChild_ServerBindFails(t *testing.T) {
 	t.Setenv("ONWATCH_ADMIN_PASS", "testpass123")
 	t.Setenv("ONWATCH_PORT", strconv.Itoa(port))
 	t.Setenv("ONWATCH_LOG_LEVEL", "error")
-	setTestUserHome(t, tmpDir)
+	testhome.SetTestHome(t, tmpDir)
 
 	oldPIDFile := pidFile
 	oldPIDDir := pidDir
@@ -3771,7 +3771,7 @@ func TestRun_InProcessDaemonChild_AllProviders(t *testing.T) {
 	t.Setenv("ONWATCH_ADMIN_PASS", "testpass456")
 	t.Setenv("ONWATCH_PORT", strconv.Itoa(port))
 	t.Setenv("ONWATCH_LOG_LEVEL", "error")
-	setTestUserHome(t, tmpDir)
+	testhome.SetTestHome(t, tmpDir)
 
 	oldPIDFile := pidFile
 	oldPIDDir := pidDir
@@ -3819,7 +3819,7 @@ func TestCollectSyntheticKey_EmptyThenValid(t *testing.T) {
 
 func TestAddMissingProviders_AntigravityAlreadyEnabled(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "no-codex"))
 	t.Setenv("PATH", "")
 
@@ -3872,7 +3872,7 @@ func TestFixExplicitDBPath_AlreadyCanonical(t *testing.T) {
 
 func TestFixExplicitDBPath_CanonicalHasMoreData(t *testing.T) {
 	tmpHome := t.TempDir()
-	setTestUserHome(t, tmpHome)
+	testhome.SetTestHome(t, tmpHome)
 
 	// Create canonical path with large data
 	canonDir := filepath.Join(tmpHome, ".onwatch", "data")
@@ -3908,7 +3908,7 @@ func TestFixExplicitDBPath_CanonicalHasMoreData(t *testing.T) {
 
 func TestFixExplicitDBPath_CanonicalDoesNotExist(t *testing.T) {
 	tmpHome := t.TempDir()
-	setTestUserHome(t, tmpHome)
+	testhome.SetTestHome(t, tmpHome)
 
 	// No canonical path created
 
@@ -3933,7 +3933,7 @@ func TestFixExplicitDBPath_CanonicalDoesNotExist(t *testing.T) {
 
 func TestFixExplicitDBPath_ExplicitMissingCanonicalExists(t *testing.T) {
 	tmpHome := t.TempDir()
-	setTestUserHome(t, tmpHome)
+	testhome.SetTestHome(t, tmpHome)
 
 	// Create canonical with data
 	canonDir := filepath.Join(tmpHome, ".onwatch", "data")

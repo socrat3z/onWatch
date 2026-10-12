@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -29,7 +30,7 @@ func isolateOpenCodeEnv(t *testing.T) {
 
 func TestDetectCodexCredentials_ParsesOAuthTokens(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
-	setTestUserHome(t, t.TempDir())
+	testhome.SetTestHome(t, t.TempDir())
 
 	authPath := filepath.Join(os.Getenv("CODEX_HOME"), "auth.json")
 	if err := os.WriteFile(authPath, []byte(`{
@@ -63,7 +64,7 @@ func TestDetectCodexCredentials_ParsesOAuthTokens(t *testing.T) {
 
 func TestDetectCodexCredentials_ParsesAPIKey(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", "")
 
 	codexDir := filepath.Join(home, ".codex")
@@ -90,7 +91,7 @@ func TestDetectCodexCredentials_ParsesAPIKey(t *testing.T) {
 // This ensures the fallback path works when no auth file is available.
 func TestDetectCodexCredentials_EnvVarFallback(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
-	setTestUserHome(t, t.TempDir())
+	testhome.SetTestHome(t, t.TempDir())
 	isolateOpenCodeEnv(t)
 	t.Setenv("CODEX_TOKEN", "env_access_token")
 
@@ -114,7 +115,7 @@ func TestDetectCodexCredentials_EnvVarFallback(t *testing.T) {
 
 func TestDetectCodexToken_PrefersAccessToken(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
-	setTestUserHome(t, t.TempDir())
+	testhome.SetTestHome(t, t.TempDir())
 
 	authPath := filepath.Join(os.Getenv("CODEX_HOME"), "auth.json")
 	if err := os.WriteFile(authPath, []byte(`{
@@ -132,7 +133,7 @@ func TestDetectCodexToken_PrefersAccessToken(t *testing.T) {
 
 func TestDetectCodexToken_RejectsAPIKeyOnly(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", "")
 
 	codexDir := filepath.Join(home, ".codex")
@@ -325,7 +326,7 @@ func TestWriteCodexCredentials_NewFile(t *testing.T) {
 
 func TestDetectCodexCredentials_ParsesUserIDFromIDToken(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
-	setTestUserHome(t, t.TempDir())
+	testhome.SetTestHome(t, t.TempDir())
 
 	header := "eyJhbGciOiJub25lIn0"
 	payloadJSON := `{"https://api.openai.com/auth":{"chatgpt_user_id":"user-123"}}`
@@ -370,7 +371,7 @@ func openCodeAuthJSON(access, refresh, accountID string, expiresMs int64) string
 func setOpenCodeOnly(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("CODEX_TOKEN", "")
 	t.Setenv("OPENCODE_HOME", "")
@@ -419,7 +420,7 @@ func TestDetectCodexCredentials_OpenCodeFormat(t *testing.T) {
 
 func TestDetectCodexCredentials_CodexPriorityOverOpenCode(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("CODEX_TOKEN", "")
 	t.Setenv("OPENCODE_HOME", "")
@@ -455,7 +456,7 @@ func TestDetectCodexCredentials_CodexPriorityOverOpenCode(t *testing.T) {
 
 func TestDetectCodexCredentials_OpenCodeHomeOverride(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("CODEX_TOKEN", "")
 	t.Setenv("XDG_DATA_HOME", "")

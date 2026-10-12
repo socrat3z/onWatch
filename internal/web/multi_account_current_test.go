@@ -13,40 +13,9 @@ import (
 )
 
 // TASK-1 AC#4: the default /api/current view must resolve the provider's
-// default account for Anthropic and Antigravity alike, never the account that
-// happened to poll most recently.
-func TestCurrentResolvesTheDefaultAccountForBothProviders(t *testing.T) {
+// default account, never the account that happened to poll most recently.
+func TestCurrentResolvesTheDefaultAccountForAntigravity(t *testing.T) {
 	t.Parallel()
-
-	t.Run("anthropic", func(t *testing.T) {
-		s, _ := store.New(":memory:")
-		defer s.Close()
-		def, err := s.ResolveDefaultProviderAccount("anthropic")
-		if err != nil {
-			t.Fatal(err)
-		}
-		other, err := s.CreateOrRestoreProviderAccount("anthropic", "personal")
-		if err != nil {
-			t.Fatal(err)
-		}
-		now := time.Now().UTC()
-		for _, snap := range []*api.AnthropicSnapshot{
-			{AccountID: def.ID, CapturedAt: now.Add(-time.Minute), Quotas: []api.AnthropicQuota{{Name: "five_hour", Utilization: 11}}},
-			{AccountID: other.ID, CapturedAt: now, Quotas: []api.AnthropicQuota{{Name: "five_hour", Utilization: 88}}},
-		} {
-			if _, err := s.InsertAnthropicSnapshot(snap); err != nil {
-				t.Fatal(err)
-			}
-		}
-		h := NewHandler(s, nil, nil, nil, createTestConfigWithAnthropic())
-
-		if util := firstQuotaUtilization(t, h, "/api/current?provider=anthropic"); util != 11 {
-			t.Fatalf("default view utilization = %v, want the default account's 11", util)
-		}
-		if util := firstQuotaUtilization(t, h, "/api/current?provider=anthropic&account="+itoa(other.ID)); util != 88 {
-			t.Fatalf("explicit account utilization = %v, want 88", util)
-		}
-	})
 
 	t.Run("antigravity", func(t *testing.T) {
 		s, _ := store.New(":memory:")
@@ -102,11 +71,3 @@ func currentField(t *testing.T, h *Handler, target, field string) interface{} {
 	return currentResponse(t, h, target)[field]
 }
 
-func firstQuotaUtilization(t *testing.T, h *Handler, target string) float64 {
-	t.Helper()
-	quotas, ok := currentResponse(t, h, target)["quotas"].([]interface{})
-	if !ok || len(quotas) == 0 {
-		t.Fatalf("GET %s returned no quotas", target)
-	}
-	return quotas[0].(map[string]interface{})["utilization"].(float64)
-}

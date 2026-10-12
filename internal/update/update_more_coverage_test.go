@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 )
 
 type updateExitPanic struct {
@@ -282,7 +284,7 @@ func TestMigrateSystemdUnit_ReadAndWriteFailuresAndNoop(t *testing.T) {
 
 	t.Run("missing unit file is noop", func(t *testing.T) {
 		tmpHome := t.TempDir()
-		setTestUserHome(t, tmpHome)
+		testhome.SetTestHome(t, tmpHome)
 		readCgroupFile = func() ([]byte, error) {
 			return []byte("0::/user.slice/user-501.slice/user@501.service/app.slice/missing.service"), nil
 		}
@@ -291,7 +293,7 @@ func TestMigrateSystemdUnit_ReadAndWriteFailuresAndNoop(t *testing.T) {
 
 	t.Run("read failure is noop", func(t *testing.T) {
 		tmpHome := t.TempDir()
-		setTestUserHome(t, tmpHome)
+		testhome.SetTestHome(t, tmpHome)
 		userDir := filepath.Join(tmpHome, ".config", "systemd", "user")
 		if err := os.MkdirAll(userDir, 0o755); err != nil {
 			t.Fatalf("mkdir user dir: %v", err)
@@ -308,7 +310,7 @@ func TestMigrateSystemdUnit_ReadAndWriteFailuresAndNoop(t *testing.T) {
 
 	t.Run("already up to date is noop", func(t *testing.T) {
 		tmpHome := t.TempDir()
-		setTestUserHome(t, tmpHome)
+		testhome.SetTestHome(t, tmpHome)
 		serviceName := "noop.service"
 		userDir := filepath.Join(tmpHome, ".config", "systemd", "user")
 		if err := os.MkdirAll(userDir, 0o755); err != nil {

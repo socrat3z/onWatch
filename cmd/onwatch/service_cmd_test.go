@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/onllm-dev/onwatch/v2/internal/service"
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 	"github.com/onllm-dev/onwatch/v2/internal/update"
 )
 
@@ -76,7 +77,7 @@ func newAutostartHarness(t *testing.T) *autostartHarness {
 func isolateHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	prevPID := pidFile
 	pidFile = filepath.Join(home, "onwatch.pid")
 	t.Cleanup(func() { pidFile = prevPID })

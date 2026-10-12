@@ -725,9 +725,6 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-	if (testMode || runtime.GOOS == "windows") && (cfg.Host == "" || cfg.Host == "0.0.0.0") && os.Getenv("ONWATCH_HOST") == "" {
-		cfg.Host = "127.0.0.1"
-	}
 
 	// Resolve auth tokens before any banner output so displayed providers
 	// match the providers that will actually start.
@@ -1065,7 +1062,7 @@ func run() error {
 	}
 
 	var anthropicClient *api.AnthropicClient
-	if cfg.HasProvider("anthropic") && cfg.AnthropicAuthRoot == "" {
+	if cfg.HasProvider("anthropic") {
 		anthropicClient = api.NewAnthropicClient(cfg.AnthropicToken, logger)
 		logger.Info("Anthropic API client configured")
 	}
@@ -1294,12 +1291,6 @@ func run() error {
 			})
 			anthropicAg.SetCredentialsRefresh(func() *api.AnthropicCredentials {
 				return api.DetectAnthropicCredentials(logger)
-			})
-			// Serialize rotation against Claude Code and any other onWatch
-			// instance sharing this store: a refresh token is one-time use, so
-			// two unsynchronized exchanges revoke each other.
-			anthropicAg.SetCredentialsRotator(func(ctx context.Context, expectedAccess string) (api.AnthropicRotation, error) {
-				return api.RefreshAnthropicCredentialsAmbient(ctx, logger, expectedAccess)
 			})
 		}
 

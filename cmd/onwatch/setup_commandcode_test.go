@@ -7,9 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
 	"github.com/onllm-dev/onwatch/v2/internal/api"
 	"github.com/onllm-dev/onwatch/v2/internal/config"
-	"github.com/onllm-dev/onwatch/v2/internal/testenv"
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 )
 
 func stubCommandCodeDetect(t *testing.T, creds *api.CommandCodeCredentials) {
@@ -98,7 +99,7 @@ func TestCollectCommandCodeVerifyFailureSavesKey(t *testing.T) {
 func TestCommandCodeEitherSourceSatisfies(t *testing.T) {
 	isolate := func(t *testing.T) {
 		home := t.TempDir()
-		testenv.SetTestUserHome(t, home)
+		testhome.SetTestHome(t, home)
 		t.Setenv("COMMAND_CODE_API_KEY", "")
 		t.Setenv("COMMANDCODE_API_KEY", "")
 		t.Setenv("COMMANDCODE_ENABLED", "")

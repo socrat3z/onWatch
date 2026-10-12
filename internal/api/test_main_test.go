@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/onllm-dev/onwatch/v2/internal/testenv"
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 )
 
 // TestMain runs before all tests in the api package. It enables test mode
@@ -30,22 +30,12 @@ func runTests(m *testing.M) int {
 	// enable records the real home that the credential-file guard refuses.
 	SetTestMode(true)
 
-	cleanup, err := testenv.IsolateProcessUserEnvironment()
+	_, cleanup, err := testhome.SandboxHome()
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "isolate test user environment: %v\n", err)
+		fmt.Fprintf(os.Stderr, "api tests: %v\n", err)
 		return 1
 	}
 	defer cleanup()
 
 	return m.Run()
-}
-
-func setTestUserHome(t *testing.T, home string) {
-	t.Helper()
-	testenv.SetTestUserHome(t, home)
-}
-
-func clearTestUserHome(t *testing.T) {
-	t.Helper()
-	testenv.ClearTestUserHome(t)
 }

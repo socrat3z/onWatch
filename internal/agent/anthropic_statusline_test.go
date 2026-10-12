@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 )
 
 // --- readStatuslineData tests ---
@@ -354,7 +356,7 @@ func TestRemoveBridgeSnippet_NotOurCommand(t *testing.T) {
 
 func TestSetupStatuslineBridge_CCNotInstalled(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	logger := slog.Default()
 	if err := SetupStatuslineBridge(logger); err != nil {
 		t.Fatalf("expected no error when CC not installed: %v", err)
@@ -367,7 +369,7 @@ func TestSetupStatuslineBridge_CCNotInstalled(t *testing.T) {
 
 func TestSetupStatuslineBridge_NoExistingStatusline(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	stubBridgeShell(t, true)
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -395,7 +397,7 @@ func TestSetupStatuslineBridge_NoExistingStatusline(t *testing.T) {
 
 func TestSetupStatuslineBridge_PrependsToExistingCommand(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	stubBridgeShell(t, true)
 	claudeDir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
@@ -439,7 +441,7 @@ func TestSetupStatuslineBridge_PrependsToExistingCommand(t *testing.T) {
 
 func TestSetupStatuslineBridge_Idempotent(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	stubBridgeShell(t, true)
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -461,7 +463,7 @@ func TestSetupStatuslineBridge_Idempotent(t *testing.T) {
 
 func TestSetupStatuslineBridge_Disabled(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -481,7 +483,7 @@ func TestSetupStatuslineBridge_Disabled(t *testing.T) {
 
 func TestSetupStatuslineBridge_MalformedSettings(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	claudeDir := filepath.Join(home, ".claude")
 	os.MkdirAll(claudeDir, 0o700)
 	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte("{bad json"), 0o600)
@@ -496,7 +498,7 @@ func TestSetupStatuslineBridge_MalformedSettings(t *testing.T) {
 
 func TestDisableStatuslineBridge_RestoresOriginalCommand(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	stubBridgeShell(t, true)
 	claudeDir := filepath.Join(home, ".claude")
 	os.MkdirAll(claudeDir, 0o700)
@@ -526,7 +528,7 @@ func TestDisableStatuslineBridge_RestoresOriginalCommand(t *testing.T) {
 
 func TestDisableStatuslineBridge_RemovesStandalone(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	stubBridgeShell(t, true)
 	claudeDir := filepath.Join(home, ".claude")
 	os.MkdirAll(claudeDir, 0o700)
@@ -547,7 +549,7 @@ func TestDisableStatuslineBridge_RemovesStandalone(t *testing.T) {
 
 func TestEnsureStatuslineBridge_DetectsUserChange(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	stubBridgeShell(t, true)
 	claudeDir := filepath.Join(home, ".claude")
 	os.MkdirAll(claudeDir, 0o700)

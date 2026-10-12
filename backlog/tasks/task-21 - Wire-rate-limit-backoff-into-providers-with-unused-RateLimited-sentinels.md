@@ -1,7 +1,7 @@
 ---
 id: TASK-21
 title: Wire rate-limit backoff into providers with unused RateLimited sentinels
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-12 09:23'
 labels: []
@@ -23,8 +23,8 @@ Not in scope: a generic backoff framework across all 15 providers - only the fou
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Shared backoff helper exists and is unit tested (mirrors rateLimitBackoff style: growing delay, capped max)
-- [ ] #2 DeepSeek, Kimi, Moonshot, and OpenRouter agents skip polling for the backoff window when FetchQuotas returns their RateLimited sentinel, instead of retrying every fixed interval
-- [ ] #3 Backoff resets after a successful poll
-- [ ] #4 go test -race ./... and go vet ./... pass
+- [x] #1 Shared backoff helper exists and is unit tested (mirrors rateLimitBackoff style: growing delay, capped max)
+- [x] #2 DeepSeek, Kimi, Moonshot, and OpenRouter agents skip polling for the backoff window when FetchQuotas returns their RateLimited sentinel, instead of retrying every fixed interval
+- [x] #3 Backoff resets after a successful poll
+- [x] #4 go test -race ./... and go vet ./... pass
 <!-- AC:END -->

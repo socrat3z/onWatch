@@ -2,24 +2,8 @@ package web
 
 import (
 	"net/http"
-	"runtime"
 	"testing"
 )
-
-func TestForkDefaultServerHost(t *testing.T) {
-	t.Parallel()
-
-	if got := forkDefaultServerHost("192.0.2.10"); got != "192.0.2.10" {
-		t.Fatalf("explicit host changed to %q", got)
-	}
-	want := "0.0.0.0"
-	if runtime.GOOS == "windows" {
-		want = "127.0.0.1"
-	}
-	if got := forkDefaultServerHost(""); got != want {
-		t.Fatalf("default host = %q, want %q", got, want)
-	}
-}
 
 func TestRegisterForkOverlayRoutesHonorsBasePath(t *testing.T) {
 	t.Parallel()

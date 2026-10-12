@@ -18,28 +18,28 @@ func TestScrapeStopsSeriesForSoftDeletedAccounts(t *testing.T) {
 	}
 	defer s.Close()
 
-	live, err := s.CreateOrRestoreProviderAccount("anthropic", "work")
+	live, err := s.CreateOrRestoreProviderAccount("antigravity", "work")
 	if err != nil {
 		t.Fatalf("create live account: %v", err)
 	}
-	retired, err := s.CreateOrRestoreProviderAccount("anthropic", "personal")
+	retired, err := s.CreateOrRestoreProviderAccount("antigravity", "personal")
 	if err != nil {
 		t.Fatalf("create retired account: %v", err)
 	}
 
 	now := time.Now().UTC()
 	for _, account := range []int64{live.ID, retired.ID} {
-		if _, err := s.InsertAnthropicSnapshot(&api.AnthropicSnapshot{
+		if _, err := s.InsertAntigravitySnapshot(&api.AntigravitySnapshot{
 			AccountID:  account,
 			CapturedAt: now,
-			Quotas:     []api.AnthropicQuota{{Name: "five_hour", Utilization: 42}},
+			Models:     []api.AntigravityModelQuota{{ModelID: "five_hour", RemainingPercent: 58}},
 		}); err != nil {
-			t.Fatalf("InsertAnthropicSnapshot: %v", err)
+			t.Fatalf("InsertAntigravitySnapshot: %v", err)
 		}
 	}
 
-	liveLabels := map[string]string{"provider": "anthropic", "quota_type": "five_hour", "account_id": strconv.FormatInt(live.ID, 10)}
-	retiredLabels := map[string]string{"provider": "anthropic", "quota_type": "five_hour", "account_id": strconv.FormatInt(retired.ID, 10)}
+	liveLabels := map[string]string{"provider": "antigravity", "quota_type": "five_hour", "account_id": strconv.FormatInt(live.ID, 10)}
+	retiredLabels := map[string]string{"provider": "antigravity", "quota_type": "five_hour", "account_id": strconv.FormatInt(retired.ID, 10)}
 
 	m := New()
 	m.Scrape(s, time.Minute)
@@ -70,7 +70,7 @@ func TestScrapeStopsSeriesForSoftDeletedAccounts(t *testing.T) {
 	if hasGaugeMetric(families, "onwatch_quota_utilization_percent", retiredLabels) {
 		t.Fatal("a soft-deleted account must stop exporting - its label pair would grow cardinality forever")
 	}
-	if hasGaugeMetric(families, "onwatch_account_info", map[string]string{"provider": "anthropic", "account_id": strconv.FormatInt(retired.ID, 10), "account_name": "personal"}) {
+	if hasGaugeMetric(families, "onwatch_account_info", map[string]string{"provider": "antigravity", "account_id": strconv.FormatInt(retired.ID, 10), "account_name": "personal"}) {
 		t.Fatal("a soft-deleted account must not keep announcing itself")
 	}
 }

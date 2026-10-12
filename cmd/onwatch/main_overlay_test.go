@@ -21,14 +21,13 @@ func TestForkAccountManagersRegisterThroughOneCoordinator(t *testing.T) {
 	defer db.Close()
 
 	managers := setupForkAccountManagers(&config.Config{
-		AnthropicAuthRoot:   t.TempDir(),
 		AntigravityAuthRoot: t.TempDir(),
 		PollInterval:        time.Minute,
 	}, db, slog.Default())
 	registry := agent.NewAgentManager(slog.Default())
 	managers.Register(registry)
 
-	want := []string{"anthropic", "antigravity"}
+	want := []string{"antigravity"}
 	if got := registry.RegisteredProviders(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("registered providers = %v, want %v", got, want)
 	}

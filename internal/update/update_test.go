@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 )
 
 func TestCompareVersions(t *testing.T) {
@@ -1081,8 +1083,7 @@ func TestCheck_RateLimitErrorMessage(t *testing.T) {
 func TestFindUnitFile_UserLevelPath(t *testing.T) {
 	serviceName := "onwatch-user-level-test.service"
 	tmpHome := t.TempDir()
-
-	setTestUserHome(t, tmpHome)
+	testhome.SetTestHome(t, tmpHome)
 
 	userDir := filepath.Join(tmpHome, ".config", "systemd", "user")
 	if err := os.MkdirAll(userDir, 0755); err != nil {
@@ -1260,7 +1261,7 @@ func TestMigrateSystemdUnit_UpdatesUserUnitAndReloads(t *testing.T) {
 	}
 
 	tmpHome := t.TempDir()
-	setTestUserHome(t, tmpHome)
+	testhome.SetTestHome(t, tmpHome)
 	t.Setenv("INVOCATION_ID", "invocation-test-id")
 
 	unitDir := filepath.Join(tmpHome, ".config", "systemd", "user")

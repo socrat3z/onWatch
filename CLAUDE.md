@@ -83,6 +83,7 @@ On `go.sum` changes, update `vendorHash` in `flake.nix` (run `nix build .#onwatc
 - The CLIs exist only to run a login, through the isolated one-shot `agy-login`/`codex-login`/`claude-login` services (`docker compose --profile login run --rm <svc>`). Those services get one credential volume each and deliberately no `env_file` and no `/data`. Polling reads the token files (`~/.gemini`, `~/.codex/auth.json`, `~/.claude/.credentials.json`), never the CLIs.
 - The entrypoint allowlists exact login commands and exits 64 for anything else. Changing the allowlist means changing `scripts/test-entrypoint-dispatch.sh` in the same commit.
 - Codex and Claude Code are pinned by version AND SHA-256 in the `cli-installer` stage, fetched as npm release tarballs and reduced to one native binary each. No package manager, install script, or lifecycle hook in that stage; Bun/Node/npm must never come back. (`agy` is the exception and is fetched by its unpinnable bootstrapper in the `runtime` stage - see the comment there.) `TARGETARCH` maps to an exact upstream path - no `find | head -1`. Keep `codex-code-mode-host` pruned. Bumping a version follows `docs/WITH_USER_ENV.md#updating-the-pinned-clis`.
+- The daemon uses stock Anthropic auth: the entrypoint symlinks `$HOME/.claude` to `/auth/claude/default/.claude`, the default login written by `claude-login`. Only that one Claude account is polled.
 - One named volume per credential store, nothing else mounted. Adding a volume or a CLI needs a matching reason in `docs/WITH_USER_ENV.md`.
 - Daemon memory is 512M because `ANTIGRAVITY_SOURCE=cli` makes the daemon spawn the 190M `agy` binary and keep it warm; idle is 9.4 MiB. The 512M on the `*-login` services is an unmeasured TUI ceiling. Measurements and their date live in `docs/WITH_USER_ENV.md#measured-resource-budget` - update them there when bumping a pinned CLI.
 
@@ -96,16 +97,24 @@ On `go.sum` changes, update `vendorHash` in `flake.nix` (run `nix build .#onwatc
    - Do NOT use `gh release create` - the workflow handles release creation, cross-compilation (5 platforms), and binary uploads
    - Do NOT run `./app.sh --release` locally - the release must happen through the GitHub Actions pipeline
 
-**Anthropic OAuth credential rotation:** Refresh tokens are one-time use (OAuth rotation), so two processes that exchange the same token revoke each other and force an interactive re-login hours later, when the surviving access token expires. Every rotation therefore runs as one serialized transaction:
-- `internal/api/anthropic_lock.go` (+ `_unix`/`_windows`): bounded, context-aware advisory lock on `<credentials>.lock`. Non-blocking with retry, so a `claude auth login` holding the lock cannot wedge the poll goroutine.
-- `internal/api/anthropic_token.go`: `RefreshAnthropicCredentialsFile` (named accounts) and `RefreshAnthropicCredentialsAmbient` (single-account) hold the lock across read -> exchange -> write, adopt a newer stored pair instead of reusing a consumed refresh token, and preserve the existing refresh token when the server omits one (RFC 6749 section 6).
-- A rotation that could not be written is still returned to the agent (`AnthropicRotation.PersistErr`). The exchange has already spent the old token, so dropping the pair would strand the account.
-- `docker-entrypoint-with-user-env.sh`: wraps the `claude` CLI in `flock` on the same lock file, which is why coordination works across the daemon and login containers.
-- `internal/agent/anthropic_agent.go`: a resident Claude Code always blocks the token *exchange*, because the lock is advisory and a natively installed `claude` takes no lock. Recovery first tries to **adopt** a pair Claude Code has already written, which consumes nothing and is the normal recovery on a host. It exchanges anyway only when `ONWATCH_CLAUDE_CLI_LOCKED=1` declares that every `claude` reaching this store is flock-wrapped - set solely by `Dockerfile.with-user-env`. Nothing else should set it.
-- Every skipped refresh logs its reason, and the `polling PAUSED` line carries `oauth_refresh_skipped`. A silent skip is what made this class of failure undiagnosable from logs.
-- A usage-API 429 does **not** trigger a refresh. Rotating a token to win a fresh rate-limit window was the old behaviour and was the cause of the periodic logouts; onWatch now waits for the next scheduled poll. Prefer `ANTHROPIC_SOURCE=statusline` to avoid the usage API entirely.
-- The OAuth refresh endpoint (`platform.claude.com/v1/oauth/token`) 429s every `claude-code/2.1.x` User-Agent before reading the token. Refresh requests send a `claude-cli/<version> (external, cli)` User-Agent built from `claudeCodeVersion`; bump it with new Claude Code releases, along with the literal UAs in `anthropic_client_test.go` and `anthropic_oauth_request_test.go` ([issue #145](https://github.com/onllm-dev/onWatch/issues/145))
+**Anthropic Rate Limit Bypass:** Anthropic's usage API has aggressive rate limits (~5 requests per token, then 429 for ~5 min). onWatch bypasses this by refreshing the OAuth token when rate limited - each new access token gets a fresh rate limit window. Implementation details:
+- `internal/agent/anthropic_agent.go`: Detects 429, calls `RefreshAnthropicToken`, saves new tokens, retries
+- `internal/api/anthropic_oauth.go`: OAuth token refresh endpoint (`platform.claude.com/v1/oauth/token`). Sends a `claude-cli/<version> (external, cli)` User-Agent - the endpoint 429s every `claude-code/2.1.x` UA before reading the token. Both Anthropic clients share `claudeCodeVersion`; bump it with new Claude Code releases, along with the literal UAs in `anthropic_client_test.go` and `anthropic_oauth_request_test.go` ([issue #145](https://github.com/onllm-dev/onWatch/issues/145))
+- `internal/api/anthropic_token_unix.go`: Writes to macOS Keychain + file for persistence
+- `internal/api/anthropic_token_windows.go`: Writes to credentials file
+- Refresh tokens are one-time use (OAuth rotation) - MUST save new refresh token after each refresh
 - See: [issue #16](https://github.com/onllm-dev/onWatch/issues/16), [anthropics/claude-code#31021](https://github.com/anthropics/claude-code/issues/31021)
+
+## Test environment safety
+
+- Tests must never read, write, delete, refresh, or migrate credentials, settings, databases, keychains, or CLI state from the developer's real user profile.
+- Any test that exercises home-directory discovery must redirect all supported lookups. Use `internal/testutil/testhome.SetTestHome`; setting `HOME` alone is not sufficient because Windows uses `USERPROFILE`.
+- Package suites that can auto-detect local credentials must isolate the process in `TestMain` with `internal/testutil/testhome.SandboxHome` before running tests.
+- Do not unset credential-path overrides when that would fall through to a real home directory. Point `CODEX_HOME`, `OPENCODE_HOME`, XDG paths, and similar overrides at empty temporary directories instead.
+- Do not use `os.Clearenv` in tests. Clear only the application-owned variables required by the test and preserve host essentials such as `HOME`, `USERPROFILE`, `PATH`, and temporary-directory variables.
+- Never use a real token, credential file, local database, CLI login, keychain, or user settings file as a test fixture. Create minimal synthetic data under `t.TempDir()`.
+- Live credential, network, CLI, and keyring tests must be opt-in through an explicit environment flag, skip by default, and state clearly that they access external or user-owned state.
+- Run Go and integration tests through `app.sh`; use `./app.sh --test` and `./app.sh --integration` rather than direct `go test` commands.
 
 ## Style
 

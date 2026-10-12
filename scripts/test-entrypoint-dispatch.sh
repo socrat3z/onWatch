@@ -87,13 +87,12 @@ expect_ok "onwatch: serve"                    serve
 expect_ok "onwatch: codexprofile"             codexprofile  # prefix must not match
 
 
-# The dry-run exits before dispatch, so the flock wrapping cannot be observed
-# through the argument contract. Assert it structurally instead: the `claude`
-# branch must run under a bounded flock on the same lock file the daemon's
-# rotation transaction takes, or the daemon and a login container can exchange
-# the same one-time refresh token and revoke each other.
+# The dry-run exits before dispatch, so the daemon's credential wiring cannot be
+# observed through the argument contract. Assert it structurally instead: stock
+# Anthropic auth reads $HOME/.claude, so the daemon branch must point that at the
+# default login the claude-login service wrote, and `claude` must run unwrapped.
 echo
-echo "== claude runs under the shared credential lock =="
+echo "== daemon reads the default Claude login through \$HOME/.claude =="
 expect_source() {
   want="$1"
   if grep -qF -- "$want" "$entrypoint"; then
@@ -103,8 +102,8 @@ expect_source() {
     failures=$((failures + 1))
   fi
 }
-expect_source 'flock -w 60 -E 75 "$HOME/.claude/.credentials.json.lock" /usr/local/bin/claude "$@"'
-
+expect_source 'ln -sfn /auth/claude/default/.claude "$HOME/.claude"'
+expect_source 'claude|agy|codex)'
 echo
 if [ "$failures" -ne 0 ]; then
   echo "$failures check(s) failed" >&2

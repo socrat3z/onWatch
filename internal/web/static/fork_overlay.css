@@ -10,6 +10,7 @@
   margin-top: 16px;
 }
 
+.all-providers-view {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(var(--layout-card-min), 1fr));
   align-items: start;
@@ -199,6 +200,7 @@
   margin: 0;
   color: var(--text-muted);
   font-size: 12px;
+}
 
 /* No snapshot stored yet - neutral, so an empty poll never reads as healthy. */
 .status-badge[data-status="unknown"] {
@@ -206,9 +208,11 @@
   color: var(--text-muted);
 }
 
+@media (max-width: 768px) {
   .homepage-harness-card .provider-card-header { padding: 14px 16px; }
   .homepage-harness-card .provider-card-body { padding: 14px 16px 16px; }
   .homepage-harness-chips { padding: 8px 16px; }
+}
 
 .provider-account-alias-action {
   margin-top: 4px;

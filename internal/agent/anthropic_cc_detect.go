@@ -82,15 +82,10 @@ func isJSRuntime(base string) bool {
 	return false
 }
 
-// ClaudeCodeProcess returns the command line of a running Claude Code CLI
-// process, or "" when none is running.
-//
-// When Claude Code is running, onWatch skips the OAuth token exchange to avoid
-// competing for the same refresh token - a refresh by onWatch invalidates
-// Claude Code's pending refresh, causing it to get invalid_grant and
-// re-authenticate. The command line is returned rather than a bare bool so a
-// skipped refresh can name what blocked it: a false positive here silently
-// disables refresh, which is indistinguishable from a broken login in the logs.
+// IsClaudeCodeRunning checks if the Claude Code CLI is currently executing.
+// When Claude Code is running, onWatch skips OAuth refresh to avoid competing
+// for the same refresh token - a refresh by onWatch invalidates Claude Code's
+// pending refresh, causing it to get invalid_grant and re-authenticate.
 // Exported as a package-level variable so tests can override it.
 //
 // On unix the full command line of every process is inspected (see
@@ -98,19 +93,14 @@ func isJSRuntime(base string) bool {
 // which matched the Claude desktop app and any process referencing a .claude
 // path. See https://github.com/onllm-dev/onWatch/issues/111.
 //
-// Note this stays non-empty on hosts where the Claude Code background daemon
+// Note this stays true on hosts where the Claude Code background daemon
 // (`claude daemon run`, `claude bg-spare`, `claude bg-pty-host`) is resident
 // even with no interactive session. That is intentional: those processes hold
 // the same credentials and refresh them on their own schedule, so onWatch must
-// still keep its hands off the refresh token. tryOAuthRecovery keeps that
-// block too - the lock is advisory, so a native `claude` takes no lock and both
-// sides would spend the same token - but it first tries to adopt whatever that
-// process has already written, and lifts the block only where the CLI is known
-// to be flock-wrapped (claudeCLISharesCredentialLock).
-var ClaudeCodeProcess = func() string {
-	return procscan.Match("claude.exe", isClaudeCodeCommandLine)
+// still keep its hands off the refresh token. It does mean onWatch's own OAuth
+// recovery paths rarely run for such users.
+var IsClaudeCodeRunning = func() bool {
+	// Windows tasklist shares the image name with the desktop app, which is a
+	// known limitation of the name-only match there.
+	return procscan.Running("claude.exe", isClaudeCodeCommandLine)
 }
-
-// IsClaudeCodeRunning is the boolean form of ClaudeCodeProcess. Kept as a
-// separate variable because tests override it directly.
-var IsClaudeCodeRunning = func() bool { return ClaudeCodeProcess() != "" }

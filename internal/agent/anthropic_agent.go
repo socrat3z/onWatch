@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/onllm-dev/onwatch/v2/internal/api"
@@ -22,8 +20,6 @@ type TokenRefreshFunc func() string
 
 // CredentialsRefreshFunc returns the full credentials for proactive OAuth refresh.
 type CredentialsRefreshFunc func() *api.AnthropicCredentials
-type CredentialsWriteFunc func(accessToken, refreshToken string, expiresIn int) error
-type CredentialsRotateFunc func(context.Context, string) (api.AnthropicRotation, error)
 
 // maxAuthFailures is the number of consecutive auth failures before pausing polling.
 const maxAuthFailures = 3
@@ -50,12 +46,6 @@ const authPausedRetryInterval = 15 * time.Minute
 // authPausedRetryMaxInterval caps the escalating paused-state retry delay.
 const authPausedRetryMaxInterval = 6 * time.Hour
 
-// rateLimitEscalateAfter is how long an unbroken run of OAuth 429s must last
-// before onWatch raises an alert. Measured in wall clock rather than attempts
-// because the attempt count resets on any successful poll and on restart, so a
-// restarting daemon would otherwise never reach a count-based threshold.
-const rateLimitEscalateAfter = 1 * time.Hour
-
 // AnthropicAgent manages the background polling loop for Anthropic quota tracking.
 type AnthropicAgent struct {
 	client       *api.AnthropicClient
@@ -66,13 +56,9 @@ type AnthropicAgent struct {
 	sm           *SessionManager
 	tokenRefresh TokenRefreshFunc
 	credsRefresh CredentialsRefreshFunc
-	credsWrite   CredentialsWriteFunc
-	credsRotate  CredentialsRotateFunc
 	lastToken    string
 	notifier     *notify.NotificationEngine
 	pollingCheck func() bool
-	accountID    int64
-	accountName  string
 
 	// Auth failure rate limiting
 	authFailCount   int    // consecutive auth failures (401 or 403)
@@ -90,22 +76,10 @@ type AnthropicAgent struct {
 	// credentials are known good.
 	supersededToken string
 
-	// lastRefreshBlockReason is why the most recent OAuth refresh was skipped.
-	// Reported when polling pauses, so the pause always states its cause.
-	lastRefreshBlockReason string
-
 	// OAuth rate limit backoff (429 from the OAuth refresh endpoint)
 	rateLimitFailCount int       // consecutive OAuth 429 failures
 	rateLimitPaused    bool      // true when OAuth refresh is in backoff
 	rateLimitResumeAt  time.Time // when to next attempt OAuth refresh
-
-	// Escalation for a sustained 429 run. Backoff alone only answers how often
-	// to retry, never whether retrying can still work: a persistent block paces
-	// itself out to rateLimitMaxBackoff and stays silent indefinitely. These
-	// track the run by wall clock rather than by count, because the count is
-	// reset by any successful poll and by a daemon restart.
-	rateLimitFirstFailAt time.Time // start of the current run of 429s
-	rateLimitNotified    bool      // alert already sent for the current run
 
 	// isClaudeCodeRunning checks if Claude Code is executing. If nil, uses the
 	// package-level IsClaudeCodeRunning. Override in tests to control behavior.
@@ -139,13 +113,6 @@ type AnthropicAgent struct {
 // If it returns false, the poll is skipped (provider polling disabled).
 func (a *AnthropicAgent) SetPollingCheck(fn func() bool) {
 	a.pollingCheck = fn
-}
-
-// SetAccountContext assigns every stored snapshot and log entry to one
-// provider-account record. The ambient agent retains the zero/default value.
-func (a *AnthropicAgent) SetAccountContext(accountID int64, accountName string) {
-	a.accountID = accountID
-	a.accountName = accountName
 }
 
 // SetNotifier sets the notification engine for sending alerts.
@@ -193,14 +160,6 @@ func (a *AnthropicAgent) SetTokenRefresh(fn TokenRefreshFunc) {
 func (a *AnthropicAgent) SetCredentialsRefresh(fn CredentialsRefreshFunc) {
 	a.credsRefresh = fn
 }
-
-// SetCredentialsWriter persists OAuth rotation for this agent's exact account.
-func (a *AnthropicAgent) SetCredentialsWriter(fn CredentialsWriteFunc) { a.credsWrite = fn }
-
-// SetCredentialsRotator installs an account-scoped, cross-process-safe OAuth
-// transaction. The string argument is the access-token generation the caller
-// observed; the bool result reports that a newer stored generation was adopted.
-func (a *AnthropicAgent) SetCredentialsRotator(fn CredentialsRotateFunc) { a.credsRotate = fn }
 
 // EnableStatuslineBridge activates the statusline file bridge for zero-429
 // Anthropic monitoring. When enabled, the agent checks a shared file written
@@ -307,7 +266,6 @@ func (a *AnthropicAgent) SetCCDetectionEnabled(enabled bool) {
 // then continues at the configured interval until the context is cancelled.
 func (a *AnthropicAgent) Run(ctx context.Context) error {
 	a.logger.Info("Anthropic agent started", "interval", a.interval)
-	a.logRefreshReadiness()
 
 	// Ensure any active session is closed on exit
 	defer func() {
@@ -369,118 +327,6 @@ func (a *AnthropicAgent) autoRefreshAllowed() bool {
 	return a.store.AutoRefreshTokensEnabled()
 }
 
-// claudeCLISharesCredentialLock reports whether every `claude` process that can
-// reach this credential store is known to take the advisory rotation lock.
-//
-// This is true only for the with-user-env image, whose entrypoint runs the
-// bundled CLI under `flock` on the same lock file. A natively installed Claude
-// Code takes no lock, so onWatch must not exchange a refresh token underneath
-// it. The image sets ONWATCH_CLAUDE_CLI_LOCKED=1; nothing else should.
-func claudeCLISharesCredentialLock() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("ONWATCH_CLAUDE_CLI_LOCKED"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
-
-// logRefreshReadiness reports, once at startup, whether this agent is actually
-// able to refresh its OAuth credentials.
-//
-// Every input to that decision was previously only observable at Debug, or not
-// at all, so a misconfiguration looked identical to a healthy agent until the
-// access token expired hours later and polling paused. One line at start makes
-// the answer readable immediately after a restart.
-//
-// Deliberately does not probe for a running Claude Code: that scan forks `ps`
-// and would delay the first poll, and the state is transient anyway. It is
-// reported instead at the moment it blocks a refresh, with the process named.
-func (a *AnthropicAgent) logRefreshReadiness() {
-	attrs := []any{
-		"auto_refresh_tokens", a.autoRefreshAllowed(),
-		"credentials_readable", a.credsRefresh != nil,
-		"account_scoped_rotator", a.credsRotate != nil,
-		"cli_shares_credential_lock", claudeCLISharesCredentialLock(),
-	}
-	refreshable := a.credsRefresh != nil && a.autoRefreshAllowed()
-	if a.credsRefresh != nil {
-		if creds := a.credsRefresh(); creds != nil {
-			attrs = append(attrs,
-				"refresh_token_present", creds.RefreshToken != "",
-				"access_token_expires_at", creds.ExpiresAt.UTC(),
-				"access_token_expires_in", creds.ExpiresIn.Round(time.Second))
-			refreshable = refreshable && creds.RefreshToken != ""
-		} else {
-			attrs = append(attrs, "refresh_token_present", false)
-			refreshable = false
-		}
-	}
-
-	if refreshable {
-		a.logger.Info("Anthropic OAuth refresh is available", attrs...)
-		return
-	}
-	a.logger.Warn("Anthropic OAuth refresh is NOT available - the access token will expire and polling will pause",
-		append(attrs, "action", "Re-run the Claude login for this account, or enable auto_refresh_tokens")...)
-}
-
-// claudeCodeProcess returns the command line that made claudeCodeRunning true,
-// or "" when a test override is installed and there is nothing real to name.
-func (a *AnthropicAgent) claudeCodeProcess() string {
-	if a.isClaudeCodeRunning != nil {
-		return ""
-	}
-	return ClaudeCodeProcess()
-}
-
-// noteRefreshSkipped records and reports a refresh that did not happen.
-//
-// These used to be Debug, which is why a token could quietly expire and leave
-// nothing in the log but the 401 storm that followed. They are Warn now, and
-// deduplicated on the reason so a two-minute poll does not repeat itself for
-// the whole hour the token spends inside the refresh window.
-func (a *AnthropicAgent) noteRefreshSkipped(source, reason string, creds *api.AnthropicCredentials, process string) {
-	repeat := a.lastRefreshBlockReason == reason
-	a.lastRefreshBlockReason = reason
-	if repeat {
-		a.logger.Debug("OAuth refresh still skipped", "source", source, "reason", reason)
-		return
-	}
-	attrs := []any{"source", source, "reason", reason}
-	if creds != nil {
-		attrs = append(attrs, "expires_in", creds.ExpiresIn.Round(time.Second))
-	}
-	if process != "" {
-		attrs = append(attrs, "blocking_process", process)
-	}
-	a.logger.Warn("OAuth refresh skipped - the token will expire unless another writer rotates it", attrs...)
-}
-
-// refreshBlockReason names the guard preventing an OAuth refresh, or "" when
-// one may proceed. It exists so the reason can be reported at the point a skip
-// becomes visible - a paused account - rather than only in debug logs.
-func (a *AnthropicAgent) refreshBlockReason() string {
-	switch {
-	case a.credsRefresh == nil:
-		return "no credentials refresh configured for this account"
-	case !a.autoRefreshAllowed():
-		return "auto_refresh_tokens is disabled in settings"
-	case a.rateLimitBackoffActive():
-		return "OAuth refresh is in rate-limit backoff"
-	default:
-		return ""
-	}
-}
-
-// refreshPauseCause explains why an OAuth refresh did not rescue this pause.
-func (a *AnthropicAgent) refreshPauseCause() string {
-	if a.lastRefreshBlockReason != "" {
-		return a.lastRefreshBlockReason
-	}
-	return "the refresh was attempted and failed - see the preceding OAuth log"
-}
-
 // claudeCodeRunning reports whether the Claude Code CLI is executing, using the
 // agent's override when set and the package-level detector otherwise.
 func (a *AnthropicAgent) claudeCodeRunning() bool {
@@ -509,94 +355,6 @@ func (a *AnthropicAgent) resumeAuth() {
 	a.authRetryCount = 0
 }
 
-// noteRateLimited records one OAuth 429, advances the backoff, and escalates
-// once when the run has persisted past rateLimitEscalateAfter.
-//
-// The escalation exists because backoff is only a pacing decision. A 429 that
-// never clears - an edge block on a datacenter IP, say - is paced out to a 6h
-// retry and otherwise looks identical to a healthy agent, which is how a refresh
-// outage ran for days without an alert. Polling deliberately keeps retrying
-// afterwards so the agent still self-heals if the block lifts.
-//
-// Returns the backoff applied, for the caller to log.
-func (a *AnthropicAgent) noteRateLimited(err error) time.Duration {
-	now := time.Now()
-	a.rateLimitFailCount++
-	if a.rateLimitFirstFailAt.IsZero() {
-		a.rateLimitFirstFailAt = now
-	}
-
-	backoff := api.RetryAfter(err)
-	if backoff <= 0 {
-		backoff = rateLimitBackoff(a.rateLimitFailCount)
-	}
-	a.rateLimitPaused = true
-	a.rateLimitResumeAt = now.Add(backoff)
-
-	stuckFor := now.Sub(a.rateLimitFirstFailAt)
-	if !a.rateLimitNotified && stuckFor >= rateLimitEscalateAfter {
-		a.rateLimitNotified = true
-		a.logger.Error("OAuth refresh rate limited persistently - alerting",
-			"stuck_for", stuckFor.Round(time.Minute),
-			"fail_count", a.rateLimitFailCount,
-			"response_body", api.OAuthResponseBody(err),
-			"action", "Check for an IP-level block, or re-authenticate to reset the credential")
-		a.sendAuthErrorNotification(
-			"Anthropic token refresh blocked",
-			fmt.Sprintf("OAuth refresh has been rate limited for %s. Quota history is not being collected. "+
-				"Re-authenticate with 'claude auth' if this persists.", stuckFor.Round(time.Minute)),
-			true,
-		)
-	}
-	return backoff
-}
-
-// clearRateLimitBackoff resets every field tracking the OAuth 429 run. Called
-// wherever a refresh succeeds or the credentials change, so the next run starts
-// from the base backoff and can alert again.
-func (a *AnthropicAgent) clearRateLimitBackoff() {
-	a.rateLimitFailCount = 0
-	a.rateLimitPaused = false
-	a.rateLimitResumeAt = time.Time{}
-	a.rateLimitFirstFailAt = time.Time{}
-	a.rateLimitNotified = false
-}
-
-// decayRateLimitBackoff walks the failure count back down after a successful
-// poll, and ends the 429 run once it reaches zero.
-//
-// Only successful polls may call this. The backoff-expired retry path also
-// decrements, but must leave the run timestamp alone: resetting it there would
-// restart the escalation clock on every retry, so a permanent 429 would pace
-// itself out and never alert - the behaviour this escalation exists to fix.
-func (a *AnthropicAgent) decayRateLimitBackoff() {
-	if a.rateLimitFailCount > 0 {
-		a.rateLimitFailCount--
-	}
-	if a.rateLimitFailCount == 0 {
-		a.rateLimitFirstFailAt = time.Time{}
-		a.rateLimitNotified = false
-	}
-}
-
-// rateLimitBackoffActive reports whether OAuth refresh is still in backoff.
-// Once the window has elapsed it unpauses and decays the failure count by one,
-// so a refresh that keeps failing holds its backoff level instead of
-// escalating forever; a refresh that succeeds clears the count outright.
-func (a *AnthropicAgent) rateLimitBackoffActive() bool {
-	if !a.rateLimitPaused {
-		return false
-	}
-	if time.Now().Before(a.rateLimitResumeAt) {
-		return true
-	}
-	a.rateLimitPaused = false
-	a.decayRateLimitBackoff()
-	a.logger.Info("OAuth rate limit backoff expired, retrying refresh",
-		"fail_count", a.rateLimitFailCount)
-	return false
-}
-
 // authRetryBackoff returns the delay before the nth paused-state recovery attempt.
 func authRetryBackoff(attempt int) time.Duration {
 	if attempt <= 0 {
@@ -622,24 +380,8 @@ func authRetryBackoff(attempt int) time.Duration {
 // recorded so the pre-poll credential re-read does not immediately downgrade
 // back to it - that downgrade would leave the agent polling with a dead token
 // and a dead refresh token, an unrecoverable state (issue #111).
-//
-// Named accounts install a writer bound to their own credentials file; without
-// it a background account would rotate the ambient account's tokens instead of
-// its own. With ANTHROPIC_AUTH_ROOT set every account is a named account, so
-// the ambient fallback would write to a path nothing reads.
 func (a *AnthropicAgent) applyRefreshedTokens(newTokens *api.OAuthTokenResponse, supersededToken string) {
-	// OAuth permits a successful response to omit refresh_token. In that case
-	// the previously issued token remains current and must not be erased.
-	if newTokens.RefreshToken == "" && a.credsRefresh != nil {
-		if current := a.credsRefresh(); current != nil {
-			newTokens.RefreshToken = current.RefreshToken
-		}
-	}
-	writer := a.credsWrite
-	if writer == nil {
-		writer = api.WriteAnthropicCredentials
-	}
-	if err := writer(newTokens.AccessToken, newTokens.RefreshToken, newTokens.ExpiresIn); err != nil {
+	if err := api.WriteAnthropicCredentials(newTokens.AccessToken, newTokens.RefreshToken, newTokens.ExpiresIn); err != nil {
 		a.logger.Error("Failed to save refreshed credentials", "error", err)
 		a.supersededToken = supersededToken
 	} else {
@@ -649,53 +391,23 @@ func (a *AnthropicAgent) applyRefreshedTokens(newTokens *api.OAuthTokenResponse,
 	a.lastToken = newTokens.AccessToken
 }
 
-// rotateCredentials uses the account-scoped transaction when available, so the
-// read/exchange/write runs under the shared credential lock. Without one it
-// falls back to a bare exchange for agents that install no rotator.
-func (a *AnthropicAgent) rotateCredentials(ctx context.Context, creds *api.AnthropicCredentials) (api.AnthropicRotation, error) {
-	if a.credsRotate != nil {
-		return a.credsRotate(ctx, creds.AccessToken)
-	}
-	tokens, err := api.RefreshAnthropicToken(ctx, creds.RefreshToken)
-	if err != nil {
-		return api.AnthropicRotation{}, err
-	}
-	if tokens.RefreshToken == "" {
-		tokens.RefreshToken = creds.RefreshToken
-	}
-	return api.AnthropicRotation{Tokens: tokens}, nil
-}
-
-// acceptRotatedCredentials installs a rotation's pair. A rotation the
-// transaction already stored needs no second write; anything else still has to
-// be persisted here, because the exchange has already spent the old refresh
-// token and an unwritten pair would be lost on restart.
-func (a *AnthropicAgent) acceptRotatedCredentials(rot api.AnthropicRotation, oldAccess string) {
-	if rot.PersistErr != nil {
-		a.logger.Warn("Credential rotation could not be stored under the lock, retrying the write",
-			"error", rot.PersistErr)
-	}
-	if rot.Persisted {
-		a.client.SetToken(rot.Tokens.AccessToken)
-		a.lastToken = rot.Tokens.AccessToken
-		a.supersededToken = ""
-		return
-	}
-	a.applyRefreshedTokens(rot.Tokens, oldAccess)
-}
-
 // noteOAuthRefreshFailure classifies a failed OAuth refresh and updates backoff
 // state. source identifies the calling path for logs.
 func (a *AnthropicAgent) noteOAuthRefreshFailure(err error, source string) {
 	switch {
 	case errors.Is(err, api.ErrOAuthRateLimited):
-		backoff := a.noteRateLimited(err)
+		a.rateLimitFailCount++
+		backoff := api.RetryAfter(err)
+		if backoff <= 0 {
+			backoff = rateLimitBackoff(a.rateLimitFailCount)
+		}
+		a.rateLimitPaused = true
+		a.rateLimitResumeAt = time.Now().Add(backoff)
 		a.logger.Warn("OAuth refresh rate limited - backing off",
 			"source", source,
 			"fail_count", a.rateLimitFailCount,
 			"backoff", backoff,
-			"resume_at", a.rateLimitResumeAt,
-			"response_body", api.OAuthResponseBody(err))
+			"resume_at", a.rateLimitResumeAt)
 	case errors.Is(err, api.ErrOAuthInvalidGrant):
 		a.authFailCount = maxAuthFailures
 		a.pauseAuth(a.lastToken)
@@ -717,81 +429,52 @@ func (a *AnthropicAgent) noteOAuthRefreshFailure(err error, source string) {
 // 401/403 responses, where the stored access token has simply expired and no
 // Claude Code session is around to rotate it (issue #111).
 //
-// Auto-refresh must be enabled and the OAuth backoff must not be active. A
-// resident Claude Code is NOT a hard block here (unlike proactiveRefresh): the
-// stored token has already been rejected, so deferring to it only guarantees a
-// dead account. Every skip is logged with its reason - a silent one strands the
-// account with nothing in the log to explain it.
+// It applies the same guards as the 429 bypass: auto-refresh must be enabled,
+// Claude Code must not be running (refreshing burns its one-time-use refresh
+// token and logs the user out), and the OAuth backoff must not be active.
 // Returns true when new credentials were obtained and installed on the client.
 func (a *AnthropicAgent) tryOAuthRecovery(ctx context.Context, source string) bool {
-	if reason := a.refreshBlockReason(); reason != "" {
-		// Warn, not Debug: reaching here means polling is already failing or
-		// paused, so a silent skip leaves an operator with a dead account and
-		// no stated cause - which is exactly how this went undiagnosed.
-		a.logger.Warn("Auth-failure OAuth refresh skipped",
-			"source", source,
-			"reason", reason,
-			"resume_at", a.rateLimitResumeAt)
-		a.lastRefreshBlockReason = reason
+	if a.credsRefresh == nil {
+		a.logger.Debug("Skipping auth-failure OAuth refresh - no credentials refresh configured", "source", source)
 		return false
 	}
-	a.lastRefreshBlockReason = ""
+	if !a.autoRefreshAllowed() {
+		a.logger.Debug("Skipping auth-failure OAuth refresh - auto_refresh_tokens disabled", "source", source)
+		return false
+	}
+	if a.claudeCodeRunning() {
+		a.logger.Debug("Skipping auth-failure OAuth refresh - Claude Code is running", "source", source)
+		return false
+	}
+	if a.rateLimitPaused && time.Now().Before(a.rateLimitResumeAt) {
+		a.logger.Debug("Skipping auth-failure OAuth refresh - OAuth backoff active",
+			"source", source, "resume_at", a.rateLimitResumeAt)
+		return false
+	}
 
 	creds := a.credsRefresh()
 	if creds == nil || creds.RefreshToken == "" {
 		a.logger.Warn("Auth-failure OAuth refresh unavailable - no refresh token", "source", source)
-		a.lastRefreshBlockReason = "no refresh token in the credential store"
 		return false
 	}
 
-	// A running Claude Code is a hard block on exchanging a refresh token: the
-	// credential lock is advisory, so a natively installed `claude` takes no
-	// lock and both sides would spend the same one-time-use token, logging the
-	// account out again. Only an image whose bundled CLI is flock-wrapped can
-	// declare otherwise (ONWATCH_CLAUDE_CLI_LOCKED).
-	//
-	// Adoption is always safe and runs either way - it consumes nothing. It is
-	// also the normal recovery on a host, where a resident Claude Code rotates
-	// the shared credential on its own schedule.
-	if a.claudeCodeRunning() {
-		if creds.AccessToken != "" && creds.AccessToken != a.lastFailedToken && creds.AccessToken != a.lastToken {
-			a.logger.Info("Claude Code is running and has rotated credentials - adopting them", "source", source)
-			a.client.SetToken(creds.AccessToken)
-			a.lastToken = creds.AccessToken
-			a.supersededToken = ""
-			return true
-		}
-		if !claudeCLISharesCredentialLock() {
-			reason := "Claude Code is running and does not share the credential lock"
-			a.logger.Warn("Auth-failure OAuth refresh skipped",
-				"source", source,
-				"reason", reason,
-				"action", "Let Claude Code rotate the credential, or stop it to let onWatch refresh")
-			a.lastRefreshBlockReason = reason
-			return false
-		}
-		a.logger.Warn("Claude Code is running but the stored credentials are still the rejected ones - refreshing under the shared credential lock",
-			"source", source)
-	}
-
 	a.logger.Info("Attempting OAuth refresh to recover from auth failures", "source", source)
-	rotation, err := a.rotateCredentials(ctx, creds)
+	newTokens, err := api.RefreshAnthropicToken(ctx, creds.RefreshToken)
 	if err != nil {
 		a.noteOAuthRefreshFailure(err, source)
 		return false
 	}
 
 	// Refresh succeeded - reset OAuth backoff state
-	a.clearRateLimitBackoff()
+	a.rateLimitFailCount = 0
+	a.rateLimitPaused = false
+	a.rateLimitResumeAt = time.Time{}
 
 	// CRITICAL: refresh tokens are one-time use, persist the new pair immediately.
-	a.acceptRotatedCredentials(rotation, creds.AccessToken)
-	if rotation.Adopted {
-		a.logger.Info("Adopted credentials rotated by another process", "source", source)
-	}
+	a.applyRefreshedTokens(newTokens, creds.AccessToken)
 	a.logger.Info("OAuth token refreshed after auth failures",
 		"source", source,
-		"expires_in_hours", rotation.Tokens.ExpiresIn/3600)
+		"expires_in_hours", newTokens.ExpiresIn/3600)
 	return true
 }
 
@@ -830,8 +513,8 @@ func (a *AnthropicAgent) tryPausedAuthRecovery(ctx context.Context) bool {
 // same refresh token (onWatch refreshes would invalidate Claude Code's pending
 // refresh and cause re-authentication).
 func (a *AnthropicAgent) proactiveRefresh(ctx context.Context, creds *api.AnthropicCredentials) {
-	if reason := a.refreshBlockReason(); reason != "" {
-		a.noteRefreshSkipped("proactive refresh", reason, creds, "")
+	if !a.autoRefreshAllowed() {
+		a.logger.Debug("Skipping proactive OAuth refresh - auto_refresh_tokens disabled")
 		return
 	}
 	// Skip if these are credentials we already refreshed away from but could
@@ -839,33 +522,46 @@ func (a *AnthropicAgent) proactiveRefresh(ctx context.Context, creds *api.Anthro
 	// agent would mint - and burn - a new one-time-use refresh token on every
 	// single poll, which invalidates Claude Code's session.
 	if creds.AccessToken != "" && creds.AccessToken == a.supersededToken {
-		a.noteRefreshSkipped("proactive refresh",
-			"stored credentials are already superseded by a refresh that could not be saved", creds, "")
+		a.logger.Debug("Skipping proactive OAuth refresh - stored credentials already superseded by an unsaved refresh")
 		return
 	}
-	// Skip if Claude Code is running - avoid competing for the same refresh
-	// token. onWatch refreshing burns Claude Code's scheduled refresh, causing
-	// invalid_grant. Unlike tryOAuthRecovery this has no escape hatch: the token
-	// here is still valid, so deferring costs nothing and Claude Code will
-	// rotate it on its own schedule.
+	// Skip if Claude Code is running - avoid competing for the same refresh token.
+	// onWatch refreshing burns Claude Code's scheduled refresh, causing invalid_grant.
 	if a.claudeCodeRunning() {
-		a.noteRefreshSkipped("proactive refresh", "Claude Code is running", creds, a.claudeCodeProcess())
+		a.logger.Debug("Skipping proactive OAuth refresh - Claude Code is running",
+			"expires_in", creds.ExpiresIn.Round(time.Second))
 		return
 	}
-	a.lastRefreshBlockReason = ""
+
+	// Skip if in rate limit backoff
+	if a.rateLimitPaused && time.Now().Before(a.rateLimitResumeAt) {
+		a.logger.Debug("Skipping proactive OAuth refresh - in rate limit backoff",
+			"resume_at", a.rateLimitResumeAt)
+		return
+	}
 
 	a.logger.Info("Token expiring soon, attempting proactive OAuth refresh",
 		"expires_in", creds.ExpiresIn.Round(time.Second))
 
-	rotation, err := a.rotateCredentials(ctx, creds)
+	newTokens, err := api.RefreshAnthropicToken(ctx, creds.RefreshToken)
 	if err != nil {
 		if errors.Is(err, api.ErrOAuthRateLimited) {
-			backoff := a.noteRateLimited(err)
-			a.logger.Warn("Proactive OAuth refresh rate limited - backing off",
-				"fail_count", a.rateLimitFailCount,
-				"backoff", backoff,
-				"server_retry_after", api.RetryAfter(err),
-				"response_body", api.OAuthResponseBody(err))
+			a.rateLimitFailCount++
+			backoff := api.RetryAfter(err)
+			if backoff > 0 {
+				a.rateLimitPaused = true
+				a.rateLimitResumeAt = time.Now().Add(backoff)
+				a.logger.Warn("Proactive OAuth refresh rate limited - using server Retry-After",
+					"fail_count", a.rateLimitFailCount,
+					"retry_after", backoff)
+			} else {
+				backoff = rateLimitBackoff(a.rateLimitFailCount)
+				a.rateLimitPaused = true
+				a.rateLimitResumeAt = time.Now().Add(backoff)
+				a.logger.Warn("Proactive OAuth refresh rate limited - backing off",
+					"fail_count", a.rateLimitFailCount,
+					"backoff", backoff)
+			}
 		} else if errors.Is(err, api.ErrOAuthInvalidGrant) {
 			a.authFailCount = maxAuthFailures
 			a.pauseAuth(a.lastToken)
@@ -879,15 +575,14 @@ func (a *AnthropicAgent) proactiveRefresh(ctx context.Context, creds *api.Anthro
 	}
 
 	// Proactive refresh succeeded - reset all backoff state
-	a.clearRateLimitBackoff()
+	a.rateLimitFailCount = 0
+	a.rateLimitPaused = false
+	a.rateLimitResumeAt = time.Time{}
 
 	// CRITICAL: Save new tokens to disk IMMEDIATELY
-	a.acceptRotatedCredentials(rotation, creds.AccessToken)
-	if rotation.Adopted {
-		a.logger.Info("Adopted credentials rotated by another process", "source", "proactive refresh")
-	}
+	a.applyRefreshedTokens(newTokens, creds.AccessToken)
 	a.logger.Info("Proactively refreshed OAuth token",
-		"expires_in_hours", rotation.Tokens.ExpiresIn/3600)
+		"expires_in_hours", newTokens.ExpiresIn/3600)
 
 	// Reset auth failures since we have fresh credentials
 	if a.authPaused {
@@ -914,7 +609,6 @@ func (a *AnthropicAgent) poll(ctx context.Context) {
 		} else {
 			now := time.Now().UTC()
 			snapshot := statuslineToSnapshot(rl, now)
-			snapshot.AccountID = a.accountID
 			if _, err := a.store.InsertAnthropicSnapshot(snapshot); err != nil {
 				a.logger.Error("Failed to insert statusline snapshot", "error", err)
 				return // don't fall through to API polling on DB error
@@ -929,7 +623,9 @@ func (a *AnthropicAgent) poll(ctx context.Context) {
 				"source", "statusline",
 				"quota_count", len(snapshot.Quotas),
 				"cycle", a.pollCycleCount)
-			a.decayRateLimitBackoff()
+			if a.rateLimitFailCount > 0 {
+				a.rateLimitFailCount--
+			}
 			// Hybrid: periodically do a full API poll for supplementary quotas
 			// (seven_day_sonnet, extra_usage, etc.) that statusline doesn't provide.
 			if a.beginSupplementalAPIPoll() {
@@ -988,7 +684,9 @@ func (a *AnthropicAgent) poll(ctx context.Context) {
 
 			// If we were in rate limit backoff and credentials changed, resume
 			if a.rateLimitPaused {
-				a.clearRateLimitBackoff()
+				a.rateLimitPaused = false
+				a.rateLimitFailCount = 0
+				a.rateLimitResumeAt = time.Time{}
 				a.logger.Info("Rate limit backoff lifted - new credentials detected")
 			}
 		}
@@ -1005,13 +703,154 @@ func (a *AnthropicAgent) poll(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		// A usage-API 429 is not an authentication failure. Rotating a one-time
-		// refresh token to evade this limit races every Claude Code process sharing
-		// the credential and can force a global re-login. Respect the limit and try
-		// again on a later scheduled poll instead.
+		// Rate limited (429) - attempt token refresh to get fresh rate limit window.
+		//
+		// WORKAROUND for Anthropic API rate limiting (GitHub issue #16):
+		// Anthropic's /api/oauth/usage endpoint has aggressive rate limits (~5 requests
+		// per token before 429). However, each NEW access token gets a fresh rate limit
+		// window. By refreshing the OAuth token when rate limited, we can bypass the
+		// limit and continue polling without waiting 5+ minutes.
+		//
+		// Key insight: Rate limits are per-access-token, not per-account. Refresh tokens
+		// are one-time use (OAuth refresh token rotation), so we MUST save both the new
+		// access token AND new refresh token after each refresh.
+		//
+		// See: https://github.com/anthropics/claude-code/issues/31021
 		if errors.Is(err, api.ErrAnthropicRateLimited) {
-			a.logger.Warn("Anthropic usage API rate limited; preserving OAuth credentials and retrying on the next poll")
-			return
+			a.logger.Warn("Anthropic rate limited (429), attempting token refresh bypass")
+
+			// If in rate limit backoff, skip the OAuth refresh to avoid burning tokens
+			if a.rateLimitPaused {
+				if time.Now().Before(a.rateLimitResumeAt) {
+					a.logger.Warn("OAuth refresh in backoff, skipping token refresh attempt",
+						"resume_at", a.rateLimitResumeAt,
+						"fail_count", a.rateLimitFailCount)
+					return
+				}
+				// Backoff expired - decay failCount so retries don't escalate forever.
+				// If retry succeeds, failCount resets to 0. If retry fails,
+				// failCount stays flat (decremented here, incremented below).
+				if a.rateLimitFailCount > 0 {
+					a.rateLimitFailCount--
+				}
+				a.rateLimitPaused = false
+				a.logger.Info("OAuth rate limit backoff expired, retrying refresh",
+					"fail_count", a.rateLimitFailCount)
+			}
+
+			// Try to refresh token to get fresh rate limit window.
+			// Skip if Claude Code is running - refreshing burns CC's token.
+			if !a.autoRefreshAllowed() {
+				a.logger.Debug("Skipping 429 bypass refresh - auto_refresh_tokens disabled")
+				return
+			}
+			if a.claudeCodeRunning() {
+				a.logger.Debug("Claude Code running, skipping 429 bypass refresh")
+				return
+			}
+			if a.credsRefresh != nil {
+				if creds := a.credsRefresh(); creds != nil && creds.RefreshToken != "" {
+					newTokens, refreshErr := api.RefreshAnthropicToken(ctx, creds.RefreshToken)
+					if refreshErr != nil {
+						// Classify the OAuth refresh failure
+						if errors.Is(refreshErr, api.ErrOAuthRateLimited) {
+							// OAuth endpoint itself is rate limited - apply backoff.
+							// Prefer server-provided Retry-After header if available.
+							a.rateLimitFailCount++
+							backoff := api.RetryAfter(refreshErr)
+							if backoff > 0 {
+								a.rateLimitPaused = true
+								a.rateLimitResumeAt = time.Now().Add(backoff)
+								a.logger.Warn("OAuth refresh rate limited - using server Retry-After",
+									"fail_count", a.rateLimitFailCount,
+									"retry_after", backoff,
+									"resume_at", a.rateLimitResumeAt)
+							} else {
+								backoff = rateLimitBackoff(a.rateLimitFailCount)
+								a.rateLimitResumeAt = time.Now().Add(backoff)
+								if a.rateLimitFailCount >= maxRateLimitFailures {
+									a.rateLimitPaused = true
+									a.logger.Error("OAuth refresh rate limited - entering extended backoff",
+										"fail_count", a.rateLimitFailCount,
+										"backoff", backoff,
+										"resume_at", a.rateLimitResumeAt)
+								} else {
+									a.rateLimitPaused = true
+									a.logger.Warn("OAuth refresh rate limited - backing off",
+										"fail_count", a.rateLimitFailCount,
+										"backoff", backoff,
+										"resume_at", a.rateLimitResumeAt)
+								}
+							}
+						} else if errors.Is(refreshErr, api.ErrOAuthInvalidGrant) {
+							// Terminal: refresh token revoked/expired - pause like auth errors
+							a.authFailCount = maxAuthFailures
+							a.pauseAuth(a.lastToken)
+							a.logger.Error("OAuth refresh token invalid (invalid_grant) - polling PAUSED",
+								"error", refreshErr,
+								"action", "Re-authenticate with 'claude auth' to resume polling")
+							a.sendAuthErrorNotification(
+								"OAuth refresh token expired",
+								"Refresh token is invalid or revoked. Re-authenticate with 'claude auth' to resume polling.",
+								false,
+							)
+						} else {
+							// Transient OAuth error - apply mild backoff
+							a.rateLimitFailCount++
+							if a.rateLimitFailCount >= maxRateLimitFailures {
+								backoff := rateLimitBackoff(a.rateLimitFailCount)
+								a.rateLimitPaused = true
+								a.rateLimitResumeAt = time.Now().Add(backoff)
+								a.logger.Warn("OAuth refresh failed repeatedly - backing off",
+									"error", refreshErr,
+									"fail_count", a.rateLimitFailCount,
+									"backoff", backoff)
+							} else {
+								a.logger.Warn("Rate limit bypass failed - token refresh error",
+									"error", refreshErr,
+									"fail_count", a.rateLimitFailCount)
+							}
+						}
+						return
+					}
+
+					// OAuth refresh succeeded - reset backoff state
+					a.rateLimitFailCount = 0
+					a.rateLimitPaused = false
+					a.rateLimitResumeAt = time.Time{}
+
+					// Save new tokens immediately (refresh tokens are one-time use!)
+					a.applyRefreshedTokens(newTokens, creds.AccessToken)
+					a.logger.Info("Token refreshed to bypass rate limit, retrying...")
+
+					// Retry with fresh token
+					resp, err = a.client.FetchQuotas(ctx)
+					if err != nil {
+						if ctx.Err() != nil {
+							return
+						}
+						if errors.Is(err, api.ErrAnthropicRateLimited) {
+							a.logger.Warn("Still rate limited after token refresh, will retry next poll")
+						} else {
+							a.logger.Error("Retry after token refresh failed", "error", err)
+						}
+						return
+					}
+					// Success! Fall through to process the response
+					a.logger.Info("Rate limit bypassed successfully with refreshed token")
+				} else {
+					a.logger.Warn("Rate limit bypass unavailable - no refresh token")
+					return
+				}
+			} else {
+				a.logger.Warn("Rate limit bypass unavailable - no credentials refresh configured")
+				return
+			}
+		}
+
+		// Skip remaining error handling if rate limit was successfully bypassed (err is now nil)
+		if err == nil {
+			goto processResponse
 		}
 
 		// On auth error (401 or 403), force token re-read and retry once
@@ -1061,7 +900,6 @@ func (a *AnthropicAgent) poll(ctx context.Context) {
 							a.pauseAuth(retryToken)
 							a.logger.Error("Anthropic polling PAUSED due to repeated auth failures",
 								"failure_count", a.authFailCount,
-								"oauth_refresh_skipped", a.refreshPauseCause(),
 								"action", "Re-authenticate with 'claude auth' to resume polling")
 							a.sendAuthErrorNotification(
 								"Anthropic polling paused",
@@ -1088,7 +926,9 @@ func (a *AnthropicAgent) poll(ctx context.Context) {
 		// Success - decay rate limit backoff. Auth state is reset below, at
 		// processResponse, so the recovery paths that jump straight there
 		// clear it too.
-		a.decayRateLimitBackoff()
+		if a.rateLimitFailCount > 0 {
+			a.rateLimitFailCount--
+		}
 	}
 
 processResponse:
@@ -1103,7 +943,6 @@ processResponse:
 	// Convert to snapshot and store
 	now := time.Now().UTC()
 	snapshot := resp.ToSnapshot(now)
-	snapshot.AccountID = a.accountID
 
 	if _, err := a.store.InsertAnthropicSnapshot(snapshot); err != nil {
 		a.logger.Error("Failed to insert Anthropic snapshot", "error", err)
@@ -1123,7 +962,6 @@ processResponse:
 			a.notifier.Check(notify.QuotaStatus{
 				Provider:    "anthropic",
 				QuotaKey:    q.Name,
-				AccountID:   notifyAccountID(a.accountID),
 				Utilization: q.Utilization,
 				ResetAt:     derefTime(q.ResetsAt),
 			})
@@ -1164,8 +1002,6 @@ processResponse:
 
 	a.logger.Info("Anthropic poll complete",
 		"source", "api",
-		"account", a.accountName,
-		"account_id", a.accountID,
 		"quota_count", quotaCount,
 		"max_utilization", maxUtil,
 	)

@@ -4,7 +4,8 @@ Track two or more accounts of the same provider side by side - a work Claude
 login and a personal one, two Antigravity profiles, several Codex logins - each
 with its own quota history, its own reset cycles, and its own credentials.
 
-Supported for **Anthropic**, **Antigravity**, and **Codex**. Each one discovers
+Supported for **Antigravity** and **Codex**. (Anthropic uses stock single-account
+auth in this fork; see [with-user-env Image](WITH_USER_ENV.md#anthropic).) Each one discovers
 accounts from a directory you control: one folder per account, holding exactly
 the credential file that provider's CLI already writes.
 
@@ -16,7 +17,6 @@ the credential file that provider's CLI already writes.
 
 - [How it works](#how-it-works)
 - [Setup](#setup)
-  - [Anthropic](#anthropic)
   - [Antigravity](#antigravity)
   - [Codex](#codex)
 - [Account names and display aliases](#account-names-and-display-aliases)
@@ -37,11 +37,11 @@ Point one environment variable at a root directory. Every direct child directory
 of that root is one account:
 
 ```
-$ANTHROPIC_AUTH_ROOT/
+$ANTIGRAVITY_AUTH_ROOT/
 ├── work/
-│   └── .claude/.credentials.json
+│   └── .gemini/
 └── personal/
-    └── .claude/.credentials.json
+    └── .gemini/
 ```
 
 Once a minute onWatch rescans the root and reconciles what it finds:
@@ -66,29 +66,6 @@ except to persist a token rotation for that same account.
 Set the variable in `.env` (or the environment) and restart the daemon. Creating
 the folders and logging in is a manual, one-time step per account, done with the
 provider's own CLI.
-
-### Anthropic
-
-```bash
-ANTHROPIC_AUTH_ROOT=/home/you/.onwatch/auth/claude
-```
-
-Expected layout - the standard Claude Code home, one per account:
-
-```
-<root>/<account>/.claude/.credentials.json
-```
-
-To create one, run Claude Code's login with `HOME` pointed at the account
-folder, so it writes its credentials there instead of your real home:
-
-```bash
-mkdir -p "$ANTHROPIC_AUTH_ROOT/work"
-HOME="$ANTHROPIC_AUTH_ROOT/work" claude
-```
-
-Each account rotates its own refresh token. Refresh tokens are one-time use, so
-this isolation is what keeps one account's rotation from invalidating another's.
 
 ### Antigravity
 
@@ -151,7 +128,7 @@ history stays attached to the same account.
 
 ## Using accounts in the dashboard
 
-Anthropic and Antigravity views show an account picker as soon as one account is
+The Antigravity view shows an account picker as soon as one account is
 discovered - it appears even at a single account, so a first login is visibly
 confirmed rather than silent. Switching accounts re-reads every panel for that
 account: current quotas, history, cycles, sessions, and insights.
@@ -169,11 +146,11 @@ the account picker chooses which.
 
 ## API
 
-`GET /api/accounts?provider=anthropic|antigravity` lists account IDs, folder
+`GET /api/accounts?provider=antigravity` lists account IDs, folder
 names, display aliases, deletion state, and credential health.
 
 ```http
-PATCH /api/accounts?provider=anthropic
+PATCH /api/accounts?provider=antigravity
 Content-Type: application/json
 
 {"account_id": 12, "alias": "Acme work"}
@@ -247,11 +224,10 @@ is automatic in every install - no manual database step.
 
 ## Settings that are ignored in multi-account mode
 
-Both emit one startup `WARN` naming the setting and the reason:
+It emits one startup `WARN` naming the setting and the reason:
 
 | Setting | Ignored when | Why |
 |---------|--------------|-----|
-| `ANTHROPIC_TOKEN` | `ANTHROPIC_AUTH_ROOT` is set | Every named account authenticates from its own `<root>/<alias>/.claude/.credentials.json` and rotates its own refresh token. |
 | `ANTIGRAVITY_SOURCE` | `ANTIGRAVITY_AUTH_ROOT` is set | The IDE probe cannot be scoped to one account home, so every named account polls through the `agy` CLI. |
 
 ## Limits and known trade-offs

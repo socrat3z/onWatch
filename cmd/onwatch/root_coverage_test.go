@@ -19,6 +19,7 @@ import (
 
 	"github.com/onllm-dev/onwatch/v2/internal/config"
 	"github.com/onllm-dev/onwatch/v2/internal/store"
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 	"github.com/onllm-dev/onwatch/v2/internal/update"
 	"github.com/onllm-dev/onwatch/v2/internal/web"
 )
@@ -128,7 +129,7 @@ func TestPIDFileLifecycle(t *testing.T) {
 
 func TestMigrateDBLocation_MovesDBAndSidecars(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	oldDB := filepath.Join(home, ".onwatch", "onwatch.db")
 	newDB := filepath.Join(home, ".onwatch", "data", "onwatch.db")
@@ -163,7 +164,7 @@ func TestMigrateDBLocation_MovesDBAndSidecars(t *testing.T) {
 
 func TestFixExplicitDBPath_RedirectsToCanonicalWhenBetter(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	canonical := filepath.Join(home, ".onwatch", "data", "onwatch.db")
 	if err := os.MkdirAll(filepath.Dir(canonical), 0o755); err != nil {
 		t.Fatalf("mkdir canonical dir: %v", err)
@@ -434,7 +435,7 @@ func TestPrintSummaryAndNextSteps(t *testing.T) {
 func TestRunSetupEarlyPathsAndSafeRunCommands(t *testing.T) {
 	t.Run("runSetup returns early when all providers already configured", func(t *testing.T) {
 		home := t.TempDir()
-		setTestUserHome(t, home)
+		testhome.SetTestHome(t, home)
 		installDir := filepath.Join(home, ".onwatch")
 		envFile := filepath.Join(installDir, ".env")
 		if err := os.MkdirAll(filepath.Join(installDir, "data"), 0o755); err != nil {
@@ -459,7 +460,7 @@ func TestRunSetupEarlyPathsAndSafeRunCommands(t *testing.T) {
 
 	t.Run("runSetup fresh safe path", func(t *testing.T) {
 		home := t.TempDir()
-		setTestUserHome(t, home)
+		testhome.SetTestHome(t, home)
 		input := strings.Join([]string{
 			"6",    // antigravity only
 			"1",    // antigravity source: both

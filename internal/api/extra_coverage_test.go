@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 )
 
 // ---------------------------------------------------------------------------
@@ -110,7 +112,7 @@ func TestDetectCodexCredentials_APIKeyOnly_ReturnsCredentials(t *testing.T) {
 	// When only APIKey is set (no access_token), the credentials should be returned.
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", "")
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	isolateOpenCodeEnv(t)
 
 	codexDir := filepath.Join(home, ".codex")
@@ -140,7 +142,7 @@ func TestDetectCodexCredentials_BothEmpty_ReturnsNil(t *testing.T) {
 	// When both access_token and OPENAI_API_KEY are empty, nil should be returned.
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", "")
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_TOKEN", "")
 	isolateOpenCodeEnv(t)
 
@@ -164,7 +166,7 @@ func TestDetectCodexCredentials_BothEmpty_ReturnsNil(t *testing.T) {
 func TestDetectCodexCredentials_InvalidJSON_ReturnsNil(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
-	setTestUserHome(t, t.TempDir())
+	testhome.SetTestHome(t, t.TempDir())
 	t.Setenv("CODEX_TOKEN", "")
 	isolateOpenCodeEnv(t)
 
@@ -182,7 +184,7 @@ func TestDetectCodexCredentials_NoFile_ReturnsNil(t *testing.T) {
 	// Set CODEX_HOME to a temp dir that has no auth.json
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
-	setTestUserHome(t, t.TempDir())
+	testhome.SetTestHome(t, t.TempDir())
 	t.Setenv("CODEX_TOKEN", "")
 	isolateOpenCodeEnv(t)
 
@@ -604,7 +606,7 @@ func TestCopilotToSnapshot_MultipleMixedQuotas(t *testing.T) {
 func TestDetectAnthropicToken_ReturnsStringOrEmpty(t *testing.T) {
 	// When no credentials file exists, should return empty string without panic.
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	// Don't create any .claude directory - should return empty gracefully
 	token := DetectAnthropicToken(nil)
@@ -614,7 +616,7 @@ func TestDetectAnthropicToken_ReturnsStringOrEmpty(t *testing.T) {
 
 func TestDetectAnthropicCredentials_NoFile(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	creds := DetectAnthropicCredentials(nil)
 	if creds != nil {
@@ -629,7 +631,7 @@ func TestDetectAnthropicCredentials_NoFile(t *testing.T) {
 
 func TestWriteAnthropicCredentials_Success(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	// Create the .claude directory and a credentials file
 	claudeDir := filepath.Join(home, ".claude")
@@ -676,7 +678,7 @@ func TestWriteAnthropicCredentials_NoFile(t *testing.T) {
 	// Keychain/keyring is the primary store. File write is skipped.
 	// On Windows the file is the only store, so see assertMissingCredentialsFileResult.
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	// Don't create .claude directory
 	err := WriteAnthropicCredentials("token", "refresh", 3600)
@@ -823,7 +825,7 @@ func TestAnthropicClient_SetAndGetToken(t *testing.T) {
 
 func TestDetectAnthropicToken_FromCredentialsFile(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	claudeDir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
@@ -844,7 +846,7 @@ func TestDetectAnthropicToken_FromCredentialsFile(t *testing.T) {
 
 func TestDetectAnthropicToken_InvalidCredentialsFile(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	claudeDir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
@@ -865,7 +867,7 @@ func TestDetectAnthropicToken_InvalidCredentialsFile(t *testing.T) {
 
 func TestDetectAnthropicToken_EmptyTokenInFile(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	claudeDir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
@@ -891,7 +893,7 @@ func TestDetectAnthropicToken_EmptyTokenInFile(t *testing.T) {
 
 func TestDetectAnthropicCredentials_FromFile(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	claudeDir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
@@ -918,7 +920,7 @@ func TestDetectAnthropicCredentials_FromFile(t *testing.T) {
 
 func TestDetectAnthropicCredentials_EmptyTokenInFile(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	claudeDir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
@@ -939,7 +941,7 @@ func TestDetectAnthropicCredentials_EmptyTokenInFile(t *testing.T) {
 
 func TestDetectAnthropicCredentials_InvalidJSON(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	claudeDir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
@@ -1159,7 +1161,7 @@ func TestCopilotToSnapshot_EmptyQuotaSnapshots(t *testing.T) {
 func TestDetectCodexToken_APIKeyOnly_ReturnsEmpty(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", "")
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	codexDir := filepath.Join(home, ".codex")
 	if err := os.MkdirAll(codexDir, 0o755); err != nil {
@@ -1181,7 +1183,7 @@ func TestDetectCodexToken_APIKeyOnly_ReturnsEmpty(t *testing.T) {
 func TestDetectCodexToken_WithAccessToken(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", "")
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	codexDir := filepath.Join(home, ".codex")
 	if err := os.MkdirAll(codexDir, 0o755); err != nil {
@@ -1205,7 +1207,7 @@ func TestDetectCodexToken_WithAccessToken(t *testing.T) {
 
 func TestDetectCodexCredentials_EmptyCodexHome_NoHomeDir(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
-	clearTestUserHome(t)
+	testhome.SetTestHome(t, "")
 	// codexAuthPath should return "" when HOME is unset
 	// On macOS, os.UserHomeDir may still succeed, so we just verify no panic
 	creds := DetectCodexCredentials(nil)
@@ -1412,7 +1414,7 @@ func TestAntigravityClient_ResetClearsConnection(t *testing.T) {
 func TestDetectCodexToken_NilCreds_ReturnsEmpty(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", "")
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	// No .codex/auth.json exists, so DetectCodexCredentials returns nil
 	token := DetectCodexToken(nil)
 	if token != "" {
@@ -1702,7 +1704,7 @@ func TestAnthropicFetchQuotas_CreateRequestError(t *testing.T) {
 
 func TestWriteAnthropicCredentials_NoOAuthSection(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	claudeDir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
@@ -1811,7 +1813,7 @@ func TestCodexAuthPath_WithCODEX_HOME(t *testing.T) {
 func TestCodexAuthPath_WithoutCODEX_HOME(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", "")
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	path := codexAuthPath()
 	expected := filepath.Join(home, ".codex", "auth.json")
@@ -2339,7 +2341,7 @@ func TestCodexAuthPath_EmptyHOME_ReturnsEmpty(t *testing.T) {
 	// When CODEX_HOME is unset and HOME is empty, codexAuthPath returns ""
 	// because os.UserHomeDir() returns an error when HOME is not set.
 	t.Setenv("CODEX_HOME", "")
-	clearTestUserHome(t)
+	testhome.SetTestHome(t, "")
 
 	path := codexAuthPath()
 	if path != "" {
@@ -2364,7 +2366,7 @@ func TestCodexAuthPath_EmptyHOME_ReturnsEmpty(t *testing.T) {
 func TestDetectAnthropicTokenPlatform_EmptyHOME_ReturnsEmpty(t *testing.T) {
 	// When HOME is unset and platform keychain lookups fail, the function
 	// logs "Cannot determine home directory" and returns "".
-	clearTestUserHome(t)
+	testhome.SetTestHome(t, "")
 
 	// This will attempt keychain (which will likely fail), then try to read
 	// the credentials file. With HOME="", os.UserHomeDir() returns an error,
@@ -2443,7 +2445,7 @@ func TestWriteAnthropicCredentials_FileNotFound(t *testing.T) {
 	// has no .claude/.credentials.json. On macOS/Linux, this is OK because
 	// Keychain/keyring is the primary store - file write is skipped silently.
 	dir := t.TempDir()
-	setTestUserHome(t, dir)
+	testhome.SetTestHome(t, dir)
 
 	err := WriteAnthropicCredentials("access_token", "refresh_token", 3600)
 	// File not existing is OK (Keychain/keyring is primary on macOS/Linux).
@@ -2628,7 +2630,7 @@ func TestAntigravityClient_FetchQuotas_500Response(t *testing.T) {
 
 func TestDetectAnthropicTokenPlatform_MalformedCredentialsFile(t *testing.T) {
 	dir := t.TempDir()
-	setTestUserHome(t, dir)
+	testhome.SetTestHome(t, dir)
 
 	claudeDir := filepath.Join(dir, ".claude")
 	if err := os.MkdirAll(claudeDir, 0755); err != nil {
@@ -2650,7 +2652,7 @@ func TestDetectAnthropicTokenPlatform_MalformedCredentialsFile(t *testing.T) {
 
 func TestDetectAnthropicTokenPlatform_EmptyAccessToken(t *testing.T) {
 	dir := t.TempDir()
-	setTestUserHome(t, dir)
+	testhome.SetTestHome(t, dir)
 
 	claudeDir := filepath.Join(dir, ".claude")
 	if err := os.MkdirAll(claudeDir, 0755); err != nil {
@@ -2677,7 +2679,7 @@ func TestDetectAnthropicTokenPlatform_EmptyAccessToken(t *testing.T) {
 
 func TestDetectAnthropicCredentialsPlatform_MalformedJSON(t *testing.T) {
 	dir := t.TempDir()
-	setTestUserHome(t, dir)
+	testhome.SetTestHome(t, dir)
 
 	claudeDir := filepath.Join(dir, ".claude")
 	if err := os.MkdirAll(claudeDir, 0755); err != nil {
@@ -2702,7 +2704,7 @@ func TestDetectAnthropicCredentialsPlatform_MalformedJSON(t *testing.T) {
 
 func TestDetectAnthropicCredentialsPlatform_NoOAuthSection(t *testing.T) {
 	dir := t.TempDir()
-	setTestUserHome(t, dir)
+	testhome.SetTestHome(t, dir)
 
 	claudeDir := filepath.Join(dir, ".claude")
 	if err := os.MkdirAll(claudeDir, 0755); err != nil {
@@ -2727,7 +2729,7 @@ func TestDetectAnthropicCredentialsPlatform_NoOAuthSection(t *testing.T) {
 
 func TestWriteAnthropicCredentials_CreatesBackup(t *testing.T) {
 	dir := t.TempDir()
-	setTestUserHome(t, dir)
+	testhome.SetTestHome(t, dir)
 
 	claudeDir := filepath.Join(dir, ".claude")
 	if err := os.MkdirAll(claudeDir, 0755); err != nil {
@@ -2773,7 +2775,7 @@ func TestDetectCodexCredentials_EmptyAuthFile(t *testing.T) {
 	isolateOpenCodeEnv(t)
 	dir := t.TempDir()
 	t.Setenv("CODEX_HOME", dir)
-	setTestUserHome(t, t.TempDir())
+	testhome.SetTestHome(t, t.TempDir())
 
 	// Write an auth file with all empty fields
 	authData := `{"OPENAI_API_KEY":"","tokens":{"access_token":"","refresh_token":"","id_token":"","account_id":""}}`
@@ -3010,7 +3012,7 @@ func TestAntigravityToSnapshot_ModelWithNilQuotaInfo(t *testing.T) {
 
 func TestDetectAnthropicCredentialsPlatform_ValidCredentials(t *testing.T) {
 	dir := t.TempDir()
-	setTestUserHome(t, dir)
+	testhome.SetTestHome(t, dir)
 
 	claudeDir := filepath.Join(dir, ".claude")
 	if err := os.MkdirAll(claudeDir, 0755); err != nil {
@@ -3044,7 +3046,7 @@ func TestDetectAnthropicCredentialsPlatform_ValidCredentials(t *testing.T) {
 
 func TestDetectAnthropicTokenPlatform_ValidFile_ReturnsToken(t *testing.T) {
 	dir := t.TempDir()
-	setTestUserHome(t, dir)
+	testhome.SetTestHome(t, dir)
 
 	claudeDir := filepath.Join(dir, ".claude")
 	if err := os.MkdirAll(claudeDir, 0755); err != nil {
@@ -3071,7 +3073,7 @@ func TestDetectAnthropicTokenPlatform_ValidFile_ReturnsToken(t *testing.T) {
 
 func TestWriteAnthropicCredentials_InvalidJSONFile(t *testing.T) {
 	dir := t.TempDir()
-	setTestUserHome(t, dir)
+	testhome.SetTestHome(t, dir)
 
 	claudeDir := filepath.Join(dir, ".claude")
 	if err := os.MkdirAll(claudeDir, 0755); err != nil {

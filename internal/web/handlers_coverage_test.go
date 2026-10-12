@@ -14,6 +14,7 @@ import (
 	"github.com/onllm-dev/onwatch/v2/internal/api"
 	"github.com/onllm-dev/onwatch/v2/internal/config"
 	"github.com/onllm-dev/onwatch/v2/internal/store"
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 	"github.com/onllm-dev/onwatch/v2/internal/tracker"
 )
 
@@ -257,7 +258,7 @@ func TestHandlerTryAutoDetectAdditionalCoverage(t *testing.T) {
 
 	t.Run("anthropic and codex miss", func(t *testing.T) {
 		home := t.TempDir()
-		setTestUserHome(t, home)
+		testhome.SetTestHome(t, home)
 		t.Setenv("CODEX_HOME", filepath.Join(home, "codex-home"))
 
 		h := NewHandler(nil, nil, nil, nil, &config.Config{})
@@ -271,7 +272,7 @@ func TestHandlerTryAutoDetectAdditionalCoverage(t *testing.T) {
 
 	t.Run("anthropic success from credentials file", func(t *testing.T) {
 		home := t.TempDir()
-		setTestUserHome(t, home)
+		testhome.SetTestHome(t, home)
 		credsDir := filepath.Join(home, ".claude")
 		if err := os.MkdirAll(credsDir, 0o755); err != nil {
 			t.Fatalf("MkdirAll: %v", err)
@@ -343,7 +344,7 @@ func TestHandlerReloadProvidersCoverage(t *testing.T) {
 
 		home := t.TempDir()
 		codexHome := t.TempDir()
-		setTestUserHome(t, home)
+		testhome.SetTestHome(t, home)
 		t.Setenv("CODEX_HOME", codexHome)
 		t.Setenv("SYNTHETIC_API_KEY", "syn_reload_key")
 		t.Setenv("ZAI_API_KEY", "")
@@ -508,15 +509,15 @@ func TestHandlerCyclesMiniMaxCoverage(t *testing.T) {
 		}
 		defer s.Close()
 
-		h := NewHandler(s, nil, nil, nil, nil)
-		accountID := h.defaultMiniMaxAccountID()
 		base := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
 		for i, used := range []int{10, 30, 55} {
 			snap := sharedMiniMaxSnapshot(base.Add(time.Duration(i)*20*time.Minute), used)
-			if _, err := s.InsertMiniMaxSnapshot(snap, accountID); err != nil {
+			if _, err := s.InsertMiniMaxSnapshot(snap, 2); err != nil {
 				t.Fatalf("InsertMiniMaxSnapshot(%d): %v", i, err)
 			}
 		}
+
+		h := NewHandler(s, nil, nil, nil, nil)
 		req := httptest.NewRequest(http.MethodGet, "/api/cycles?provider=minimax&range=24h", nil)
 		rr := httptest.NewRecorder()
 		h.cyclesMiniMax(rr, req)
@@ -543,15 +544,15 @@ func TestHandlerCyclesMiniMaxCoverage(t *testing.T) {
 		}
 		defer s.Close()
 
-		h := NewHandler(s, nil, nil, nil, nil)
-		accountID := h.defaultMiniMaxAccountID()
 		base := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
 		for i, used := range []int{40, 60, 120} {
 			snap := testMiniMaxSingleModelSnapshot(base.Add(time.Duration(i)*15*time.Minute), used)
-			if _, err := s.InsertMiniMaxSnapshot(snap, accountID); err != nil {
+			if _, err := s.InsertMiniMaxSnapshot(snap, 2); err != nil {
 				t.Fatalf("InsertMiniMaxSnapshot(%d): %v", i, err)
 			}
 		}
+
+		h := NewHandler(s, nil, nil, nil, nil)
 		req := httptest.NewRequest(http.MethodGet, "/api/cycles?provider=minimax&range=24h", nil)
 		rr := httptest.NewRecorder()
 		h.cyclesMiniMax(rr, req)
@@ -605,15 +606,15 @@ func TestHandlerLoggingHistoryMiniMaxCoverage(t *testing.T) {
 		}
 		defer s.Close()
 
-		h := NewHandler(s, nil, nil, nil, nil)
-		accountID := h.defaultMiniMaxAccountID()
 		base := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
 		for i := 0; i < 3; i++ {
 			snap := testMiniMaxNonSharedSnapshot(base.Add(time.Duration(i)*20*time.Minute), 120+i*20, 80+i*15)
-			if _, err := s.InsertMiniMaxSnapshot(snap, accountID); err != nil {
+			if _, err := s.InsertMiniMaxSnapshot(snap, 2); err != nil {
 				t.Fatalf("InsertMiniMaxSnapshot(%d): %v", i, err)
 			}
 		}
+
+		h := NewHandler(s, nil, nil, nil, nil)
 		req := httptest.NewRequest(http.MethodGet, "/api/logging-history?provider=minimax&range=1&limit=100", nil)
 		rr := httptest.NewRecorder()
 		h.loggingHistoryMiniMax(rr, req)

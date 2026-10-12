@@ -16,7 +16,7 @@ import (
 	"github.com/onllm-dev/onwatch/v2/internal/api"
 	"github.com/onllm-dev/onwatch/v2/internal/config"
 	"github.com/onllm-dev/onwatch/v2/internal/store"
-	"github.com/onllm-dev/onwatch/v2/internal/testenv"
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 )
 
 // freePort returns an available TCP port for testing
@@ -290,7 +290,7 @@ func TestMain(m *testing.M) {
 func runTests(m *testing.M) int {
 	api.SetTestMode(true)
 
-	cleanup, err := testenv.IsolateProcessUserEnvironment()
+	_, cleanup, err := testhome.SandboxHome()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "web tests: %v\n", err)
 		return 1
@@ -298,11 +298,6 @@ func runTests(m *testing.M) int {
 	defer cleanup()
 
 	return m.Run()
-}
-
-func setTestUserHome(t *testing.T, home string) {
-	t.Helper()
-	testenv.SetTestUserHome(t, home)
 }
 
 func TestServer_RequiresCSRFHeader_OnPost(t *testing.T) {

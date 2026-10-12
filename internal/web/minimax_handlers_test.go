@@ -73,14 +73,13 @@ func TestBuildMiniMaxCurrent_SharedQuota(t *testing.T) {
 	s, _ := store.New(":memory:")
 	defer s.Close()
 
-	h := NewHandler(s, nil, nil, nil, nil)
-	accountID := h.defaultMiniMaxAccountID()
 	snap := sharedMiniMaxSnapshot(time.Date(2026, 3, 8, 11, 0, 0, 0, time.UTC), 1)
-	if _, err := s.InsertMiniMaxSnapshot(snap, accountID); err != nil {
+	if _, err := s.InsertMiniMaxSnapshot(snap, 2); err != nil {
 		t.Fatalf("InsertMiniMaxSnapshot: %v", err)
 	}
 
-	body, err := json.Marshal(h.buildMiniMaxCurrent(accountID))
+	h := NewHandler(s, nil, nil, nil, nil)
+	body, err := json.Marshal(h.buildMiniMaxCurrent(2))
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
@@ -133,14 +132,14 @@ func TestSessionsMiniMax_SharedQuotaFromSnapshots(t *testing.T) {
 		{25 * time.Minute, 26},
 		{35 * time.Minute, 26},
 	}
-	h := NewHandler(s, nil, nil, nil, nil)
-	h.config = &config.Config{MiniMaxAPIKey: "test-key"}
-	accountID := h.defaultMiniMaxAccountID()
 	for i, capture := range captures {
-		if _, err := s.InsertMiniMaxSnapshot(sharedMiniMaxSnapshotWithWindow(base.Add(capture.offset), capture.used, windowStart, windowEnd), accountID); err != nil {
+		if _, err := s.InsertMiniMaxSnapshot(sharedMiniMaxSnapshotWithWindow(base.Add(capture.offset), capture.used, windowStart, windowEnd), 2); err != nil {
 			t.Fatalf("InsertMiniMaxSnapshot(%d): %v", i, err)
 		}
 	}
+
+	h := NewHandler(s, nil, nil, nil, nil)
+	h.config = &config.Config{MiniMaxAPIKey: "test-key"}
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions?provider=minimax", nil)
 	rr := httptest.NewRecorder()
 	h.Sessions(rr, req)
@@ -182,14 +181,14 @@ func TestHistoryMiniMax_SharedQuotaSeries(t *testing.T) {
 	s, _ := store.New(":memory:")
 	defer s.Close()
 
-	h := NewHandler(s, nil, nil, nil, nil)
-	accountID := h.defaultMiniMaxAccountID()
 	base := time.Now().UTC().Add(-2 * time.Hour)
 	for i := 0; i < 3; i++ {
-		if _, err := s.InsertMiniMaxSnapshot(sharedMiniMaxSnapshot(base.Add(time.Duration(i)*15*time.Minute), i), accountID); err != nil {
+		if _, err := s.InsertMiniMaxSnapshot(sharedMiniMaxSnapshot(base.Add(time.Duration(i)*15*time.Minute), i), 2); err != nil {
 			t.Fatalf("InsertMiniMaxSnapshot(%d): %v", i, err)
 		}
 	}
+
+	h := NewHandler(s, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/minimax/history?range=24h", nil)
 	rr := httptest.NewRecorder()
 	h.historyMiniMax(rr, req)
@@ -220,16 +219,15 @@ func TestBuildMiniMaxInsights_SharedQuota(t *testing.T) {
 	s, _ := store.New(":memory:")
 	defer s.Close()
 
-	h := NewHandler(s, nil, nil, nil, nil)
-	accountID := h.defaultMiniMaxAccountID()
 	base := time.Now().UTC().Add(-3 * time.Hour)
 	for i := 0; i < 4; i++ {
-		if _, err := s.InsertMiniMaxSnapshot(sharedMiniMaxSnapshot(base.Add(time.Duration(i)*45*time.Minute), 10+(i*4)), accountID); err != nil {
+		if _, err := s.InsertMiniMaxSnapshot(sharedMiniMaxSnapshot(base.Add(time.Duration(i)*45*time.Minute), 10+(i*4)), 2); err != nil {
 			t.Fatalf("InsertMiniMaxSnapshot(%d): %v", i, err)
 		}
 	}
 
-	resp := h.buildMiniMaxInsights(accountID, map[string]bool{}, 24*time.Hour)
+	h := NewHandler(s, nil, nil, nil, nil)
+	resp := h.buildMiniMaxInsights(2, map[string]bool{}, 24*time.Hour)
 
 	if len(resp.Stats) < 4 {
 		t.Fatalf("expected rich stats, got %d", len(resp.Stats))
@@ -276,20 +274,20 @@ func TestBuildMiniMaxSummaryMap_SharedQuota(t *testing.T) {
 	s, _ := store.New(":memory:")
 	defer s.Close()
 
-	h := NewHandler(s, nil, nil, nil, nil)
-	accountID := h.defaultMiniMaxAccountID()
 	snap := sharedMiniMaxSnapshot(time.Now().UTC().Add(-45*time.Minute), 1)
-	if _, err := s.InsertMiniMaxSnapshot(snap, accountID); err != nil {
+	if _, err := s.InsertMiniMaxSnapshot(snap, 2); err != nil {
 		t.Fatalf("InsertMiniMaxSnapshot: %v", err)
 	}
 
 	tr := tracker.NewMiniMaxTracker(s, nil)
-	if err := tr.Process(snap, accountID); err != nil {
+	if err := tr.Process(snap, 2); err != nil {
 		t.Fatalf("Process: %v", err)
 	}
 
+	h := NewHandler(s, nil, nil, nil, nil)
 	h.SetMiniMaxTracker(tr)
-	resp := h.buildMiniMaxSummaryMap(accountID)
+	resp := h.buildMiniMaxSummaryMap(2)
+
 	if len(resp) != 1 {
 		t.Fatalf("len(resp)=%d, want 1", len(resp))
 	}
@@ -324,14 +322,14 @@ func TestLoggingHistoryMiniMax_SharedQuota(t *testing.T) {
 	s, _ := store.New(":memory:")
 	defer s.Close()
 
-	h := NewHandler(s, nil, nil, nil, nil)
-	accountID := h.defaultMiniMaxAccountID()
 	base := time.Now().UTC().Add(-2 * time.Hour)
 	for i := 0; i < 3; i++ {
-		if _, err := s.InsertMiniMaxSnapshot(sharedMiniMaxSnapshot(base.Add(time.Duration(i)*15*time.Minute), i+1), accountID); err != nil {
+		if _, err := s.InsertMiniMaxSnapshot(sharedMiniMaxSnapshot(base.Add(time.Duration(i)*15*time.Minute), i+1), 2); err != nil {
 			t.Fatalf("InsertMiniMaxSnapshot(%d): %v", i, err)
 		}
 	}
+
+	h := NewHandler(s, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/logging-history?provider=minimax&range=1&limit=10", nil)
 	rr := httptest.NewRecorder()
 	h.LoggingHistory(rr, req)
@@ -425,15 +423,15 @@ func TestHistoryBoth_MiniMaxSharedQuotaSeries(t *testing.T) {
 	s, _ := store.New(":memory:")
 	defer s.Close()
 
-	h := NewHandler(s, nil, nil, nil, nil)
-	h.config = &config.Config{MiniMaxAPIKey: "test-key", SyntheticAPIKey: "syn-test"}
-	accountID := h.defaultMiniMaxAccountID()
 	base := time.Now().UTC().Add(-2 * time.Hour)
 	for i := 0; i < 3; i++ {
-		if _, err := s.InsertMiniMaxSnapshot(sharedMiniMaxSnapshot(base.Add(time.Duration(i)*15*time.Minute), i+1), accountID); err != nil {
+		if _, err := s.InsertMiniMaxSnapshot(sharedMiniMaxSnapshot(base.Add(time.Duration(i)*15*time.Minute), i+1), 2); err != nil {
 			t.Fatalf("InsertMiniMaxSnapshot(%d): %v", i, err)
 		}
 	}
+
+	h := NewHandler(s, nil, nil, nil, nil)
+	h.config = &config.Config{MiniMaxAPIKey: "test-key", SyntheticAPIKey: "syn-test"}
 	req := httptest.NewRequest(http.MethodGet, "/api/history?provider=both&range=24h", nil)
 	rr := httptest.NewRecorder()
 	h.History(rr, req)

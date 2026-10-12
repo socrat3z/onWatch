@@ -289,7 +289,7 @@ func (h *Handler) buildMenubarProviders(settings *menubar.Settings, includeHidde
 		}
 	}
 	if h.config != nil && h.config.HasProvider("anthropic") && h.providerDashboardVisible("anthropic", visibility) {
-		payload := h.buildAnthropicCurrent(h.defaultProviderAccountID("anthropic"))
+		payload := h.buildAnthropicCurrent()
 		if card := normalizeProviderCard("anthropic", resolveProviderTabLabel("anthropic", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
 			if promoData, ok := payload["promo"]; ok && promoData != nil {
 				if p, ok := promoData.(*anthropicPromo); ok {

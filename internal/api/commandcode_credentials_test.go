@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 )
 
 // isolateCommandCodeCredentials points every auth-file source at an empty temp
@@ -12,7 +14,7 @@ import (
 func isolateCommandCodeCredentials(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("COMMAND_CODE_API_KEY", "")
 	t.Setenv("COMMANDCODE_API_KEY", "")
 	t.Setenv("COMMANDCODE_AUTH_PATH", "")

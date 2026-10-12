@@ -237,9 +237,6 @@ func TestServe_ShutsDownCleanlyOnCancel(t *testing.T) {
 // clean exit) and TerminateProcess on Windows, where a child cannot be sent
 // os.Interrupt. On both it asserts the binary really serves before it stops.
 func TestMain_StartsAndShutsDownOnSignal(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("os.Interrupt signaling of subprocess is not supported on Windows")
-	}
 	if os.Getenv("ONWATCH_MOCKSERVER_MAIN_HELPER") == "1" {
 		os.Args = []string{"mockserver", "-port=" + os.Getenv("ONWATCH_MOCKSERVER_MAIN_PORT"), "-syn-key=helper-syn", "-zai-key=helper-zai", "-anth-token=helper-anth"}
 		main()

@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/onllm-dev/onwatch/v2/internal/api"
 	"github.com/onllm-dev/onwatch/v2/internal/notify"
 
 	"github.com/onllm-dev/onwatch/v2/internal/store"
@@ -63,25 +62,6 @@ func reconcileAccountRemovals(s *store.Store, provider string, present map[strin
 // the manager mutex, and the polling check is invoked outside it so a check
 // that calls back into the store cannot deadlock the supervisor.
 
-func (m *AnthropicAgentManager) authRoot() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.root
-}
-
-func (m *AnthropicAgentManager) shouldPoll(accountID int64) bool {
-	m.mu.Lock()
-	check := m.pollingCheck
-	m.mu.Unlock()
-	return check == nil || check(accountID)
-}
-
-func (m *AnthropicAgentManager) currentNotifier() *notify.NotificationEngine {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.notifier
-}
-
 func (m *AntigravityAgentManager) authRoot() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -99,12 +79,6 @@ func (m *AntigravityAgentManager) currentNotifier() *notify.NotificationEngine {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.notifier
-}
-
-func (m *AnthropicAgentManager) accountClientOptions() []api.AnthropicOption {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.clientOpts
 }
 
 // notifyAccountID renders an account identity for the notification engine.

@@ -43,7 +43,6 @@ type Config struct {
 	AnthropicToken     string // ANTHROPIC_TOKEN or auto-detected
 	AnthropicAutoToken bool   // true if token was auto-detected
 	AnthropicSource    string // ANTHROPIC_SOURCE: "auto" (default), "statusline", "api"
-	AnthropicAuthRoot  string // ANTHROPIC_AUTH_ROOT: <alias> Claude Code homes
 
 	// Copilot provider configuration
 	CopilotToken string // COPILOT_TOKEN (GitHub PAT with copilot scope)
@@ -369,7 +368,6 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 
 	// Anthropic provider
 	cfg.AnthropicToken = os.Getenv("ANTHROPIC_TOKEN")
-	cfg.AnthropicAuthRoot = strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_ROOT"))
 	cfg.AnthropicSource = strings.ToLower(strings.TrimSpace(os.Getenv("ANTHROPIC_SOURCE")))
 	if cfg.AnthropicSource == "" {
 		cfg.AnthropicSource = "auto"
@@ -796,7 +794,7 @@ func (c *Config) Validate() error {
 // AvailableProviders returns which providers are configured.
 func (c *Config) AvailableProviders() []string {
 	var providers []string
-	if c.AnthropicToken != "" || c.AnthropicAuthRoot != "" {
+	if c.AnthropicToken != "" {
 		providers = append(providers, "anthropic")
 	}
 	if c.SyntheticAPIKey != "" {
@@ -864,7 +862,7 @@ func (c *Config) HasProvider(name string) bool {
 	case "zai":
 		return c.ZaiAPIKey != ""
 	case "anthropic":
-		return c.AnthropicToken != "" || c.AnthropicAuthRoot != ""
+		return c.AnthropicToken != ""
 	case "copilot":
 		return c.CopilotToken != ""
 	case "codex":
@@ -916,7 +914,7 @@ func (c *Config) HasMultipleProviders() bool {
 	if c.ZaiAPIKey != "" {
 		count++
 	}
-	if c.AnthropicToken != "" || c.AnthropicAuthRoot != "" {
+	if c.AnthropicToken != "" {
 		count++
 	}
 	if c.CopilotToken != "" {

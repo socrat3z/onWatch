@@ -40,7 +40,9 @@ func NewServer(port int, handler *Handler, logger *slog.Logger, username, passwo
 	if port == 0 {
 		port = 9211 // default port
 	}
-	host = forkDefaultServerHost(host)
+	if host == "" {
+		host = "0.0.0.0" // default bind address
+	}
 
 	// Helper to prefix routes with base path
 	bp := basePath // e.g. "" or "/onwatch"

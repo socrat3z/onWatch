@@ -54,7 +54,7 @@ func (h *Handler) parseProviderAccountID(r *http.Request, provider string) (int6
 // of truth for which accounts can poll.
 func (h *Handler) ProviderAccounts(w http.ResponseWriter, r *http.Request) {
 	provider := strings.TrimSpace(r.URL.Query().Get("provider"))
-	if provider != "anthropic" && provider != "antigravity" {
+	if provider != "antigravity" {
 		respondError(w, http.StatusBadRequest, "unsupported provider")
 		return
 	}

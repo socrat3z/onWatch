@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/onllm-dev/onwatch/v2/internal/api"
-	"github.com/onllm-dev/onwatch/v2/internal/testenv"
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 )
 
 // TestMain runs before all tests in the agent package. It enables test mode
@@ -19,8 +19,8 @@ import (
 // to the host's real files. os.UserHomeDir reads HOME on Unix but USERPROFILE
 // on Windows, so a test that only overrides HOME would otherwise read and
 // write the real Windows profile - including ~/.claude/.credentials.json and
-// ~/.claude/settings.json. Tests that need their own home call setTestUserHome,
-// which sets every variable the isolation covers.
+// ~/.claude/settings.json. Tests that need their own home call
+// testhome.SetTestHome, which sets both.
 func TestMain(m *testing.M) {
 	os.Exit(runTests(m))
 }
@@ -30,7 +30,7 @@ func runTests(m *testing.M) int {
 	// records the real home that the credential-file guard refuses.
 	api.SetTestMode(true)
 
-	cleanup, err := testenv.IsolateProcessUserEnvironment()
+	_, cleanup, err := testhome.SandboxHome()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agent tests: %v\n", err)
 		return 1
@@ -38,11 +38,6 @@ func runTests(m *testing.M) int {
 	defer cleanup()
 
 	return m.Run()
-}
-
-func setTestUserHome(t *testing.T, home string) {
-	t.Helper()
-	testenv.SetTestUserHome(t, home)
 }
 
 // testHomeDir returns the home directory the code under test will resolve,

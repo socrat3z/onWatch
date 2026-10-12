@@ -321,41 +321,27 @@ func (m *Metrics) scrapeAPIIntegrations(s *store.Store, staleThreshold time.Dura
 
 func (m *Metrics) scrapeAnthropic(s *store.Store, staleThreshold time.Duration) {
 	method := "anthropic"
-	// Policy: Prometheus reports only live accounts. A soft-deleted account never
-	// gains new data, so its series would flat-line forever while its label pair
-	// stays in every scrape - unbounded cardinality growth for a value that is
-	// frozen. Its history is not lost: the dashboard and API still query it.
-	accounts, err := s.QueryActiveProviderAccounts(method)
+
+	snap, err := s.QueryLatestAnthropic()
 	if err != nil {
 		m.scrapeErrorsTotal.WithLabelValues(method, "query_failed").Inc()
 		return
 	}
-	if len(accounts) == 0 {
-		defaultAccount, defaultErr := s.ResolveDefaultProviderAccount(method)
-		if defaultErr != nil {
-			m.scrapeErrorsTotal.WithLabelValues(method, "query_failed").Inc()
-			return
-		}
-		accounts = []store.ProviderAccount{*defaultAccount}
+	if snap == nil {
+		return
 	}
-	for _, account := range accounts {
-		accountID := strconv.FormatInt(account.ID, 10)
-		m.accountInfo.WithLabelValues(method, accountID, store.ProviderAccountAlias(account)).Set(1)
-		snap, queryErr := s.QueryLatestAnthropic(account.ID)
-		if queryErr != nil {
-			m.scrapeErrorsTotal.WithLabelValues(method, "query_failed").Inc()
-			continue
+
+	m.recordLastCycleAge(method, defaultAccountID, snap.CapturedAt, staleThreshold)
+
+	for _, v := range snap.Quotas {
+		labels := prometheus.Labels{
+			"provider":   method,
+			"quota_type": v.Name,
+			"account_id": defaultAccountID,
 		}
-		if snap == nil {
-			continue
-		}
-		m.recordLastCycleAge(method, accountID, snap.CapturedAt, staleThreshold)
-		for _, v := range snap.Quotas {
-			labels := prometheus.Labels{"provider": method, "quota_type": v.Name, "account_id": accountID}
-			m.quotaUtilization.With(labels).Set(v.Utilization)
-			if v.ResetsAt != nil && !v.ResetsAt.IsZero() {
-				m.quotaResetTimestamp.With(labels).Set(float64(v.ResetsAt.Unix()))
-			}
+		m.quotaUtilization.With(labels).Set(v.Utilization)
+		if v.ResetsAt != nil && !v.ResetsAt.IsZero() {
+			m.quotaResetTimestamp.With(labels).Set(float64(v.ResetsAt.Unix()))
 		}
 	}
 }

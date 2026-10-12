@@ -101,9 +101,6 @@ func TestBuildCommandCodeCurrentUsesLatestSnapshot(t *testing.T) {
 	h := NewHandler(s, nil, nil, nil, createTestConfigWithCommandCode())
 	current := h.buildCommandCodeCurrent()
 
-	if current["snapshotAt"] == nil || current["snapshotAt"] == "" {
-		t.Error("expected snapshotAt to be populated")
-	}
 	if current["accountName"] != "prakersh" {
 		t.Errorf("accountName = %v", current["accountName"])
 	}

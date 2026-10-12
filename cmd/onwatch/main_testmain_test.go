@@ -12,7 +12,7 @@ import (
 
 	"github.com/onllm-dev/onwatch/v2/internal/api"
 	"github.com/onllm-dev/onwatch/v2/internal/service"
-	"github.com/onllm-dev/onwatch/v2/internal/testenv"
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 	"github.com/onllm-dev/onwatch/v2/internal/update"
 )
 
@@ -28,7 +28,6 @@ func TestMain(m *testing.M) {
 	// its first enable records the real home, which the credential-file guard
 	// then refuses, and it keeps every keychain/keyring operation off.
 	api.SetTestMode(true)
-	os.Setenv("ONWATCH_HOST", "127.0.0.1")
 
 	// GitHub Actions runs jobs under systemd, so INVOCATION_ID is set on the
 	// runner and update.IsSystemd() reports true there but not on a developer
@@ -97,11 +96,10 @@ func (o offlineCLIUpdater) Apply() error {
 const testScratchHomeEnv = "_ONWATCH_TEST_SCRATCH_HOME"
 
 // sandboxTestHome is the home-directory safety net: it points the whole test
-// process at a scratch home (testenv.IsolateProcessUserEnvironment: HOME,
-// USERPROFILE and LOCALAPPDATA, with provider location overrides and
-// credential variables cleared) so a test that forgets to set its own never
-// reads or writes the developer's (or CI runner's) real ~/.onwatch, ~/.codex
-// and so on.
+// process at a scratch home (testhome.SandboxHome: HOME, USERPROFILE and
+// LOCALAPPDATA, with provider location overrides cleared) so a test that
+// forgets to set its own never reads or writes the developer's (or CI
+// runner's) real ~/.onwatch, ~/.codex and so on.
 //
 // Helper subprocesses re-run TestMain. They inherit the marker and keep the
 // home and environment their parent test gave them (itself a sandbox), so a
@@ -112,12 +110,12 @@ func sandboxTestHome() func() {
 	if os.Getenv(testScratchHomeEnv) != "" {
 		return func() {}
 	}
-	cleanup, err := testenv.IsolateProcessUserEnvironment()
+	dir, cleanup, err := testhome.SandboxHome()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot create scratch home: %v\n", err)
 		os.Exit(1)
 	}
-	os.Setenv(testScratchHomeEnv, os.Getenv("HOME"))
+	os.Setenv(testScratchHomeEnv, dir)
 	// pidDir was resolved at package init from the real home. Re-resolve it
 	// so runStop/runStatus never read (or stop) a real daemon or menubar
 	// companion. initialPIDFilePath keeps the real path for the off-limits
@@ -139,11 +137,6 @@ func assertPerm(t testing.TB, info os.FileInfo, want os.FileMode) {
 	if got := info.Mode().Perm(); got != want {
 		t.Fatalf("%s permissions = %o, want %o", info.Name(), got, want)
 	}
-}
-
-func setTestUserHome(t *testing.T, home string) {
-	t.Helper()
-	testenv.SetTestUserHome(t, home)
 }
 
 // This runs during package initialisation rather than from TestMain. A
@@ -185,7 +178,8 @@ func isolateSpawnedDaemonChild() {
 	}
 	_ = os.MkdirAll(filepath.Join(dir, ".onwatch", "data"), 0o755)
 	os.Setenv("HOME", dir)
-	os.Setenv("ONWATCH_HOST", "127.0.0.1")
+	os.Setenv("USERPROFILE", dir)
+	os.Setenv("LOCALAPPDATA", dir)
 	os.Setenv("ONWATCH_DB_PATH", filepath.Join(dir, "onwatch.db"))
 	if port, err := freePort(); err == nil {
 		os.Setenv("ONWATCH_PORT", fmt.Sprintf("%d", port))
@@ -201,4 +195,12 @@ func freePort() (int, error) {
 	}
 	defer ln.Close()
 	return ln.Addr().(*net.TCPAddr).Port, nil
+}
+
+// TestMain must enable api test mode so no cmd test can reach the keychain,
+// keyring or the real Claude credentials file.
+func TestTestMainEnablesAPITestMode(t *testing.T) {
+	if !api.IsTestMode() {
+		t.Fatal("TestMain must call api.SetTestMode(true)")
+	}
 }

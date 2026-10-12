@@ -145,26 +145,19 @@ CODEX_CONFIG
   fi
 
   case "${1:-}" in
-    claude)
-      shift
-      # Cooperate with the onWatch per-account OAuth transaction. `flock` works
-      # across the daemon and the one-shot login containers because this lock
-      # file lives in their shared claude-auth volume. Bounded, with a distinct
-      # conflict code, so a stuck holder surfaces as a message rather than an
-      # unexplained hang.
-      status=0
-      flock -w 60 -E 75 "$HOME/.claude/.credentials.json.lock" /usr/local/bin/claude "$@" || status=$?
-      if [ "$status" -eq 75 ]; then
-        echo "claude: timed out waiting for the credential lock; is onwatch mid-refresh?" >&2
-      fi
-      exit "$status"
-      ;;
-    agy|codex)
+    claude|agy|codex)
       cli="$1"
       shift
       exec "/usr/local/bin/$cli" "$@"
       ;;
   esac
+
+  # Stock Anthropic auth reads $HOME/.claude/.credentials.json. The login
+  # container writes the default account under /auth/claude/default/.claude, so
+  # point the daemon home at it. $HOME is container-local, so replacing a
+  # stray real directory is safe; an existing symlink is simply re-pointed.
+  if [ ! -L "$HOME/.claude" ]; then rm -rf "$HOME/.claude"; fi
+  ln -sfn /auth/claude/default/.claude "$HOME/.claude"
 
   exec /app/onwatch "$@"
 ' -- "$@"

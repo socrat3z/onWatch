@@ -17,25 +17,17 @@ import (
 // coordinator as new fork-managed providers are added.
 type forkAccountManagers struct {
 	db          *store.Store
-	anthropic   *agent.AnthropicAgentManager
 	antigravity *agent.AntigravityAgentManager
 }
 
 func setupForkAccountManagers(cfg *config.Config, db *store.Store, logger *slog.Logger) *forkAccountManagers {
 	return &forkAccountManagers{
 		db:          db,
-		anthropic:   setupAnthropicAccountManager(cfg, db, logger),
 		antigravity: setupAntigravityAccountManager(cfg, db, logger),
 	}
 }
 
 func (m *forkAccountManagers) SetNotifier(notifier *notify.NotificationEngine) {
-	if m.anthropic != nil {
-		m.anthropic.SetNotifier(notifier)
-		m.anthropic.SetAccountPollingCheck(func(accountID int64) bool {
-			return isAccountPollingEnabled(m.db, "anthropic", accountID)
-		})
-	}
 	if m.antigravity != nil {
 		m.antigravity.SetNotifier(notifier)
 		m.antigravity.SetAccountPollingCheck(func(accountID int64) bool {
@@ -45,29 +37,9 @@ func (m *forkAccountManagers) SetNotifier(notifier *notify.NotificationEngine) {
 }
 
 func (m *forkAccountManagers) Register(manager *agent.AgentManager) {
-	if m.anthropic != nil {
-		manager.RegisterFactory("anthropic", func() (agent.AgentRunner, error) { return m.anthropic, nil })
-	}
 	if m.antigravity != nil {
 		manager.RegisterFactory("antigravity", func() (agent.AgentRunner, error) { return m.antigravity, nil })
 	}
-}
-
-// setupAnthropicAccountManager initializes multi-account management for Anthropic
-// when ANTHROPIC_AUTH_ROOT is configured.
-func setupAnthropicAccountManager(cfg *config.Config, db *store.Store, logger *slog.Logger) *agent.AnthropicAgentManager {
-	if cfg.AnthropicAuthRoot == "" {
-		return nil
-	}
-	mgr := agent.NewAnthropicAgentManager(db, cfg.PollInterval, logger)
-	mgr.SetAuthRoot(cfg.AnthropicAuthRoot)
-	logger.Info("Anthropic named account discovery configured", "root", cfg.AnthropicAuthRoot)
-	if cfg.AnthropicToken != "" {
-		logger.Warn("ANTHROPIC_TOKEN is ignored while ANTHROPIC_AUTH_ROOT is set",
-			"reason", "each named account authenticates from its own <root>/<alias>/.claude/.credentials.json",
-			"root", cfg.AnthropicAuthRoot)
-	}
-	return mgr
 }
 
 // setupAntigravityAccountManager initializes multi-account management for Antigravity

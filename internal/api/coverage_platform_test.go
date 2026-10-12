@@ -213,7 +213,7 @@ func TestDarwinAnthropicKeychainPaths(t *testing.T) {
 	binDir := prependPathDir(t)
 	capturePath := filepath.Join(t.TempDir(), "security-add.json")
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	t.Setenv("HOME", home)
 	t.Setenv("SECURITY_ADD_CAPTURE", capturePath)
 
 	writeAnthropicCredentialsFile(t, home, `{"claudeAiOauth":{"accessToken":"file-old","refreshToken":"file-refresh","expiresAt":1}}`)

@@ -2,12 +2,12 @@
 
 ## Provider account aliases
 
-For discovered Anthropic and Antigravity accounts, use `GET /api/accounts?provider=anthropic`
-or `GET /api/accounts?provider=antigravity` to list account IDs, credential-folder
+For discovered Antigravity accounts, use `GET /api/accounts?provider=antigravity`
+to list account IDs, credential-folder
 names, display aliases, and deletion state. Update only the display label with:
 
 ```http
-PATCH /api/accounts?provider=anthropic
+PATCH /api/accounts?provider=antigravity
 Content-Type: application/json
 
 {"account_id": 12, "alias": "Acme work"}
@@ -59,7 +59,7 @@ credit rather than a consumed allowance.
 
 ### Account-scoped providers in the combined payload
 
-Anthropic, Antigravity, Codex, and MiniMax can each hold several accounts. In
+Antigravity, Codex, and MiniMax can each hold several accounts. In
 `?provider=both` they follow one rule:
 
 | Visible accounts | Key | Value |
@@ -77,7 +77,7 @@ shape. Every payload carries the account it describes:
 | `name` | the credential folder name, which is never renamed |
 | `accountName` | the display alias, and the only field meant for rendering |
 
-Anthropic and Antigravity payloads additionally carry a nested `account` object
+Antigravity payloads additionally carry a nested `account` object
 with `alias`, `isDefault`, `accountCount`, and credential `health` - the same
 shape `/api/accounts` returns.
 

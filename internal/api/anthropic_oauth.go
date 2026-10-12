@@ -48,13 +48,6 @@ func resetOAuthURL(url string) { anthropicOAuthTokenURL = url }
 // SetOAuthURLForTest overrides the OAuth token URL for external test packages.
 func SetOAuthURLForTest(url string) { anthropicOAuthTokenURL = url }
 
-// NewOAuthRateLimitedErrorForTest builds a 429 error in the same shape
-// RefreshAnthropicToken returns, so packages outside api can exercise their
-// rate-limit handling without standing up an HTTP server.
-func NewOAuthRateLimitedErrorForTest(retryAfter time.Duration, body string) error {
-	return &oauthRateLimitedError{RetryAfter: retryAfter, Body: body}
-}
-
 // ErrOAuthRefreshFailed indicates the OAuth token refresh failed.
 var ErrOAuthRefreshFailed = errors.New("oauth: token refresh failed")
 
@@ -62,55 +55,14 @@ var ErrOAuthRefreshFailed = errors.New("oauth: token refresh failed")
 // The backoff package provides RetryAfter() to get the Retry-After duration.
 var ErrOAuthRateLimited = errors.New("oauth: rate limited (429)")
 
-// oauthRateLimitedError wraps ErrOAuthRateLimited with a Retry-After duration
-// and a snippet of the response body.
-//
-// The body matters for diagnosis: a 429 from Anthropic's own rate limiter and a
-// 429 from an edge/WAF (datacenter IP, stale user-agent) are indistinguishable
-// by status alone, and onWatch's response to them should differ. Discarding it
-// is what left a multi-day refresh outage unexplainable from logs.
+// oauthRateLimitedError wraps ErrOAuthRateLimited with a Retry-After duration.
+// When the server sends a Retry-After header, we use it directly instead of guessing.
 type oauthRateLimitedError struct {
 	RetryAfter time.Duration
-	Body       string
 }
 
-func (e *oauthRateLimitedError) Error() string {
-	msg := ErrOAuthRateLimited.Error()
-	if e.RetryAfter > 0 {
-		msg += fmt.Sprintf(" (retry after %s)", e.RetryAfter)
-	}
-	if e.Body != "" {
-		msg += ": " + e.Body
-	}
-	return msg
-}
-
+func (e *oauthRateLimitedError) Error() string        { return ErrOAuthRateLimited.Error() }
 func (e *oauthRateLimitedError) Is(target error) bool { return errors.Is(target, ErrOAuthRateLimited) }
-
-// OAuthResponseBody returns the response body snippet carried by an OAuth
-// rate-limit error, or "" when the error carries none.
-func OAuthResponseBody(err error) string {
-	var rle *oauthRateLimitedError
-	if errors.As(err, &rle) {
-		return rle.Body
-	}
-	return ""
-}
-
-// oauthBodySnippet collapses a response body to a single bounded line so it is
-// safe to log. OAuth error bodies carry no token material - the request body
-// holds the secret, the response holds only an error code.
-func oauthBodySnippet(body []byte) string {
-	text := strings.TrimSpace(string(body))
-	if text == "" {
-		return ""
-	}
-	text = strings.Join(strings.Fields(text), " ")
-	if len(text) > 240 {
-		return text[:240] + "..."
-	}
-	return text
-}
 
 // RetryAfter returns the Retry-After duration, or 0 if not available.
 func RetryAfter(err error) time.Duration {
@@ -213,14 +165,13 @@ func RefreshAnthropicToken(ctx context.Context, refreshToken string) (*OAuthToke
 
 	// Handle error responses
 	if resp.StatusCode != http.StatusOK {
-		// 429 from the OAuth endpoint itself - check for Retry-After header.
-		// Always returns the struct form, even without a Retry-After, so the
-		// body snippet survives for the caller to log.
+		// 429 from the OAuth endpoint itself - check for Retry-After header
 		if resp.StatusCode == http.StatusTooManyRequests {
-			return nil, &oauthRateLimitedError{
-				RetryAfter: parseRetryAfterHeader(resp.Header.Get("Retry-After")),
-				Body:       oauthBodySnippet(body),
+			backoff := parseRetryAfterHeader(resp.Header.Get("Retry-After"))
+			if backoff > 0 {
+				return nil, &oauthRateLimitedError{RetryAfter: backoff}
 			}
+			return nil, ErrOAuthRateLimited
 		}
 
 		var errResp oauthErrorResponse

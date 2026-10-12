@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 	"io"
 	"log/slog"
 	"net/http"
@@ -35,7 +36,7 @@ func newCodexManagerFixture(t *testing.T) *codexManagerFixture {
 	t.Helper()
 
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 	t.Setenv("CODEX_HOME", "")
 	// Pin OpenCode detection under the temp HOME so DetectCodexCredentials never
 	// reads the host's real ~/.local/share/opencode/auth.json (issue #78 path).
@@ -126,7 +127,7 @@ func makeCodexIDToken(t *testing.T, exp time.Time, accountID, userID string) str
 
 func TestNewCodexAgentManager_Defaults(t *testing.T) {
 	home := t.TempDir()
-	setTestUserHome(t, home)
+	testhome.SetTestHome(t, home)
 
 	manager := NewCodexAgentManager(nil, nil, 15*time.Second, nil)
 	if manager.logger == nil {

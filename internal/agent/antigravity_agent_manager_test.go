@@ -186,7 +186,7 @@ func contains(ids []int64, want int64) bool {
 		if id == want {
 			return true
 		}
-	}
+}
 	return false
 }
 
@@ -260,4 +260,32 @@ func TestAccountCLIEnvStaysEmptyWithoutAnAccountHome(t *testing.T) {
 	if env := accountCLIEnv("", "personal", slog.New(slog.NewTextHandler(io.Discard, nil))); len(env) != 0 {
 		t.Fatalf("the ambient agent must inherit the daemon environment, got %v", env)
 	}
+}
+
+func accountByName(t *testing.T, str *store.Store, provider, name string) store.ProviderAccount {
+	t.Helper()
+	accounts, err := str.QueryProviderAccounts(provider)
+	if err != nil {
+		t.Fatalf("QueryProviderAccounts: %v", err)
+	}
+	for _, acc := range accounts {
+		if acc.Name == name {
+			return acc
+		}
+}
+	t.Fatalf("no %s account named %q in %+v", provider, name, accounts)
+	return store.ProviderAccount{}
+}
+
+func removeAllWithRetry(t *testing.T, path string) {
+	t.Helper()
+	var err error
+	for range 30 {
+		err = os.RemoveAll(path)
+		if err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("remove %s: %v", path, err)
 }

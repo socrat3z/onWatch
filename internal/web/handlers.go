@@ -2461,11 +2461,10 @@ func (h *Handler) currentBoth(w http.ResponseWriter, r *http.Request) {
 	if h.config.HasProvider("zai") && providerTelemetryEnabled(visibility, "zai") {
 		response["zai"] = h.buildZaiCurrent()
 	}
-	// The four multi-account providers all go through attachAccountScopedCurrent
+	// The multi-account providers all go through attachAccountScopedCurrent
 	// so the homepage sees one payload shape, whichever provider it came from.
 	if h.config.HasProvider("anthropic") && providerTelemetryEnabled(visibility, "anthropic") {
-		h.attachAccountScopedCurrent(response, visibility, "anthropic", h.buildAnthropicCurrent,
-			func() int64 { return h.defaultProviderAccountID("anthropic") })
+		response["anthropic"] = h.buildAnthropicCurrent()
 	}
 	if h.config.HasProvider("copilot") && providerTelemetryEnabled(visibility, "copilot") {
 		response["copilot"] = h.buildCopilotCurrent()
@@ -4821,7 +4820,7 @@ func (h *Handler) Sessions(w http.ResponseWriter, r *http.Request) {
 		sessions, queryErr = h.queryCodexSessionsByAccount(accountID)
 	} else if provider == "minimax" {
 		sessions, queryErr = h.queryMiniMaxSessions(h.parseMiniMaxAccountID(r))
-	} else if provider == "anthropic" || provider == "antigravity" {
+	} else if provider == "antigravity" {
 		accountID, accountErr := h.parseProviderAccountID(r, provider)
 		if accountErr != nil {
 			respondError(w, http.StatusBadRequest, accountErr.Error())
@@ -5956,18 +5955,13 @@ func isAnthropicPeakHours(p *anthropicPromo, now time.Time) bool {
 
 // currentAnthropic returns Anthropic quota status.
 func (h *Handler) currentAnthropic(w http.ResponseWriter, r *http.Request) {
-	accountID, err := h.parseProviderAccountID(r, "anthropic")
-	if err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	respondJSON(w, http.StatusOK, h.buildAnthropicCurrent(accountID))
+	respondJSON(w, http.StatusOK, h.buildAnthropicCurrent())
 }
 
 // buildAnthropicCurrent builds the Anthropic current quota response map.
 // Merges data from the latest snapshot (statusline or API) with per-quota
 // freshness information so the UI can show all quotas with age indicators.
-func (h *Handler) buildAnthropicCurrent(accountID int64) map[string]interface{} {
+func (h *Handler) buildAnthropicCurrent() map[string]interface{} {
 	now := time.Now().UTC()
 	response := map[string]interface{}{
 		"capturedAt": now.Format(time.RFC3339),
@@ -5980,18 +5974,15 @@ func (h *Handler) buildAnthropicCurrent(accountID int64) map[string]interface{} 
 	if h.store == nil {
 		return response
 	}
-	if identity := h.accountIdentity("anthropic", accountID); identity != nil {
-		response["account"] = identity
-	}
 
 	// Get per-quota latest values (merges statusline + API snapshots).
 	// This ensures we show Sonnet/extra_usage from older API polls alongside
 	// fresh five_hour/seven_day from statusline.
-	latestPerQuota, err := h.store.QueryAnthropicLatestPerQuota(accountID)
+	latestPerQuota, err := h.store.QueryAnthropicLatestPerQuota()
 	if err != nil {
 		h.logger.Error("failed to query latest per-quota Anthropic data", "error", err)
 		// Fall back to single-snapshot approach
-		return h.buildAnthropicCurrentFallback(accountID, response)
+		return h.buildAnthropicCurrentFallback(response)
 	}
 
 	if len(latestPerQuota) == 0 {
@@ -6053,8 +6044,8 @@ func (h *Handler) buildAnthropicCurrent(accountID int64) map[string]interface{} 
 
 // buildAnthropicCurrentFallback uses the single latest snapshot when per-quota
 // merge fails. This preserves the original behavior as a safety net.
-func (h *Handler) buildAnthropicCurrentFallback(accountID int64, response map[string]interface{}) map[string]interface{} {
-	latest, err := h.store.QueryLatestAnthropic(accountID)
+func (h *Handler) buildAnthropicCurrentFallback(response map[string]interface{}) map[string]interface{} {
+	latest, err := h.store.QueryLatestAnthropic()
 	if err != nil || latest == nil {
 		return response
 	}
@@ -6155,12 +6146,7 @@ func (h *Handler) historyAnthropic(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	start := now.Add(-duration)
-	accountID, accountErr := h.parseProviderAccountID(r, "anthropic")
-	if accountErr != nil {
-		respondError(w, http.StatusBadRequest, accountErr.Error())
-		return
-	}
-	snapshots, err := h.store.QueryAnthropicRangeForAccount(accountID, start, now)
+	snapshots, err := h.store.QueryAnthropicRange(start, now)
 	if err != nil {
 		h.logger.Error("failed to query Anthropic history", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query history")
@@ -6227,12 +6213,7 @@ func (h *Handler) cyclesAnthropic(w http.ResponseWriter, r *http.Request) {
 	rangeDur := parseInsightsRange(r.URL.Query().Get("range"))
 	since := time.Now().UTC().Add(-rangeDur)
 
-	accountID, accountErr := h.parseProviderAccountID(r, "anthropic")
-	if accountErr != nil {
-		respondError(w, http.StatusBadRequest, accountErr.Error())
-		return
-	}
-	points, err := h.store.QueryAnthropicUtilizationSeriesForAccount(accountID, quotaName, since)
+	points, err := h.store.QueryAnthropicUtilizationSeries(quotaName, since)
 	if err != nil {
 		h.logger.Error("failed to query Anthropic utilization series", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query cycles")
@@ -6298,7 +6279,7 @@ func (h *Handler) summaryAnthropic(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) buildAnthropicSummaryMap() map[string]interface{} {
 	response := map[string]interface{}{}
 	if h.anthropicTracker != nil && h.store != nil {
-		latest, err := h.store.QueryLatestAnthropic(h.defaultProviderAccountID("anthropic"))
+		latest, err := h.store.QueryLatestAnthropic()
 		if err == nil && latest != nil {
 			for _, q := range latest.Quotas {
 				if summary, err := h.anthropicTracker.UsageSummary(q.Name); err == nil && summary != nil {
@@ -6345,7 +6326,7 @@ func (h *Handler) buildAnthropicInsights(hidden map[string]bool, rangeDur time.D
 	if h.store == nil {
 		return resp
 	}
-	latest, err := h.store.QueryLatestAnthropic(h.defaultProviderAccountID("anthropic"))
+	latest, err := h.store.QueryLatestAnthropic()
 	if err != nil || latest == nil {
 		resp.Insights = append(resp.Insights, insightItem{
 			Type: "info", Severity: "info",
@@ -8105,12 +8086,7 @@ func (h *Handler) cycleOverviewAnthropic(w http.ResponseWriter, r *http.Request)
 	}
 
 	limit := parseCycleOverviewLimit(r)
-	accountID, err := h.parseProviderAccountID(r, "anthropic")
-	if err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	rows, err := h.store.QueryAnthropicCycleOverview(groupBy, limit, accountID)
+	rows, err := h.store.QueryAnthropicCycleOverview(groupBy, limit)
 	if err != nil {
 		h.logger.Error("failed to query Anthropic cycle overview", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query cycle overview")
@@ -11917,13 +11893,8 @@ func (h *Handler) loggingHistoryAnthropic(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	accountID, err := h.parseProviderAccountID(r, "anthropic")
-	if err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 	start, end, limit := h.loggingHistoryRangeAndLimit(r)
-	snapshots, err := h.store.QueryAnthropicRangeForAccount(accountID, start, end, limit)
+	snapshots, err := h.store.QueryAnthropicRange(start, end, limit)
 	if err != nil {
 		h.logger.Error("failed to query Anthropic snapshots", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query logging history")

@@ -25,17 +25,6 @@ func anthropicCredentialsFilePath() (string, error) {
 	return filepath.Join(home, ".claude", ".credentials.json"), nil
 }
 
-// getCredentialsFilePath returns the path to the Claude credentials file, or ""
-// when it cannot be determined. Windows has no keychain, so this file is the
-// only credential store.
-func getCredentialsFilePath() string {
-	credPath, err := anthropicCredentialsFilePath()
-	if err != nil {
-		return ""
-	}
-	return credPath
-}
-
 // detectAnthropicCredentialsPlatform tries to detect full OAuth credentials on Windows.
 func detectAnthropicCredentialsPlatform(logger *slog.Logger) *AnthropicCredentials {
 	if logger == nil {

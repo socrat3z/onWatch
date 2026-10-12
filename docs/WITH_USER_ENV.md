@@ -20,7 +20,7 @@ the one-shot login command:
 
 ```bash
 docker compose --profile login run --rm -e ONWATCH_LOGIN_ACCOUNT=work codex-login
-docker compose --profile login run --rm -e ONWATCH_LOGIN_ACCOUNT=personal claude-login
+docker compose --profile login run --rm claude-login   # Claude: default account only (see Anthropic)
 docker compose --profile login run --rm -e ONWATCH_LOGIN_ACCOUNT=work agy-login
 ```
 
@@ -71,12 +71,11 @@ forever. Its history stays queryable in the dashboard and API.
 
 ### Configuration that is overridden in multi-account mode
 
-Two settings are deliberately ignored once account discovery is on. Both now
-emit one startup `WARN` naming the setting and the reason:
+One setting is deliberately ignored once account discovery is on. It emits one
+startup `WARN` naming the setting and the reason:
 
 | Setting | Ignored when | Why |
 |---------|--------------|-----|
-| `ANTHROPIC_TOKEN` | `ANTHROPIC_AUTH_ROOT` is set | Every named account authenticates from its own `<root>/<alias>/.claude/.credentials.json`, and each rotates its own refresh token. |
 | `ANTIGRAVITY_SOURCE` | `ANTIGRAVITY_AUTH_ROOT` is set | The IDE probe cannot be scoped to one account home, so every named account polls through the `agy` CLI. |
 
 ### Codex alias collisions
@@ -221,38 +220,20 @@ the browser cannot reach the CLI's local callback server from inside a container
 so it displays a code instead. **Paste that code back into the container terminal**
 at the prompt.
 
-Tokens land in `.credentials.json` inside the `claude-auth` volume.
+Tokens land in `.credentials.json` inside the `claude-auth` volume, under
+`/auth/claude/default/.claude/`.
 
-#### The credential lock
+#### How the daemon reads the login
 
-The daemon and the `claude-login` service share that one file, and an Anthropic
-refresh token is one-time use: if both exchange the same token, whichever writes
-second is revoked, and the account is silently logged out hours later when the
-surviving access token expires.
+The daemon uses stock onWatch Anthropic auth, which reads
+`$HOME/.claude/.credentials.json`. The entrypoint therefore symlinks the
+daemon's `$HOME/.claude` to `/auth/claude/default/.claude` before it starts, and
+the daemon refreshes that one login itself.
 
-Both sides therefore serialize on `.credentials.json.lock`, next to the
-credentials in the same volume:
-
-- The daemon takes it across the whole read -> exchange -> write transaction
-  (`RefreshAnthropicCredentialsFile`), and if it finds a newer pair already
-  stored it adopts that instead of spending its own token.
-- The entrypoint runs the `claude` CLI under `flock -w 60 -E 75` on the same
-  path. `procps` and `util-linux` are in the runtime image for this (`flock`)
-  and for the Claude Code process check (`ps`).
-
-Both waits are bounded, so neither side can hang the other: the daemon gives up
-after 30s and retries on its next poll, and the login prints
-`timed out waiting for the credential lock` and exits 75.
-
-Because the bundled CLI is wrapped, the image sets `ONWATCH_CLAUDE_CLI_LOCKED=1`.
-That is what permits the daemon to refresh a rejected credential while a `claude`
-process is resident. Do not set it anywhere else: a natively installed Claude
-Code takes no lock, and onWatch exchanging underneath it would spend the same
-one-time-use refresh token and log the account out.
-
-The lock is advisory and volume-local. It does not reach a Claude Code running
-outside these containers against the same account.
-
+Only the **default** Claude account is polled. A login made with
+`ONWATCH_LOGIN_ACCOUNT=<other>` is stored under `/auth/claude/<other>` but is not
+read by the daemon. The `claude-login` service shares no lock with the daemon,
+so avoid running `claude auth login` at the same moment the daemon refreshes.
 If you would rather not run an interactive flow in the container at all, Anthropic
 also supports a long-lived token: run `claude setup-token` on a machine with a
 browser, then set the printed value as `CLAUDE_CODE_OAUTH_TOKEN`. That path needs
@@ -418,8 +399,8 @@ reviewable commit.
 1. Pick the new version and record both architectures' checksums:
 
    ```bash
-   CODEX_VERSION=0.147.0
-   CLAUDE_VERSION=2.1.226
+   CODEX_VERSION=0.162.1
+   CLAUDE_VERSION=2.1.296
    for u in \
      "https://registry.npmjs.org/@openai/codex/-/codex-${CODEX_VERSION}-linux-x64.tgz" \
      "https://registry.npmjs.org/@openai/codex/-/codex-${CODEX_VERSION}-linux-arm64.tgz" \
