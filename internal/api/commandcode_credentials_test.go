@@ -123,16 +123,23 @@ func TestDetectCommandCodeCredentialsNone(t *testing.T) {
 }
 
 func TestReadCommandCodeAuthFileRejectsPermissiveMode(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows reports plain files as 0666; the unix permission check does not apply")
-	}
 	home := isolateCommandCodeCredentials(t)
 	path := filepath.Join(home, "auth.json")
 	writeCommandCodeAuthFile(t, path, `{"apiKey":"user_secret"}`)
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := readCommandCodeAuthFile(path); got != "" {
+	got := readCommandCodeAuthFile(path)
+	if runtime.GOOS == "windows" {
+		// Windows reports plain files as 0666 and guards them with ACLs that
+		// fs.FileMode cannot express, so the product deliberately skips the
+		// unix mode check there (commandCodeAuthFilePermsOK is a no-op).
+		if got != "user_secret" {
+			t.Fatalf("Windows must accept the auth file regardless of mode bits, got %q", got)
+		}
+		return
+	}
+	if got != "" {
 		t.Fatalf("group/world-readable auth file must be ignored, got %q", got)
 	}
 }

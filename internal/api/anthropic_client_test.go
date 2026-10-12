@@ -150,8 +150,8 @@ func TestAnthropicClient_FetchQuotas_Headers(t *testing.T) {
 	}
 
 	ua, _ := gotUserAgent.Load().(string)
-	if ua != "claude-code/2.1.69" {
-		t.Errorf("expected 'claude-code/2.1.69', got %q", ua)
+	if ua != "claude-code/2.1.289" {
+		t.Errorf("expected 'claude-code/2.1.289', got %q", ua)
 	}
 }
 

@@ -16,23 +16,28 @@ import (
 const (
 	// AnthropicOAuthClientID is the Claude Code OAuth client ID.
 	AnthropicOAuthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+	// anthropicOAuthBeta is the beta flag sent with OAuth-authenticated requests.
+	anthropicOAuthBeta = "oauth-2025-04-20"
+
+	// claudeCodeVersion is the Claude Code release whose request headers the
+	// Anthropic clients match. Bump it alongside new Claude Code releases.
+	claudeCodeVersion = "2.1.289"
+
+	// anthropicOAuthUserAgent is the User-Agent for the token endpoint. It must
+	// not be a "claude-code/2.1.x" string: the endpoint answers those with 429
+	// before it looks at the refresh token, so proactive refresh never succeeded
+	// and polling paused once the access token expired (issue #145). The
+	// "claude-cli/" form is accepted.
+	anthropicOAuthUserAgent = "claude-cli/" + claudeCodeVersion + " (external, cli)"
 )
+
+// AnthropicOAuthTokenURL is the public accessor for the OAuth token URL.
+const AnthropicOAuthTokenURL = "https://platform.claude.com/v1/oauth/token"
 
 // anthropicOAuthTokenURL is the endpoint for OAuth token operations.
 // Variable (not const) to allow test overrides.
-var anthropicOAuthTokenURL = "https://console.anthropic.com/v1/oauth/token"
-
-// anthropicOAuthUserAgent identifies onWatch's refresh requests as Claude Code,
-// which is the client the refresh token was issued to.
-//
-// Keep this roughly current. A user-agent naming a long-dead CLI build is the
-// kind of signal an edge/WAF scores against, and a sustained 429 on a
-// datacenter IP is hard to tell apart from a genuine rate limit (see
-// OAuthResponseBody). Bump alongside CLAUDE_VERSION in Dockerfile.with-user-env.
-const anthropicOAuthUserAgent = "claude-code/2.1.226"
-
-// AnthropicOAuthTokenURL is the public accessor for the OAuth token URL.
-const AnthropicOAuthTokenURL = "https://console.anthropic.com/v1/oauth/token"
+var anthropicOAuthTokenURL = AnthropicOAuthTokenURL
 
 // setOAuthURL overrides the OAuth token URL (for testing).
 func setOAuthURL(url string) { anthropicOAuthTokenURL = url }
@@ -188,6 +193,7 @@ func RefreshAnthropicToken(ctx context.Context, refreshToken string) (*OAuthToke
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-beta", anthropicOAuthBeta)
 	req.Header.Set("User-Agent", anthropicOAuthUserAgent)
 
 	client := &http.Client{Timeout: 30 * time.Second}

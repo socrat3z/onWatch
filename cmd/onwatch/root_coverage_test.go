@@ -30,21 +30,38 @@ func captureStdout(t *testing.T, fn func()) string {
 	if err != nil {
 		t.Fatalf("create stdout pipe: %v", err)
 	}
-	defer r.Close()
-	os.Stdout = w
-	defer func() { os.Stdout = oldStdout }()
-	outCh := make(chan []byte, 1)
+
+	// Drain the pipe while fn runs: a pipe buffer is small (a few KB on
+	// Windows), so a chatty fn would otherwise block forever on a full pipe.
+	var out []byte
+	var readErr error
+	done := make(chan struct{})
 	go func() {
-		out, _ := io.ReadAll(r)
-		outCh <- out
+		out, readErr = io.ReadAll(r)
+		close(done)
+	}()
+
+	os.Stdout = w
+	// Runs on every exit, including a t.Fatal inside fn. Close the writer
+	// before the reader: on Windows closing a pipe handle waits for the
+	// blocked read on it, which only ends once the writer is closed.
+	defer func() {
+		os.Stdout = oldStdout
+		_ = w.Close()
+		<-done
+		_ = r.Close()
 	}()
 
 	fn()
 
+	os.Stdout = oldStdout
 	if err := w.Close(); err != nil {
 		t.Fatalf("close writer: %v", err)
 	}
-	out := <-outCh
+	<-done
+	if readErr != nil {
+		t.Fatalf("read stdout: %v", readErr)
+	}
 	return string(out)
 }
 
@@ -492,22 +509,22 @@ func TestRunSetupEarlyPathsAndSafeRunCommands(t *testing.T) {
 }
 
 func TestRunStopAndStatus_WithPIDFileProcess(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("sleep process helper not used on windows")
-	}
-
 	oldPIDFile := pidFile
 	pidFile = filepath.Join(t.TempDir(), "onwatch-test.pid")
 	t.Cleanup(func() { pidFile = oldPIDFile })
 
-	cmd := exec.Command("sleep", "30")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start sleep process: %v", err)
-	}
+	// Re-exec the test binary as the long-running child rather than sleep(1),
+	// which does not exist on Windows.
+	cmd := startSleepSubprocess(t)
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
 	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			_, _ = cmd.Process.Wait()
+		_ = cmd.Process.Kill()
+		select {
+		case <-waitDone:
+		case <-time.After(5 * time.Second):
 		}
 	})
 
@@ -536,13 +553,9 @@ func TestRunStopAndStatus_WithPIDFileProcess(t *testing.T) {
 		t.Fatalf("unexpected runStop output: %s", stopOut)
 	}
 
-	waitDone := make(chan error, 1)
-	go func() {
-		waitDone <- cmd.Wait()
-	}()
 	select {
 	case <-waitDone:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("process did not stop after runStop")
 	}
 }
@@ -741,9 +754,14 @@ func TestDaemonize_SuccessAndLogOpenError(t *testing.T) {
 				return
 			}
 			if pid := parsePIDContent(string(data)); pid > 0 && pid != os.Getpid() {
-				if proc, err := os.FindProcess(pid); err == nil {
-					terminateProcess(proc)
-					_, _ = proc.Wait()
+				// stopProcess, not SIGTERM: Windows cannot deliver signals.
+				// The child holds the log in tmp open as stdout and Windows
+				// cannot delete an open file, so wait for it to exit before
+				// tmp is removed. It is not our child, so poll instead of Wait.
+				stopProcess(pid)
+				deadline := time.Now().Add(5 * time.Second)
+				for processAlive(pid) && time.Now().Before(deadline) {
+					time.Sleep(50 * time.Millisecond)
 				}
 			}
 		})

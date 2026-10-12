@@ -1,29 +1,34 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/onllm-dev/onwatch/v2/internal/api"
 	"github.com/onllm-dev/onwatch/v2/internal/service"
 	"github.com/onllm-dev/onwatch/v2/internal/testenv"
+	"github.com/onllm-dev/onwatch/v2/internal/update"
 )
 
-// TestMain runs before all tests in the main package. It redirects every
-// supported home/config lookup so setup and profile tests cannot inspect or
-// mutate the developer's real credentials or onWatch data.
+// TestMain runs before all tests in the main package. It enables api test
+// mode and sandboxes the home directory, clearing provider location overrides
+// such as OPENCODE_HOME/XDG_DATA_HOME, so the interactive setup flow's
+// credential auto-detection never resolves to the host's real files (e.g.
+// ~/.local/share/opencode/auth.json). Setup tests set a temp HOME and drive
+// the prompts with fixed input; reading a real login would shift those input
+// sequences and make the tests environment-dependent (flaky).
 func TestMain(m *testing.M) {
+	// SetTestMode must run before sandboxTestHome redirects HOME/USERPROFILE:
+	// its first enable records the real home, which the credential-file guard
+	// then refuses, and it keeps every keychain/keyring operation off.
 	api.SetTestMode(true)
 	os.Setenv("ONWATCH_HOST", "127.0.0.1")
-	cleanup, err := testenv.IsolateProcessUserEnvironment()
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "isolate test user environment: %v\n", err)
-		os.Exit(1)
-	}
 
 	// GitHub Actions runs jobs under systemd, so INVOCATION_ID is set on the
 	// runner and update.IsSystemd() reports true there but not on a developer
@@ -55,9 +60,85 @@ func TestMain(m *testing.M) {
 	// scripted prompt input in the wizard tests desyncs from there on.
 	detectMuseCredentialsFunc = func(*slog.Logger) *api.MuseCredentials { return nil }
 
+	// `onwatch update` tests must never reach GitHub: with a real updater a
+	// test that sets an old version downloads the latest release and replaces
+	// the running test binary, after which every os.Args[0] helper spawn
+	// launches a real onWatch. Tests that need other answers stub their own.
+	newCLIUpdater = func(v string, _ *slog.Logger) cliUpdater { return offlineCLIUpdater{version: v} }
+
+	// Setup tests must never star the repo through a developer's logged-in
+	// gh CLI; the star tests opt back in with t.Setenv.
+	os.Setenv("ONWATCH_STAR", "no")
+
+	cleanupHome := sandboxTestHome()
+
 	code := m.Run()
-	cleanup()
+	cleanupHome()
 	os.Exit(code)
+}
+
+// offlineCLIUpdater is the network-free default updater for tests. A dev
+// build is always current, matching the real updater; any other version
+// reports a failed check, which the update tests accept as the offline result.
+type offlineCLIUpdater struct{ version string }
+
+func (o offlineCLIUpdater) Check() (update.UpdateInfo, error) {
+	if o.version == "dev" || o.version == "" {
+		return update.UpdateInfo{CurrentVersion: o.version, LatestVersion: o.version}, nil
+	}
+	return update.UpdateInfo{}, errors.New("network access is disabled in tests")
+}
+
+func (o offlineCLIUpdater) Apply() error {
+	return errors.New("network access is disabled in tests")
+}
+
+// testScratchHomeEnv marks a process tree whose home is already sandboxed.
+const testScratchHomeEnv = "_ONWATCH_TEST_SCRATCH_HOME"
+
+// sandboxTestHome is the home-directory safety net: it points the whole test
+// process at a scratch home (testenv.IsolateProcessUserEnvironment: HOME,
+// USERPROFILE and LOCALAPPDATA, with provider location overrides and
+// credential variables cleared) so a test that forgets to set its own never
+// reads or writes the developer's (or CI runner's) real ~/.onwatch, ~/.codex
+// and so on.
+//
+// Helper subprocesses re-run TestMain. They inherit the marker and keep the
+// home and environment their parent test gave them (itself a sandbox), so a
+// test that seeds a fixture home for a child still has it seen. Returns the
+// cleanup for the directory this process created (a no-op when it inherited
+// one).
+func sandboxTestHome() func() {
+	if os.Getenv(testScratchHomeEnv) != "" {
+		return func() {}
+	}
+	cleanup, err := testenv.IsolateProcessUserEnvironment()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot create scratch home: %v\n", err)
+		os.Exit(1)
+	}
+	os.Setenv(testScratchHomeEnv, os.Getenv("HOME"))
+	// pidDir was resolved at package init from the real home. Re-resolve it
+	// so runStop/runStatus never read (or stop) a real daemon or menubar
+	// companion. initialPIDFilePath keeps the real path for the off-limits
+	// guard.
+	pidDir = defaultPIDDir()
+	pidFile = filepath.Join(pidDir, "onwatch.pid")
+	return cleanup
+}
+
+// assertPerm checks a file's Unix permission bits. Windows has no such bits:
+// os.Chmod only toggles the read-only attribute and Stat reports a writable
+// file as 0666, so access there is governed by the profile directory's ACL
+// and the check is Unix-only.
+func assertPerm(t testing.TB, info os.FileInfo, want os.FileMode) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("%s permissions = %o, want %o", info.Name(), got, want)
+	}
 }
 
 func setTestUserHome(t *testing.T, home string) {

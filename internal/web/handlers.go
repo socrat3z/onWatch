@@ -621,7 +621,6 @@ func codexUsageAccountName(usage map[string]interface{}) string {
 	return name
 }
 
-
 func codexIsFreePlan(planType string) bool {
 	return strings.EqualFold(strings.TrimSpace(planType), "free")
 }
@@ -685,21 +684,21 @@ func NewHandler(store *store.Store, tracker *tracker.Tracker, logger *slog.Logge
 	}
 
 	// Parse dashboard template (layout + dashboard)
-	dashboardTmpl, err := template.New("").ParseFS(templatesFS, "templates/layout.html", "templates/dashboard.html")
+	dashboardTmpl, err := template.New("").Funcs(recoveryTemplateFuncs).ParseFS(templatesFS, "templates/layout.html", "templates/dashboard.html")
 	if err != nil {
 		logger.Error("failed to parse dashboard template", "error", err)
 		dashboardTmpl = template.New("empty")
 	}
 
 	// Parse login template (layout + login)
-	loginTmpl, err := template.New("").ParseFS(templatesFS, "templates/layout.html", "templates/login.html")
+	loginTmpl, err := template.New("").Funcs(recoveryTemplateFuncs).ParseFS(templatesFS, "templates/layout.html", "templates/login.html")
 	if err != nil {
 		logger.Error("failed to parse login template", "error", err)
 		loginTmpl = template.New("empty")
 	}
 
 	// Parse settings template (layout + settings)
-	settingsTmpl, err := template.New("").ParseFS(templatesFS, "templates/layout.html", "templates/settings.html")
+	settingsTmpl, err := template.New("").Funcs(recoveryTemplateFuncs).ParseFS(templatesFS, "templates/layout.html", "templates/settings.html")
 	if err != nil {
 		logger.Error("failed to parse settings template", "error", err)
 		settingsTmpl = template.New("empty")
@@ -1122,6 +1121,7 @@ func providerCatalog() []providerCatalogItem {
 		{Key: "cursor", Name: "Cursor", Description: "Cursor usage and quota tracking", AutoDetectable: true},
 		{Key: "grok", Name: "Grok", Description: "Grok (xAI) usage tracking", AutoDetectable: true},
 		{Key: "kimi", Name: "Kimi Code", Description: "Kimi Code CLI OAuth quota tracking", AutoDetectable: true},
+		{Key: "mistral", Name: "Mistral", Description: "Included API, Vibe Code and pay-as-you-go tracking", AutoDetectable: true},
 		{Key: "opencode", Name: "OpenCode Go", Description: "OpenCode Go quota tracking", AutoDetectable: false},
 		{Key: "ollama", Name: "Ollama Cloud", Description: "Ollama Cloud included usage tracking", AutoDetectable: false},
 		{Key: "muse", Name: "Muse", Description: "Meta Muse coding-plan quota tracking", AutoDetectable: true},
@@ -1202,8 +1202,10 @@ func (h *Handler) isProviderConfigured(provider string) bool {
 			return true
 		}
 		return api.DetectKimiCredentials(h.logger) != nil
+	case "mistral":
+		return h.config != nil && h.config.HasProvider("mistral")
 	case "opencode":
-		return h.config != nil && strings.TrimSpace(h.config.OpenCodeGoWorkspaceID) != "" && strings.TrimSpace(h.config.OpenCodeGoAuthCookie) != ""
+		return h.config != nil && h.config.OpenCodeGoConfigured()
 	case "ollama":
 		return h.config != nil && strings.TrimSpace(h.config.OllamaAPIKey) != ""
 	case "muse":
@@ -1291,6 +1293,31 @@ func (h *Handler) tryAutoDetect(provider string) bool {
 		return false
 	}
 	switch provider {
+	case "mistral":
+		// Enabling schedules discovery in the agent; never read browsers in HTTP handlers.
+		if h.store == nil {
+			return false
+		}
+		raw, err := h.store.GetSetting("provider_settings")
+		if err != nil {
+			return false
+		}
+		settings := map[string]map[string]interface{}{}
+		if raw != "" && json.Unmarshal([]byte(raw), &settings) != nil {
+			return false
+		}
+		if settings["mistral"] == nil {
+			settings["mistral"] = map[string]interface{}{}
+		}
+		settings["mistral"]["enabled"] = true
+		data, err := json.Marshal(settings)
+		if err != nil || h.store.SetSetting("provider_settings", string(data)) != nil {
+			return false
+		}
+		h.config.MistralEnabled = true
+		h.config.MistralDisabled = false
+		return true
+
 	case "anthropic":
 		if token := strings.TrimSpace(api.DetectAnthropicToken(h.logger)); token != "" {
 			h.config.AnthropicToken = token
@@ -1382,9 +1409,16 @@ func applyProviderConfig(dst, src *config.Config) {
 	dst.CodexToken = src.CodexToken
 	dst.CodexAutoToken = src.CodexAutoToken
 	dst.CodexAutoSource = src.CodexAutoSource
+	dst.MistralDisabled = src.MistralDisabled
+	dst.MistralEnabled = src.MistralEnabled
+	dst.MistralAuthCookie = src.MistralAuthCookie
+	dst.MistralAuthMode = src.MistralAuthMode
+	dst.MistralBrowser = src.MistralBrowser
+	dst.MistralBrowserProfile = src.MistralBrowserProfile
 	dst.OpenCodeEnabled = src.OpenCodeEnabled
 	dst.OpenCodeGoWorkspaceID = src.OpenCodeGoWorkspaceID
 	dst.OpenCodeGoAuthCookie = src.OpenCodeGoAuthCookie
+	dst.OpenCodeGoAPIKey = src.OpenCodeGoAPIKey
 	dst.OllamaAPIKey = src.OllamaAPIKey
 	dst.OllamaMonthlyLimit = src.OllamaMonthlyLimit
 	dst.OllamaResetDay = src.OllamaResetDay
@@ -1452,6 +1486,7 @@ func stripProviderSecrets(providers map[string]interface{}) {
 // providerEnumFields defines valid values for enum-type provider settings.
 // Fields not listed here pass through unvalidated (free-form strings, numbers).
 var providerEnumFields = map[string]map[string][]string{
+	"mistral": {"display_mode": {"usage", "available"}, "auth_mode": {"automatic", "manual"}, "browser": {"auto", "chrome", "firefox", "safari", "edge"}, "show_payg": {"true", "false"}},
 	"global": {
 		"display_mode": {"usage", "available"},
 	},
@@ -1604,6 +1639,28 @@ func ApplyProviderSettingsFromDB(st *store.Store, cfg *config.Config, logger *sl
 	}
 	// OpenCode (opencode-codex) feeds the Codex provider; the UI persists a
 	// simple enabled flag, mirroring the OPENCODE_ENABLED env var.
+	if s := provSettings["mistral"]; s != nil {
+		if enabled, ok := s["enabled"].(string); ok {
+			cfg.MistralEnabled = enabled == "true"
+			cfg.MistralDisabled = !cfg.MistralEnabled
+		}
+		if enabled, ok := s["enabled"].(bool); ok {
+			cfg.MistralDisabled = !enabled
+			cfg.MistralEnabled = enabled
+		}
+		if v, ok := s["auth_mode"].(string); ok {
+			cfg.MistralAuthMode = v
+		}
+		if v, ok := s["browser"].(string); ok {
+			cfg.MistralBrowser = v
+		}
+		if v, ok := s["browser_profile"].(string); ok {
+			cfg.MistralBrowserProfile = v
+		}
+		if v, ok := s["auth_cookie"].(string); ok && v != "" {
+			cfg.MistralAuthCookie = v
+		}
+	}
 	if s := provSettings["opencode"]; s != nil {
 		if enabled, ok := s["enabled"].(bool); ok {
 			cfg.OpenCodeEnabled = enabled
@@ -1613,6 +1670,10 @@ func ApplyProviderSettingsFromDB(st *store.Store, cfg *config.Config, logger *sl
 		}
 		if cookie, _ := s["auth_cookie"].(string); cookie != "" {
 			cfg.OpenCodeGoAuthCookie = cookie
+		}
+		// Usage-API mode: a console service-account key (preferred over the cookie).
+		if key, _ := s["api_key"].(string); strings.TrimSpace(key) != "" {
+			cfg.OpenCodeGoAPIKey = strings.TrimSpace(key)
 		}
 	}
 	// Ollama Cloud: API key plus optional included-usage cap and reset day.
@@ -2002,6 +2063,9 @@ func (h *Handler) Current(w http.ResponseWriter, r *http.Request) {
 		h.currentGrok(w, r)
 	case "kimi":
 		h.currentKimi(w, r)
+	case "mistral":
+		h.currentMistral(w, r)
+		return
 	case "opencode":
 		h.currentOpenCode(w, r)
 	case "ollama":
@@ -2439,6 +2503,9 @@ func (h *Handler) currentBoth(w http.ResponseWriter, r *http.Request) {
 	if h.config.HasProvider("kimi") && providerTelemetryEnabled(visibility, "kimi") {
 		response["kimi"] = h.buildKimiCurrent()
 	}
+	if h.config.HasProvider("mistral") && providerTelemetryEnabled(visibility, "mistral") {
+		response["mistral"] = h.buildMistralCurrent()
+	}
 	if h.config.HasProvider("opencode") && providerTelemetryEnabled(visibility, "opencode") {
 		response["opencode"] = h.buildOpenCodeCurrent()
 	}
@@ -2825,6 +2892,9 @@ func (h *Handler) History(w http.ResponseWriter, r *http.Request) {
 		h.historyGrok(w, r)
 	case "kimi":
 		h.historyKimi(w, r)
+	case "mistral":
+		h.historyMistral(w, r)
+		return
 	case "opencode":
 		h.historyOpenCode(w, r)
 	case "ollama":
@@ -3248,6 +3318,12 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if h.config.HasProvider("mistral") && providerTelemetryEnabled(visibility, "mistral") && h.store != nil {
+		rows, err := h.store.MistralHistory(r.Context(), start, now, 200)
+		if err == nil {
+			response["mistral"] = rows
+		}
+	}
 	if h.config.HasProvider("opencode") && providerTelemetryEnabled(visibility, "opencode") && h.store != nil {
 		snapshots, err := h.store.QueryOpenCodeRange(start, now, 200)
 		if err == nil {
@@ -3978,6 +4054,9 @@ func (h *Handler) Cycles(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusOK, map[string]interface{}{"cycles": []interface{}{}})
 	case "kimi":
 		respondJSON(w, http.StatusOK, map[string]interface{}{"cycles": []interface{}{}})
+	case "mistral":
+		h.cyclesMistral(w, r)
+		return
 	case "opencode":
 		h.cyclesOpenCode(w, r)
 	case "ollama":
@@ -4128,43 +4207,11 @@ func (h *Handler) cyclesBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("moonshot") {
-		quotaType := "balance"
-		var msCycles []map[string]interface{}
-		if active, err := h.store.QueryActiveMoonshotCycle(quotaType); err == nil && active != nil {
-			msCycles = append(msCycles, moonshotCycleToMap(active))
-		}
-		if history, err := h.store.QueryMoonshotCycleHistory(quotaType, 50); err == nil {
-			for _, c := range history {
-				msCycles = append(msCycles, moonshotCycleToMap(c))
-			}
-		}
-		response["moonshot"] = map[string]interface{}{
-			"groupBy":    quotaType,
-			"provider":   "moonshot",
-			"quotaNames": []string{"balance"},
-			"cycles":     msCycles,
-		}
+		response["moonshot"] = h.moonshotCycleOverview()
 	}
 
 	if h.config.HasProvider("deepseek") {
-		quotaType := "balance"
-		var dsCycles []map[string]interface{}
-		currency := h.deepSeekDefaultCurrency()
-
-		if active, err := h.store.QueryActiveDeepSeekCycle(quotaType, currency); err == nil && active != nil {
-			dsCycles = append(dsCycles, deepseekCycleToMap(active))
-		}
-		if history, err := h.store.QueryDeepSeekCycleHistory(quotaType, currency, 50); err == nil {
-			for _, c := range history {
-				dsCycles = append(dsCycles, deepseekCycleToMap(c))
-			}
-		}
-		response["deepseek"] = map[string]interface{}{
-			"groupBy":    quotaType,
-			"provider":   "deepseek",
-			"quotaNames": []string{"balance"},
-			"cycles":     dsCycles,
-		}
+		response["deepseek"] = h.deepseekCycleOverview(h.deepseekCurrency(""))
 	}
 
 	if h.config.HasProvider("gemini") {
@@ -4354,6 +4401,9 @@ func (h *Handler) Summary(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusOK, map[string]interface{}{"summaries": []interface{}{}})
 	case "kimi":
 		respondJSON(w, http.StatusOK, map[string]interface{}{"summaries": []interface{}{}})
+	case "mistral":
+		h.summaryMistral(w, r)
+		return
 	case "opencode":
 		h.summaryOpenCode(w, r)
 	case "ollama":
@@ -4399,7 +4449,7 @@ func (h *Handler) summaryBoth(w http.ResponseWriter, r *http.Request) {
 		response["moonshot"] = h.buildMoonshotSummaryMap()
 	}
 	if h.config.HasProvider("deepseek") {
-		response["deepseek"] = h.buildDeepSeekSummaryMap(h.deepSeekDefaultCurrency())
+		response["deepseek"] = h.buildDeepSeekSummaryMap(h.deepseekCurrency(""))
 	}
 	if h.config.HasProvider("anthropic") {
 		response["anthropic"] = h.buildAnthropicSummaryMap()
@@ -4437,6 +4487,9 @@ func (h *Handler) summaryBoth(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.config.HasProvider("cursor") && h.cursorTracker != nil {
 		response["cursor"] = h.buildCursorSummaryMap()
+	}
+	if h.config.HasProvider("mistral") {
+		response["mistral"] = h.buildMistralSummary(r.Context())
 	}
 	respondJSON(w, http.StatusOK, response)
 }
@@ -4776,7 +4829,7 @@ func (h *Handler) Sessions(w http.ResponseWriter, r *http.Request) {
 		}
 		sessions, queryErr = h.queryProviderSessionsByAccount(provider, accountID)
 	} else {
-		sessions, queryErr = h.store.QuerySessionHistory(provider)
+		sessions, queryErr = h.store.QuerySessionHistory(h.mistralSessionProvider(provider))
 	}
 	if queryErr != nil {
 		h.logger.Error("failed to query sessions", "error", queryErr)
@@ -4954,7 +5007,7 @@ func (h *Handler) sessionsBoth(w http.ResponseWriter, r *http.Request) {
 		} else if provider == "minimax" {
 			sessions, err = h.queryMiniMaxSessions(h.parseMiniMaxAccountID(r))
 		} else {
-			sessions, err = h.store.QuerySessionHistory(provider)
+			sessions, err = h.store.QuerySessionHistory(h.mistralSessionProvider(provider))
 		}
 		if err != nil {
 			return nil
@@ -4982,6 +5035,9 @@ func (h *Handler) sessionsBoth(w http.ResponseWriter, r *http.Request) {
 		return list
 	}
 
+	if h.config.HasProvider("mistral") {
+		response["mistral"] = buildSessionList("mistral")
+	}
 	if h.config.HasProvider("synthetic") {
 		response["synthetic"] = buildSessionList("synthetic")
 	}
@@ -5185,6 +5241,9 @@ func (h *Handler) Insights(w http.ResponseWriter, r *http.Request) {
 		h.insightsGrok(w, r, rangeDur)
 	case "kimi":
 		h.insightsKimi(w, r, rangeDur)
+	case "mistral":
+		h.insightsMistral(w, r)
+		return
 	case "opencode":
 		h.insightsOpenCode(w, r, rangeDur)
 	case "ollama":
@@ -5272,7 +5331,7 @@ func (h *Handler) insightsBoth(w http.ResponseWriter, r *http.Request, rangeDur 
 		response["moonshot"] = h.buildMoonshotInsights(hidden)
 	}
 	if h.config.HasProvider("deepseek") && providerTelemetryEnabled(visibility, "deepseek") {
-		response["deepseek"] = h.buildDeepSeekInsights(h.deepSeekDefaultCurrency(), hidden)
+		response["deepseek"] = h.buildDeepSeekInsights(h.deepseekCurrency(""), hidden)
 	}
 	if h.config.HasProvider("gemini") && providerTelemetryEnabled(visibility, "gemini") {
 		response["gemini"] = insightsResponse{Stats: []insightStat{}, Insights: []insightItem{}}
@@ -5285,6 +5344,9 @@ func (h *Handler) insightsBoth(w http.ResponseWriter, r *http.Request, rangeDur 
 	}
 	if h.config.HasProvider("kimi") && providerTelemetryEnabled(visibility, "kimi") {
 		response["kimi"] = h.buildKimiInsights(hidden)
+	}
+	if h.config.HasProvider("mistral") && providerTelemetryEnabled(visibility, "mistral") {
+		response["mistral"] = h.buildMistralInsights()
 	}
 	if h.config.HasProvider("opencode") && providerTelemetryEnabled(visibility, "opencode") {
 		response["opencode"] = h.buildOpenCodeInsights(hidden, rangeDur)
@@ -7941,6 +8003,9 @@ func (h *Handler) CycleOverview(w http.ResponseWriter, r *http.Request) {
 		h.cycleOverviewGrok(w, r)
 	case "kimi":
 		h.cycleOverviewKimi(w, r)
+	case "mistral":
+		h.cycleOverviewMistral(w, r)
+		return
 	case "opencode":
 		h.cycleOverviewOpenCode(w, r)
 	case "ollama":
@@ -8219,42 +8284,11 @@ func (h *Handler) cycleOverviewBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("moonshot") {
-		quotaType := "balance"
-		var msCycles []map[string]interface{}
-		if active, err := h.store.QueryActiveMoonshotCycle(quotaType); err == nil && active != nil {
-			msCycles = append(msCycles, moonshotCycleToMap(active))
-		}
-		if history, err := h.store.QueryMoonshotCycleHistory(quotaType, 50); err == nil {
-			for _, c := range history {
-				msCycles = append(msCycles, moonshotCycleToMap(c))
-			}
-		}
-		response["moonshot"] = map[string]interface{}{
-			"groupBy":    quotaType,
-			"provider":   "moonshot",
-			"quotaNames": []string{"balance"},
-			"cycles":     msCycles,
-		}
+		response["moonshot"] = h.moonshotCycleOverview()
 	}
 
 	if h.config.HasProvider("deepseek") {
-		quotaType := "balance"
-		currency := h.deepSeekDefaultCurrency()
-		var dsCycles []map[string]interface{}
-		if active, err := h.store.QueryActiveDeepSeekCycle(quotaType, currency); err == nil && active != nil {
-			dsCycles = append(dsCycles, deepseekCycleToMap(active))
-		}
-		if history, err := h.store.QueryDeepSeekCycleHistory(quotaType, currency, 50); err == nil {
-			for _, c := range history {
-				dsCycles = append(dsCycles, deepseekCycleToMap(c))
-			}
-		}
-		response["deepseek"] = map[string]interface{}{
-			"groupBy":    quotaType,
-			"provider":   "deepseek",
-			"quotaNames": []string{"balance"},
-			"cycles":     dsCycles,
-		}
+		response["deepseek"] = h.deepseekCycleOverview(h.deepseekCurrency(""))
 	}
 
 	if h.config.HasProvider("gemini") {
@@ -8880,6 +8914,10 @@ func (h *Handler) buildCodexCurrent(accountID int64) map[string]interface{} {
 	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 	if latest.PlanType != "" {
 		response["planType"] = latest.PlanType
+		response["planLabel"] = codexPlanLabel(latest.PlanType)
+	}
+	if note := codexUsageSourceNote(latest.PlanType); note != "" {
+		response["usageSourceNote"] = note
 	}
 	if latest.CreditsBalance != nil {
 		response["creditsBalance"] = *latest.CreditsBalance
@@ -11244,6 +11282,14 @@ func codexPlanLabel(plan string) string {
 	if plan == "" {
 		return ""
 	}
+	switch strings.ToLower(strings.TrimSpace(plan)) {
+	case "pro":
+		return "Pro (More)"
+	case "prolite":
+		return "Pro"
+	case "promax":
+		return "Pro (Max)"
+	}
 	plan = strings.ReplaceAll(plan, "_", " ")
 	parts := strings.Fields(plan)
 	for i := range parts {
@@ -11253,6 +11299,15 @@ func codexPlanLabel(plan string) string {
 		parts[i] = strings.ToUpper(parts[i][:1]) + strings.ToLower(parts[i][1:])
 	}
 	return strings.Join(parts, " ")
+}
+
+const codexProUsageSourceNote = "Pro (More) weekly usage comes from Codex's usage API. Codex CLI /status may show a different effective percentage; onWatch displays the API-reported value unchanged."
+
+func codexUsageSourceNote(planType string) string {
+	if strings.EqualFold(strings.TrimSpace(planType), "pro") {
+		return codexProUsageSourceNote
+	}
+	return ""
 }
 
 func codexQuotaInsightLabel(name string) string {
@@ -11604,6 +11659,9 @@ func (h *Handler) LoggingHistory(w http.ResponseWriter, r *http.Request) {
 		h.loggingHistoryGrok(w, r)
 	case "kimi":
 		h.loggingHistoryKimi(w, r)
+	case "mistral":
+		h.loggingHistoryMistral(w, r)
+		return
 	case "opencode":
 		h.loggingHistoryOpenCode(w, r)
 	case "ollama":

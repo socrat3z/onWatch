@@ -89,7 +89,9 @@ func TestAnthropicOAuthUserAgent_NotStale(t *testing.T) {
 	if anthropicOAuthUserAgent == "claude-code/2.1.69" {
 		t.Error("user-agent is back to the stale 2.1.69 build")
 	}
-	if !strings.HasPrefix(anthropicOAuthUserAgent, "claude-code/") {
-		t.Errorf("user-agent = %q, want a claude-code/<version> identity", anthropicOAuthUserAgent)
+	// The token endpoint 429s claude-code/2.1.x user agents before it reads the
+	// refresh token (issue #145), so the refresh identity must be claude-cli/.
+	if !strings.HasPrefix(anthropicOAuthUserAgent, "claude-cli/") {
+		t.Errorf("user-agent = %q, want a claude-cli/<version> identity", anthropicOAuthUserAgent)
 	}
 }

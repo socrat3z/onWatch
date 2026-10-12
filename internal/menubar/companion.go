@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -30,6 +32,22 @@ type trayController struct {
 
 	menuMu        sync.Mutex
 	providerItems []*systray.MenuItem
+
+	mistralMu      sync.RWMutex
+	mistralEnabled bool
+	grantFlow      browserGrantFlow
+}
+
+func (c *trayController) setMistralEnabled(enabled bool) {
+	c.mistralMu.Lock()
+	c.mistralEnabled = enabled
+	c.mistralMu.Unlock()
+}
+
+func (c *trayController) isMistralEnabled() bool {
+	c.mistralMu.RLock()
+	defer c.mistralMu.RUnlock()
+	return c.mistralEnabled
 }
 
 func runCompanion(cfg *Config) error {
@@ -74,6 +92,9 @@ func (c *trayController) onReady() {
 		logger.Warn("native menubar host unavailable, using browser fallback", "error", err)
 	} else {
 		c.popover = popover
+		if host, ok := popover.(interface{ SetBrowserGrantHandler(func() string) }); ok {
+			host.SetBrowserGrantHandler(c.grantBrowserAccess)
+		}
 		// Warm the WebView so the first tray click does not flash a blank page
 		// while /menubar navigates. Subsequent opens reuse the loaded document.
 		if err := popover.Preload(c.menubarURL()); err != nil {
@@ -92,6 +113,11 @@ func (c *trayController) onReady() {
 	quickViewItem := systray.AddMenuItem("Open Quick View", "Show the onWatch quick view")
 	dashboardItem := systray.AddMenuItem("Open Dashboard", "Open the local onWatch dashboard")
 	refreshItem := systray.AddMenuItem("Refresh Now", "Fetch the latest quota data")
+	// Only offered while a browser data directory is actually unreadable. The
+	// daemon cannot present this itself: it has no user interface, and the
+	// grant is only created when a person chooses the folder.
+	grantItem := systray.AddMenuItem("Grant Browser Access...", "Allow onWatch to read browser cookies for Mistral")
+	grantItem.Hide()
 	systray.AddSeparator()
 	quitItem := systray.AddMenuItem("Quit Menubar", "Quit the menubar companion")
 
@@ -103,6 +129,7 @@ func (c *trayController) onReady() {
 	logger.Info("Menubar ready and visible")
 
 	go c.watchMenu(quickViewItem, dashboardItem, refreshItem, quitItem)
+	go c.watchBrowserAccess(grantItem)
 	go c.watchProviderItems()
 	go c.refreshLoop()
 }
@@ -114,6 +141,69 @@ func (c *trayController) onExit() {
 	}
 	quitFn = nil
 	slog.Default().Info("Menubar shutting down")
+}
+
+// watchBrowserAccess shows the grant action only while a browser data
+// directory exists but cannot be read, and re-checks after each attempt so the
+// item disappears once access has been granted.
+func (c *trayController) grantBrowserAccess() string {
+	if !c.isMistralEnabled() {
+		return "unavailable"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "unavailable"
+	}
+	return c.grantFlow.run(func() string { return blockedBrowserRoot(browserDataRoots(home)) },
+		func(path string) (bool, string) {
+			return requestFolderAccess(path, "Select this folder to let onWatch read your browser cookies for Mistral. onWatch reads only Mistral session cookies from it.")
+		}, func(path string) error { _, err := os.ReadDir(path); return err }, c.cfg.MistralRetry)
+}
+
+func (c *trayController) watchBrowserAccess(grantItem *systray.MenuItem) {
+	logger := slog.Default()
+	previous := "\x00"
+	refresh := func() string {
+		if !c.isMistralEnabled() {
+			grantItem.Hide()
+			return ""
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		blocked := blockedBrowserRoot(browserDataRoots(home))
+		if blocked == "" {
+			grantItem.Hide()
+		} else {
+			grantItem.Show()
+		}
+		if blocked != previous {
+			previous = blocked
+			logger.Info("Browser access check", "blocked", filepath.Base(blocked), "actionVisible", blocked != "")
+		}
+		return blocked
+	}
+	blocked := refresh()
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			blocked = refresh()
+		case _, ok := <-grantItem.ClickedCh:
+			if !ok {
+				return
+			}
+			if blocked == "" {
+				if blocked = refresh(); blocked == "" {
+					continue
+				}
+			}
+			logger.Info("Browser access request finished", "result", c.grantBrowserAccess())
+			blocked = refresh()
+		}
+	}
 }
 
 func (c *trayController) watchMenu(quickViewItem, dashboardItem, refreshItem, quitItem *systray.MenuItem) {
@@ -208,6 +298,7 @@ func (c *trayController) refreshStatus() {
 		c.updateMenu(nil)
 		return
 	}
+	c.setMistralEnabled(snapshot.MistralEnabled)
 
 	settings, err := c.fetchPreferences()
 	if err != nil {

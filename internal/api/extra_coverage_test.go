@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -672,14 +674,33 @@ func TestWriteAnthropicCredentials_Success(t *testing.T) {
 func TestWriteAnthropicCredentials_NoFile(t *testing.T) {
 	// No credentials file exists - on macOS/Linux this is OK because
 	// Keychain/keyring is the primary store. File write is skipped.
+	// On Windows the file is the only store, so see assertMissingCredentialsFileResult.
 	home := t.TempDir()
 	setTestUserHome(t, home)
 
 	// Don't create .claude directory
 	err := WriteAnthropicCredentials("token", "refresh", 3600)
-	// File not existing is OK (Keychain/keyring is primary).
-	if err != nil {
+	assertMissingCredentialsFileResult(t, home, err)
+}
+
+// assertMissingCredentialsFileResult checks WriteAnthropicCredentials when
+// ~/.claude/.credentials.json does not exist. On macOS/Linux the keychain or
+// keyring is the primary store, so a missing file is skipped silently. On
+// Windows the file is the only store Claude Code reads: a missing file means
+// the rotated refresh token could not be persisted, which must surface as an
+// error (the Anthropic agent logs it and guards against re-reading the stale
+// token). In both cases no file may be created from scratch.
+func assertMissingCredentialsFileResult(t *testing.T, home string, err error) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("err = %v, want a not-exist error on Windows", err)
+		}
+	} else if err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(home, ".claude", ".credentials.json")); !os.IsNotExist(statErr) {
+		t.Errorf("credentials file must not be created, stat err = %v", statErr)
 	}
 }
 
@@ -1772,24 +1793,6 @@ func TestCodexQuotaSortOrder_Default(t *testing.T) {
 // getCredentialsFilePath - covers the home dir lookup
 // ---------------------------------------------------------------------------
 
-func TestGetCredentialsFilePath_WithHome(t *testing.T) {
-	home := t.TempDir()
-	setTestUserHome(t, home)
-
-	path := getCredentialsFilePath()
-	expected := filepath.Join(home, ".claude", ".credentials.json")
-	if path != expected {
-		t.Errorf("getCredentialsFilePath() = %q, want %q", path, expected)
-	}
-}
-
-func TestGetCredentialsFilePath_ReturnsNonEmpty(t *testing.T) {
-	// Regardless of platform, should return a non-empty path if home exists
-	path := getCredentialsFilePath()
-	// Could be empty in some edge cases, but should not panic
-	_ = path
-}
-
 // ---------------------------------------------------------------------------
 // codexAuthPath - cover HOME-based path
 // ---------------------------------------------------------------------------
@@ -2354,22 +2357,6 @@ func TestCodexAuthPath_EmptyHOME_ReturnsEmpty(t *testing.T) {
 // getCredentialsFilePath - HOME empty or error path
 // ---------------------------------------------------------------------------
 
-func TestGetCredentialsFilePath_EmptyHOME(t *testing.T) {
-	// When HOME is not set, getCredentialsFilePath may return "" or
-	// use user.Current() as a fallback. Either way it must not panic.
-	clearTestUserHome(t)
-
-	path := getCredentialsFilePath()
-	// The function returns "" or a valid path via user.Current() fallback.
-	// We just verify no panic and correct format if non-empty.
-	if path != "" {
-		// path should end with .claude/.credentials.json
-		if !strings.HasSuffix(path, ".credentials.json") {
-			t.Errorf("getCredentialsFilePath() = %q, should end with .credentials.json", path)
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // detectAnthropicTokenPlatform - empty home path
 // ---------------------------------------------------------------------------
@@ -2460,10 +2447,9 @@ func TestWriteAnthropicCredentials_FileNotFound(t *testing.T) {
 
 	err := WriteAnthropicCredentials("access_token", "refresh_token", 3600)
 	// File not existing is OK (Keychain/keyring is primary on macOS/Linux).
-	// writeCredentialsToFile returns nil when file doesn't exist.
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
+	// writeCredentialsToFile returns nil when file doesn't exist. On Windows
+	// the file is the only store, so the write must report not-exist.
+	assertMissingCredentialsFileResult(t, dir, err)
 }
 
 // ---------------------------------------------------------------------------
@@ -2923,17 +2909,17 @@ func TestAntigravityClient_FetchQuotas_ContextCancelledMidRequest(t *testing.T) 
 // ---------------------------------------------------------------------------
 
 func TestCodexClient_AccountIDHeader(t *testing.T) {
-	var gotAccountID string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAccountID = r.Header.Get("X-Account-Id")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"plan_type":"pro","rate_limit":{}}`))
-	}))
-	defer server.Close()
-
 	logger := discardLoggerCredentials()
-	client := NewCodexClient("test-token", logger, WithCodexBaseURL(server.URL))
+	client := NewCodexClient("test-token", logger, WithCodexBaseURL("https://example.invalid"))
+	var headers http.Header
+	client.httpClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		headers = req.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"plan_type":"pro","rate_limit":{}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
 	client.SetAccountID("test-account-123")
 
 	_, err := client.FetchUsage(context.Background())
@@ -2941,8 +2927,13 @@ func TestCodexClient_AccountIDHeader(t *testing.T) {
 		t.Fatalf("FetchUsage failed: %v", err)
 	}
 
-	if gotAccountID != "test-account-123" {
-		t.Errorf("X-Account-Id = %q, want 'test-account-123'", gotAccountID)
+	if gotAccountID := headers.Get("ChatGPT-Account-Id"); gotAccountID != "test-account-123" {
+		t.Errorf("ChatGPT-Account-Id = %q, want test-account-123", gotAccountID)
+	}
+	for _, obsolete := range []string{"X-Account-Id", "ChatClaude-Account-Id"} {
+		if _, exists := headers[http.CanonicalHeaderKey(obsolete)]; exists {
+			t.Errorf("obsolete %s header should be absent", obsolete)
+		}
 	}
 }
 
@@ -3101,17 +3092,6 @@ func TestWriteAnthropicCredentials_InvalidJSONFile(t *testing.T) {
 // ---------------------------------------------------------------------------
 // getCredentialsFilePath - HOME set to temp dir (covers normal path fully)
 // ---------------------------------------------------------------------------
-
-func TestGetCredentialsFilePath_ValidHOME(t *testing.T) {
-	dir := t.TempDir()
-	setTestUserHome(t, dir)
-
-	path := getCredentialsFilePath()
-	expected := filepath.Join(dir, ".claude", ".credentials.json")
-	if path != expected {
-		t.Errorf("getCredentialsFilePath() = %q, want %q", path, expected)
-	}
-}
 
 // ---------------------------------------------------------------------------
 // AntigravityClient - FetchQuotas with context cancel resets connection

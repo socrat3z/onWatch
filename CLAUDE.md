@@ -1,10 +1,10 @@
 # onWatch
 
-Go CLI for AI quota tracking. Polls 18 providers → SQLite → Material Design 3 dashboard.
+Go CLI for AI quota tracking. Polls 19 providers → SQLite → Material Design 3 dashboard.
 
 ## Task
 
-Background daemon (<50MB RAM) tracking: Anthropic, Synthetic, Z.ai, Copilot, Codex, MiniMax, Antigravity, Gemini, Cursor, Kimi Code, Grok, Moonshot, DeepSeek, OpenRouter, OpenCode Go, Ollama Cloud, Muse, Command Code.
+Background daemon (<50MB RAM) tracking: Anthropic, Synthetic, Z.ai, Copilot, Codex, MiniMax, Antigravity, Gemini, Cursor, Kimi Code, Grok, Moonshot, DeepSeek, OpenRouter, OpenCode Go, Ollama Cloud, Muse, Command Code, Mistral.
 
 ## Code Map
 
@@ -75,7 +75,7 @@ On `go.sum` changes, update `vendorHash` in `flake.nix` (run `nix build .#onwatc
 5. Add to `internal/web/handlers.go` endpoints
 6. Update dashboard JS in `internal/web/static/app.js`
 
-**API Docs:** See `docs/` for provider-specific setup (MULTI_ACCOUNT.md for multiple accounts per provider, WITH_USER_ENV.md for the fork container image, COPILOT_SETUP.md, CODEX_SETUP.md, ANTIGRAVITY_SETUP.md, GEMINI_SETUP.md, CURSOR_SETUP.md, KIMI_SETUP.md, GROK_SETUP.md, MOONSHOT_SETUP.md, DEEPSEEK_SETUP.md, OPENCODE_SETUP.md, OLLAMA_SETUP.md, MUSE_SETUP.md, COMMANDCODE_SETUP.md) and WEBHOOK_SETUP.md for outbound HTTP notifications
+**API Docs:** See `docs/` for provider-specific setup (MULTI_ACCOUNT.md for multiple accounts per provider, WITH_USER_ENV.md for the fork container image, COPILOT_SETUP.md, CODEX_SETUP.md, ANTIGRAVITY_SETUP.md, GEMINI_SETUP.md, CURSOR_SETUP.md, KIMI_SETUP.md, GROK_SETUP.md, MOONSHOT_SETUP.md, DEEPSEEK_SETUP.md, OPENCODE_SETUP.md, OLLAMA_SETUP.md, MUSE_SETUP.md, COMMANDCODE_SETUP.md, MISTRAL_SETUP.md) and WEBHOOK_SETUP.md for outbound HTTP notifications
 
 **Containers:** `IsDockerEnvironment()` in `config.go` detects Docker/K8s. Containers run foreground only.
 
@@ -104,6 +104,7 @@ On `go.sum` changes, update `vendorHash` in `flake.nix` (run `nix build .#onwatc
 - `internal/agent/anthropic_agent.go`: a resident Claude Code always blocks the token *exchange*, because the lock is advisory and a natively installed `claude` takes no lock. Recovery first tries to **adopt** a pair Claude Code has already written, which consumes nothing and is the normal recovery on a host. It exchanges anyway only when `ONWATCH_CLAUDE_CLI_LOCKED=1` declares that every `claude` reaching this store is flock-wrapped - set solely by `Dockerfile.with-user-env`. Nothing else should set it.
 - Every skipped refresh logs its reason, and the `polling PAUSED` line carries `oauth_refresh_skipped`. A silent skip is what made this class of failure undiagnosable from logs.
 - A usage-API 429 does **not** trigger a refresh. Rotating a token to win a fresh rate-limit window was the old behaviour and was the cause of the periodic logouts; onWatch now waits for the next scheduled poll. Prefer `ANTHROPIC_SOURCE=statusline` to avoid the usage API entirely.
+- The OAuth refresh endpoint (`platform.claude.com/v1/oauth/token`) 429s every `claude-code/2.1.x` User-Agent before reading the token. Refresh requests send a `claude-cli/<version> (external, cli)` User-Agent built from `claudeCodeVersion`; bump it with new Claude Code releases, along with the literal UAs in `anthropic_client_test.go` and `anthropic_oauth_request_test.go` ([issue #145](https://github.com/onllm-dev/onWatch/issues/145))
 - See: [issue #16](https://github.com/onllm-dev/onWatch/issues/16), [anthropics/claude-code#31021](https://github.com/anthropics/claude-code/issues/31021)
 
 ## Style

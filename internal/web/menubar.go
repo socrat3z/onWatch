@@ -3,6 +3,8 @@ package web
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/onllm-dev/onwatch/v2/internal/api"
+	"html"
 	"net"
 	"net/http"
 	"os"
@@ -219,6 +221,11 @@ func (h *Handler) MenubarRefresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func isLoopbackRequest(r *http.Request) bool {
+	// A reverse proxy on the same host connects from loopback on behalf of
+	// remote clients. Forwarded requests are never treated as local.
+	if r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Real-IP") != "" || r.Header.Get("Forwarded") != "" {
+		return false
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
@@ -232,6 +239,7 @@ func isLocalMenubarPublicPath(path string) bool {
 		path == "/api/menubar/summary" ||
 		path == "/api/menubar/preferences" ||
 		path == "/api/menubar/refresh" ||
+		path == "/api/menubar/mistral/retry" ||
 		path == "/api/menubar/tray-title"
 }
 
@@ -245,10 +253,11 @@ func (h *Handler) BuildMenubarSnapshot() (*menubar.Snapshot, error) {
 	providers, latest := h.buildMenubarProviders(settings, false)
 	aggregate := buildAggregate(providers)
 	return &menubar.Snapshot{
-		GeneratedAt: time.Now().UTC(),
-		UpdatedAgo:  timeAgo(latest),
-		Aggregate:   aggregate,
-		Providers:   providers,
+		GeneratedAt:    time.Now().UTC(),
+		UpdatedAgo:     timeAgo(latest),
+		Aggregate:      aggregate,
+		Providers:      providers,
+		MistralEnabled: h.config != nil && h.config.HasProvider("mistral"),
 	}, nil
 }
 
@@ -399,6 +408,15 @@ func (h *Handler) buildMenubarProviders(settings *menubar.Settings, includeHidde
 	if h.config != nil && h.config.HasProvider("kimi") && h.providerDashboardVisible("kimi", visibility) {
 		payload := h.buildKimiCurrent()
 		if card := normalizeProviderCard("kimi", "Kimi Code", "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
+			providers = append(providers, *card)
+			if captured := parseCapturedAt(payload); captured.After(latest) {
+				latest = captured
+			}
+		}
+	}
+	if h.config != nil && h.config.HasProvider("mistral") && h.providerDashboardVisible("mistral", visibility) {
+		payload := h.buildMistralCurrent()
+		if card := normalizeProviderCard("mistral", resolveProviderTabLabel("mistral", labels), mistralBillingSubtitle(payload), payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
 			providers = append(providers, *card)
 			if captured := parseCapturedAt(payload); captured.After(latest) {
 				latest = captured
@@ -566,12 +584,17 @@ func (h *Handler) renderMenubarHTML(view menubar.ViewType, settings *menubar.Set
 	if err != nil {
 		return "", err
 	}
-	html := strings.Replace(string(page), "__ONWATCH_MENUBAR_BOOTSTRAP__", string(bootstrap), 1)
+	content := strings.Replace(string(page), "__ONWATCH_MENUBAR_BOOTSTRAP__", string(bootstrap), 1)
+	content = strings.ReplaceAll(content, "__ONWATCH_MISTRAL_ASSET_VERSION__", mistralRecoveryAssetVersion)
+	basePath := h.getBasePath()
+	baseJSON, _ := json.Marshal(basePath)
+	content = strings.ReplaceAll(content, "__ONWATCH_BASE_PATH_JSON__", string(baseJSON))
+	content = strings.ReplaceAll(content, "__ONWATCH_BASE_PATH__", html.EscapeString(basePath))
 	version := strings.TrimSpace(h.version)
 	if version == "" {
 		version = "dev"
 	}
-	return strings.Replace(html, "__ONWATCH_MENUBAR_VERSION__", version, 1), nil
+	return strings.Replace(content, "__ONWATCH_MENUBAR_VERSION__", version, 1), nil
 }
 
 func (h *Handler) buildMenubarProviderOptions(settings *menubar.Settings) ([]menubarProviderOption, error) {
@@ -734,10 +757,23 @@ func providerQuotaKey(provider menubarProviderOption, quotaKey string) string {
 
 func normalizeProviderCard(id, label, subtitle string, payload map[string]interface{}, warningPercent, criticalPercent int) *menubar.ProviderCard {
 	quotas := normalizeQuotas(payload, warningPercent, criticalPercent)
-	if len(quotas) == 0 {
+	var connection *api.ProviderConnection
+	if id == "mistral" {
+		if c, ok := payload["connection"].(api.ProviderConnection); ok {
+			connection = &c
+		}
+	}
+	if len(quotas) == 0 && (connection == nil || connection.Reason == "" && !connection.CanRetry && !connection.Retrying) {
 		return nil
 	}
 	status := "healthy"
+	connectionStatus := stringValue(payload, "status")
+	if connectionStatus == "reconnect" || connectionStatus == "stale" {
+		status = "warning"
+	}
+	if connection != nil && connection.Reason != "" {
+		status = "warning"
+	}
 	highest := 0.0
 	trends := make([]menubar.TrendSeries, 0, len(quotas))
 	for _, quota := range quotas {
@@ -745,6 +781,9 @@ func normalizeProviderCard(id, label, subtitle string, payload map[string]interf
 			highest = quota.Percent
 		}
 		status = worsenStatus(status, quota.Status)
+		if quota.IsStale {
+			status = worsenStatus(status, "warning")
+		}
 		points := quota.SparklinePoints
 		if len(points) == 0 {
 			points = []float64{quota.Percent, quota.Percent, quota.Percent, quota.Percent}
@@ -757,15 +796,17 @@ func normalizeProviderCard(id, label, subtitle string, payload map[string]interf
 		})
 	}
 	return &menubar.ProviderCard{
-		ID:             id,
-		BaseProvider:   providerKeyBase(id),
-		Label:          label,
-		Subtitle:       subtitle,
-		Status:         status,
-		HighestPercent: highest,
-		UpdatedAt:      timeAgo(parseCapturedAt(payload)),
-		Quotas:         quotas,
-		Trends:         trends,
+		ID:               id,
+		BaseProvider:     providerKeyBase(id),
+		Label:            label,
+		Subtitle:         subtitle,
+		ConnectionStatus: connectionStatus,
+		Connection:       connection,
+		Status:           status,
+		HighestPercent:   highest,
+		UpdatedAt:        timeAgo(parseCapturedAt(payload)),
+		Quotas:           quotas,
+		Trends:           trends,
 	}
 }
 
@@ -818,12 +859,16 @@ func normalizeQuotas(payload map[string]interface{}, warningPercent, criticalPer
 			Used:           firstFloat(item, "usage", "used", "currentUsage", "currentUsed"),
 			Limit:          firstFloat(item, "limit", "total", "currentLimit", "entitlement"),
 			Format:         stringValue(item, "format"),
+			Currency:       stringValue(item, "currency"),
 			ResetAt:        firstString(item, "renewsAt", "resetsAt", "resetDate", "resetTime", "resetAt"),
 			TimeUntilReset: stringValue(item, "timeUntilReset"),
 			ProjectedValue: firstFloat(item, "projectedUsage", "projectedUtil", "projectedValue"),
 			CurrentRate:    firstFloat(item, "currentRate"),
 			Source:         stringValue(item, "source"),
 			AgeSeconds:     int64(firstFloat(item, "ageSeconds")),
+		}
+		if name := stringValue(item, "name"); name == "api_included" || name == "vibe_included" {
+			meter.Key = name
 		}
 		if v, ok := item["isStale"]; ok {
 			if b, ok := v.(bool); ok {
@@ -1141,4 +1186,23 @@ func firstFloat(item map[string]interface{}, keys ...string) float64 {
 		}
 	}
 	return 0
+}
+
+// mistralBillingSubtitle labels the provider card with pay-as-you-go spend.
+// An unavailable balance gets no subtitle: the dashboard's spend card already
+// reports that, and a permanent "unavailable" line is only clutter in a
+// compact menu.
+func mistralBillingSubtitle(payload map[string]interface{}) string {
+	if payload["showBilling"] == false {
+		return ""
+	}
+	b, ok := payload["billing"].(*api.MistralBilling)
+	if !ok || b == nil || b.Amount == nil {
+		return ""
+	}
+	subtitle := fmt.Sprintf("Pay-as-you-go: %.2f %s", *b.Amount, b.Currency)
+	if b.Status != "" && b.Status != "ok" {
+		subtitle += " (" + b.Status + ")"
+	}
+	return subtitle
 }

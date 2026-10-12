@@ -314,10 +314,31 @@ only after it actually returns usage, and is dropped again as soon as it stops
 working or the token changes - so a temporary failure can never pin polling to a
 dead endpoint.
 
+### Usage percentages and plan labels
+
+onWatch scopes usage requests to the selected profile with Codex's
+`ChatGPT-Account-Id` header. It does not send alternative account headers.
+
+A running default profile stays tied to the account it started with. Switching
+the active Codex login does not make that profile adopt the other account's
+tokens or overwrite its credentials. Save the new account as a named profile,
+or restart onWatch to use the new default login.
+
+Codex's `pro`, `prolite`, and `promax` plan values display as **Pro (More)**,
+**Pro**, and **Pro (Max)**. The server supplies the same label to every
+dashboard account view.
+
+For Pro (More), the usage API and CLI `/status` can report different percentages
+for the same reset cycle. onWatch preserves the usage API percentage and shows
+a source note on the dashboard. There is no verified conversion rule for this
+difference; matching reset times alone does not establish the allowance used
+by each source.
+
 ### Token security
 
 - Keep `.env` out of version control
-- onWatch only sends the token to Codex usage endpoints
+- onWatch sends the token to Codex usage endpoints and, when enabled, the
+  quota-starter endpoint
 - Usage history stays local in SQLite
 
 ---
@@ -344,8 +365,16 @@ How it works:
   window`, so the countdown stays pinned at ~the full length (e.g. a 5h window
   shows ~4h59m and does not tick down). Once a turn is sent, the reset time
   becomes fixed and the countdown starts decreasing. After each poll onWatch
-  checks the freshly polled reset time: if a window still looks unstarted and its
-  toggle is on, it fires a starter.
+  compares the freshly polled reset time with the previous poll's: if a window
+  looks unstarted, its reset time moved forward by the time between the polls,
+  and its toggle is on, it fires a starter. A just-started window still shows
+  nearly the full countdown, but its reset time no longer moves, so it is not
+  pinged again. A window seen for the first time (e.g. right after a restart or
+  a reset) waits one poll for that comparison.
+- **One ping for all windows.** A turn counts against both the 5h and weekly
+  windows, so when both look unstarted a single ping starts them, with one
+  notification per enabled window. The ping also starts an unstarted window
+  whose toggle is off.
 - **The request.** A minimal call to the ChatGPT-backed Codex Responses endpoint
   (`/backend-api/codex/responses`) using your existing OAuth token, asking the
   model to reply with the short string `Quota Resumed`.
@@ -357,10 +386,10 @@ How it works:
   reads the SSE stream to completion (through `response.completed`) so the turn
   commits and the window starts. The extra read costs only the few output tokens
   of "Quota Resumed" (see Cost below).
-- **Rate cap.** Re-evaluated every poll (so a failed start retries at your
-  polling cadence), but hard-capped to **5 pings per rolling 4 hours per window**.
-  A successful start makes the window no longer look unstarted, so it normally
-  fires once. The cap is a backstop against loops/failed starts.
+- **Rate cap.** Re-evaluated every poll (a failed start retries every second
+  poll, since the poll right after a ping cannot tell), but hard-capped to
+  **5 pings per rolling 4 hours per account**. A successful start makes the
+  window no longer look unstarted, so it normally fires once. The cap is a backstop against loops/failed starts.
 - Failures are logged (`~/.onwatch/data/.onwatch.log`) and never retried beyond
   the cap.
 
@@ -380,7 +409,7 @@ So the quota/token cost is negligible:
   when it would otherwise sit unstarted) and ~1/week for the weekly window. That
   is roughly **~300 tokens/day** at most for the 5h window.
 - **Worst case** (a start that never "takes" and keeps hitting the rate cap):
-  5 pings per 4h per window, i.e. ~30/day for the 5h window - still under
+  5 pings per 4h per account, i.e. ~30/day - still under
   ~2,000 tokens/day.
 - Against the tracked quota itself, a single start registers as **less than 1%**
   of the window.
@@ -389,9 +418,9 @@ Environment overrides (the dashboard toggles take precedence at runtime):
 
 - `CODEX_AUTO_START_5H=true` / `CODEX_AUTO_START_7D=true` - default-on without the UI.
 - `CODEX_STARTER_MODEL` - override the model used for the starter request (default
-  `gpt-5.5`). ChatGPT-account Codex access supports only a small set of models
-  (currently `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`); set this if the default is
-  rejected.
+  `gpt-6-luna`). Model availability depends on your ChatGPT plan and workspace
+  settings; set this to a model available to your account if the default is
+  rejected. See [Codex models](https://learn.chatgpt.com/docs/models).
 
 > Beta: the Codex Responses request shape can change upstream. If starter pings
 > fail, check the logs and try a different `CODEX_STARTER_MODEL`.

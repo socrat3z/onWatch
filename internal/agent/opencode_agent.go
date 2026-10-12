@@ -15,6 +15,7 @@ import (
 
 type openCodeFetcher interface {
 	FetchSnapshot(ctx context.Context, workspaceID, authCookie string) (*api.OpenCodeSnapshot, error)
+	FetchUsageSnapshot(ctx context.Context, apiKey string) (*api.OpenCodeSnapshot, error)
 }
 
 type OpenCodeAgent struct {
@@ -90,17 +91,14 @@ func (a *OpenCodeAgent) poll(ctx context.Context) {
 		return
 	}
 
-	workspaceID := a.cfg.OpenCodeGoWorkspaceID
-	authCookie := a.cfg.OpenCodeGoAuthCookie
-
-	snapshot, err := a.client.FetchSnapshot(ctx, workspaceID, authCookie)
+	snapshot, err := a.fetch(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
 		}
 		if errors.Is(err, api.ErrOpenCodeRateLimited) {
 			cycles := a.backoff.RateLimited()
-			a.logger.Warn("OpenCode rate limited, backing off", "skip_cycles", cycles)
+			a.logger.Warn("OpenCode Go status API rate-limited; skipping this cycle", "skip_cycles", cycles)
 			return
 		}
 		a.logger.Error("Failed to fetch OpenCode quotas", "error", err)
@@ -143,4 +141,13 @@ func (a *OpenCodeAgent) poll(ctx context.Context) {
 		"plan_name", snapshot.PlanName,
 		"quota_count", len(snapshot.Quotas),
 	)
+}
+
+// fetch reads the Go status API with the service-account key when one is set,
+// otherwise with the workspace ID + console session cookie.
+func (a *OpenCodeAgent) fetch(ctx context.Context) (*api.OpenCodeSnapshot, error) {
+	if key := a.cfg.OpenCodeGoAPIKey; key != "" {
+		return a.client.FetchUsageSnapshot(ctx, key)
+	}
+	return a.client.FetchSnapshot(ctx, a.cfg.OpenCodeGoWorkspaceID, a.cfg.OpenCodeGoAuthCookie)
 }

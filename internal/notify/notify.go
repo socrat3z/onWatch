@@ -1014,7 +1014,8 @@ type StarterEvent struct {
 //
 // Starter pings are operational events rather than quota-cycle alerts, so they
 // are not written to the notification log and are not deduplicated per cycle.
-// The starter's own rate cap bounds how often this can fire.
+// The starter pings once per observed window start and its rate cap bounds
+// retries of failed starts, which bounds how often this can fire.
 func (e *NotificationEngine) SendStarterEvent(ev StarterEvent) {
 	e.mu.RLock()
 	channels := channelSet{webhook: e.webhookSender, enabled: e.cfg.Channels}

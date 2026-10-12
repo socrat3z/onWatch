@@ -108,6 +108,8 @@ func TestCursorStateDBPathForOS(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// filepath.Join uses the host separator, so compare in slash form:
+			// the layout under home is what is pinned here, on every host.
 			got := filepath.ToSlash(cursorStateDBPathForOS(home, tt.goos))
 			if got != tt.want {
 				t.Fatalf("cursorStateDBPathForOS() = %q, want %q", got, tt.want)

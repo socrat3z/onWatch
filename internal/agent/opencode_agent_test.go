@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,31 +78,31 @@ func TestOpenCodeAgent_Poll_RateLimitBackoffGrowsAndResets(t *testing.T) {
 
 	// First 429 arms one skipped cycle.
 	ag.poll(context.Background())
-	if client.calls != 1 || ag.backoff.failCount != 1 || ag.backoff.skipRemaining != 1 {
-		t.Fatalf("after first 429: calls=%d failCount=%d skipRemaining=%d", client.calls, ag.backoff.failCount, ag.backoff.skipRemaining)
+	if client.scrapeCalls != 1 || ag.backoff.failCount != 1 || ag.backoff.skipRemaining != 1 {
+		t.Fatalf("after first 429: calls=%d failCount=%d skipRemaining=%d", client.scrapeCalls, ag.backoff.failCount, ag.backoff.skipRemaining)
 	}
 	ag.poll(context.Background())
-	if client.calls != 1 {
-		t.Fatalf("backoff poll made request: calls=%d, want 1", client.calls)
+	if client.scrapeCalls != 1 {
+		t.Fatalf("backoff poll made request: calls=%d, want 1", client.scrapeCalls)
 	}
 
 	// The next 429 doubles the skip window.
 	ag.poll(context.Background())
-	if client.calls != 2 || ag.backoff.skipRemaining != 2 {
-		t.Fatalf("after second 429: calls=%d skipRemaining=%d, want 2 and 2", client.calls, ag.backoff.skipRemaining)
+	if client.scrapeCalls != 2 || ag.backoff.skipRemaining != 2 {
+		t.Fatalf("after second 429: calls=%d skipRemaining=%d, want 2 and 2", client.scrapeCalls, ag.backoff.skipRemaining)
 	}
 	ag.poll(context.Background())
 	ag.poll(context.Background())
-	if client.calls != 2 {
-		t.Fatalf("backoff polls made request: calls=%d, want 2", client.calls)
+	if client.scrapeCalls != 2 {
+		t.Fatalf("backoff polls made request: calls=%d, want 2", client.scrapeCalls)
 	}
 
 	// A successful fetch resets the exponential sequence.
 	client.err = nil
 	client.snapshot = &api.OpenCodeSnapshot{CapturedAt: time.Now().UTC(), PlanName: "OpenCode Go"}
 	ag.poll(context.Background())
-	if client.calls != 3 || ag.backoff.failCount != 0 || ag.backoff.skipRemaining != 0 {
-		t.Fatalf("after success: calls=%d failCount=%d skipRemaining=%d", client.calls, ag.backoff.failCount, ag.backoff.skipRemaining)
+	if client.scrapeCalls != 3 || ag.backoff.failCount != 0 || ag.backoff.skipRemaining != 0 {
+		t.Fatalf("after success: calls=%d failCount=%d skipRemaining=%d", client.scrapeCalls, ag.backoff.failCount, ag.backoff.skipRemaining)
 	}
 }
 
@@ -149,17 +151,84 @@ func TestOpenCodeAgent_Poll_SuccessInsertsAndTracks(t *testing.T) {
 }
 
 type stubOpenCodeClient struct {
-	snapshot *api.OpenCodeSnapshot
-	err      error
-	calls    int
+	snapshot    *api.OpenCodeSnapshot
+	err         error
+	scrapeCalls int
+	usageCalls  int
+	usageKey    string
 }
 
 func (s *stubOpenCodeClient) FetchSnapshot(_ context.Context, _, _ string) (*api.OpenCodeSnapshot, error) {
-	s.calls++
+	s.scrapeCalls++
 	if s.err != nil {
 		return nil, s.err
 	}
 	return s.snapshot, nil
+}
+
+func (s *stubOpenCodeClient) FetchUsageSnapshot(_ context.Context, apiKey string) (*api.OpenCodeSnapshot, error) {
+	s.usageCalls++
+	s.usageKey = apiKey
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.snapshot, nil
+}
+
+func TestOpenCodeAgent_Fetch_PrefersUsageAPIKeyOverCookie(t *testing.T) {
+	cfg := &config.Config{
+		OpenCodeGoWorkspaceID: "ws",
+		OpenCodeGoAuthCookie:  "cookie",
+		OpenCodeGoAPIKey:      "oc_sk_test",
+	}
+	client := &stubOpenCodeClient{snapshot: &api.OpenCodeSnapshot{}}
+	ag := NewOpenCodeAgent(client, nil, nil, cfg, time.Second, slog.Default(), nil)
+
+	if _, err := ag.fetch(context.Background()); err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if client.usageCalls != 1 || client.scrapeCalls != 0 {
+		t.Fatalf("usageCalls=%d scrapeCalls=%d, want usage API only", client.usageCalls, client.scrapeCalls)
+	}
+	if client.usageKey != "oc_sk_test" {
+		t.Fatalf("usage called with key=%q", client.usageKey)
+	}
+}
+
+func TestOpenCodeAgent_Fetch_FallsBackToCookieScrapeWithoutKey(t *testing.T) {
+	cfg := &config.Config{OpenCodeGoWorkspaceID: "ws", OpenCodeGoAuthCookie: "cookie"}
+	client := &stubOpenCodeClient{snapshot: &api.OpenCodeSnapshot{}}
+	ag := NewOpenCodeAgent(client, nil, nil, cfg, time.Second, slog.Default(), nil)
+
+	if _, err := ag.fetch(context.Background()); err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if client.scrapeCalls != 1 || client.usageCalls != 0 {
+		t.Fatalf("scrapeCalls=%d usageCalls=%d, want cookie scrape only", client.scrapeCalls, client.usageCalls)
+	}
+}
+
+// A 429 from the status API is a skipped cycle (warning), not an error.
+func TestOpenCodeAgent_Poll_RateLimitedWarnsAndSkips(t *testing.T) {
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer st.Close()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	client := &stubOpenCodeClient{err: api.ErrOpenCodeRateLimited}
+	ag := NewOpenCodeAgent(client, st, tracker.NewOpenCodeTracker(st, nil), &config.Config{OpenCodeGoAPIKey: "oc_sk_test"}, time.Second, logger, nil)
+
+	ag.poll(context.Background())
+
+	if out := logs.String(); !strings.Contains(out, "level=WARN") || strings.Contains(out, "level=ERROR") {
+		t.Fatalf("logs = %q, want a warning and no error", out)
+	}
+	if latest, err := st.QueryLatestOpenCode(); err != nil || latest != nil {
+		t.Fatalf("latest = %+v (err %v), want no snapshot", latest, err)
+	}
 }
 
 func TestOpenCodeAgent_Poll_MissingConfig(t *testing.T) {

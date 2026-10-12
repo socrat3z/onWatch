@@ -23,6 +23,14 @@ const (
 
 // Config holds all application configuration.
 type Config struct {
+	MistralEnabled        bool
+	MistralDisabled       bool
+	MistralAuthCookie     string
+	MistralAuthMode       string
+	MistralBrowser        string
+	MistralBrowserProfile string
+	MistralRetention      time.Duration // MISTRAL_RETENTION (example: 2160h, 0 disables pruning)
+
 	// Synthetic provider configuration
 	SyntheticAPIKey string // SYNTHETIC_API_KEY
 
@@ -49,7 +57,9 @@ type Config struct {
 	OpenCodeEnabled  bool   // OPENCODE_ENABLED=true: track ChatGPT via OpenCode auth.json (feeds Codex)
 	// OpenCode Go provider configuration
 	OpenCodeGoWorkspaceID string // OPENCODE_GO_WORKSPACE_ID
-	OpenCodeGoAuthCookie  string // OPENCODE_GO_AUTH_COOKIE
+	OpenCodeGoAuthCookie  string // OPENCODE_GO_AUTH_COOKIE: __Host-console_session cookie value (or a full cookie header)
+	OpenCodeGoAPIKey      string // OPENCODE_GO_API_KEY: console service-account key (preferred over the session cookie)
+	OpenCodeGoBaseURL     string // OPENCODE_GO_BASE_URL override for proxy setups (default https://opencode.ai)
 	// Ollama Cloud provider configuration
 	OllamaAPIKey       string  // OLLAMA_API_KEY from ollama.com/settings/keys
 	OllamaMonthlyLimit float64 // OLLAMA_MONTHLY_LIMIT: included usage cap in USD (overrides the plan default; 0 = derive from plan)
@@ -81,10 +91,12 @@ type Config struct {
 	OpenRouterAPIKey string // OPENROUTER_API_KEY
 
 	// Moonshot provider configuration
-	MoonshotAPIKey string // MOONSHOT_API_KEY
+	MoonshotAPIKey  string // MOONSHOT_API_KEY
+	MoonshotBaseURL string // MOONSHOT_BASE_URL override for proxy setups (default https://api.moonshot.ai)
 
 	// DeepSeek provider configuration
-	DeepSeekAPIKey string // DEEPSEEK_API_KEY
+	DeepSeekAPIKey  string // DEEPSEEK_API_KEY
+	DeepSeekBaseURL string // DEEPSEEK_BASE_URL override for proxy setups (default https://api.deepseek.com)
 
 	// Gemini provider configuration (auto-detected from ~/.gemini/oauth_creds.json or env vars)
 	GeminiEnabled      bool   // true if auto-detected or GEMINI_ENABLED=true
@@ -250,6 +262,8 @@ var onwatchEnvKeys = []string{
 	"OPENCODE_ENABLED",
 	"OPENCODE_GO_WORKSPACE_ID",
 	"OPENCODE_GO_AUTH_COOKIE",
+	"OPENCODE_GO_API_KEY",
+	"OPENCODE_GO_BASE_URL",
 	"OPENCODE_HOME",
 	"OLLAMA_API_KEY",
 	"OLLAMA_MONTHLY_LIMIT",
@@ -267,7 +281,9 @@ var onwatchEnvKeys = []string{
 	"MINIMAX_API_KEY",
 	"OPENROUTER_API_KEY",
 	"MOONSHOT_API_KEY",
+	"MOONSHOT_BASE_URL",
 	"DEEPSEEK_API_KEY",
+	"DEEPSEEK_BASE_URL",
 	"CURSOR_TOKEN",
 	"GROK_TOKEN",
 	"GROK_ENABLED",
@@ -374,9 +390,24 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 		cfg.CodexShowAvailable = "usage"
 	}
 	// OpenCode feeds the Codex provider using ChatGPT OAuth stored by OpenCode.
+	cfg.MistralEnabled = os.Getenv("MISTRAL_ENABLED") == "true"
+	cfg.MistralDisabled = os.Getenv("MISTRAL_ENABLED") == "false"
+	cfg.MistralAuthCookie = strings.TrimSpace(os.Getenv("MISTRAL_AUTH_COOKIE"))
+	cfg.MistralBrowser = strings.TrimSpace(os.Getenv("MISTRAL_BROWSER"))
+	cfg.MistralBrowserProfile = strings.TrimSpace(os.Getenv("MISTRAL_BROWSER_PROFILE"))
+	cfg.MistralRetention = 90 * 24 * time.Hour
+	if env := strings.TrimSpace(os.Getenv("MISTRAL_RETENTION")); env != "" {
+		if env == "0" {
+			cfg.MistralRetention = 0
+		} else if v, err := time.ParseDuration(env); err == nil {
+			cfg.MistralRetention = v
+		}
+	}
 	cfg.OpenCodeEnabled = os.Getenv("OPENCODE_ENABLED") == "true"
 	cfg.OpenCodeGoWorkspaceID = strings.TrimSpace(os.Getenv("OPENCODE_GO_WORKSPACE_ID"))
 	cfg.OpenCodeGoAuthCookie = strings.TrimSpace(os.Getenv("OPENCODE_GO_AUTH_COOKIE"))
+	cfg.OpenCodeGoAPIKey = strings.TrimSpace(os.Getenv("OPENCODE_GO_API_KEY"))
+	cfg.OpenCodeGoBaseURL = strings.TrimSpace(os.Getenv("OPENCODE_GO_BASE_URL"))
 	cfg.OllamaAPIKey = strings.TrimSpace(os.Getenv("OLLAMA_API_KEY"))
 	if v := strings.TrimSpace(os.Getenv("OLLAMA_MONTHLY_LIMIT")); v != "" {
 		if f, err := strconv.ParseFloat(strings.TrimPrefix(v, "$"), 64); err == nil && f > 0 {
@@ -429,9 +460,11 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 
 	// Moonshot provider
 	cfg.MoonshotAPIKey = strings.TrimSpace(os.Getenv("MOONSHOT_API_KEY"))
+	cfg.MoonshotBaseURL = strings.TrimSpace(os.Getenv("MOONSHOT_BASE_URL"))
 
 	// DeepSeek provider
 	cfg.DeepSeekAPIKey = strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
+	cfg.DeepSeekBaseURL = strings.TrimSpace(os.Getenv("DEEPSEEK_BASE_URL"))
 
 	// Gemini provider (auto-detected, env vars, or opt-out via GEMINI_ENABLED=false)
 	cfg.GeminiRefreshToken = strings.TrimSpace(os.Getenv("GEMINI_REFRESH_TOKEN"))
@@ -753,6 +786,9 @@ func (c *Config) Validate() error {
 	if c.APIIntegrationsRetention < 0 {
 		return fmt.Errorf("API integrations retention must be non-negative")
 	}
+	if c.MistralRetention < 0 {
+		return fmt.Errorf("Mistral retention must be non-negative")
+	}
 
 	return nil
 }
@@ -802,7 +838,7 @@ func (c *Config) AvailableProviders() []string {
 	if c.KimiToken != "" || c.KimiEnabled {
 		providers = append(providers, "kimi")
 	}
-	if c.OpenCodeGoWorkspaceID != "" && c.OpenCodeGoAuthCookie != "" {
+	if c.OpenCodeGoConfigured() {
 		providers = append(providers, "opencode")
 	}
 	if c.OllamaAPIKey != "" {
@@ -813,6 +849,9 @@ func (c *Config) AvailableProviders() []string {
 	}
 	if c.CommandCodeAPIKey != "" || c.CommandCodeEnabled {
 		providers = append(providers, "commandcode")
+	}
+	if c.HasProvider("mistral") {
+		providers = append(providers, "mistral")
 	}
 	return providers
 }
@@ -848,8 +887,10 @@ func (c *Config) HasProvider(name string) bool {
 		return c.GrokToken != "" || c.GrokEnabled
 	case "kimi":
 		return c.KimiToken != "" || c.KimiEnabled
+	case "mistral":
+		return !c.MistralDisabled && (c.MistralEnabled || c.MistralAuthCookie != "")
 	case "opencode":
-		return c.OpenCodeGoWorkspaceID != "" && c.OpenCodeGoAuthCookie != ""
+		return c.OpenCodeGoConfigured()
 	case "ollama":
 		return c.OllamaAPIKey != ""
 	case "muse":
@@ -911,7 +952,7 @@ func (c *Config) HasMultipleProviders() bool {
 	if c.KimiToken != "" || c.KimiEnabled {
 		count++
 	}
-	if c.OpenCodeGoWorkspaceID != "" && c.OpenCodeGoAuthCookie != "" {
+	if c.OpenCodeGoConfigured() {
 		count++
 	}
 	if c.OllamaAPIKey != "" {
@@ -921,6 +962,9 @@ func (c *Config) HasMultipleProviders() bool {
 		count++
 	}
 	if c.CommandCodeAPIKey != "" || c.CommandCodeEnabled {
+		count++
+	}
+	if c.HasProvider("mistral") {
 		count++
 	}
 	return count > 1
@@ -974,6 +1018,7 @@ func (c *Config) String() string {
 	fmt.Fprintf(&sb, "  APIIntegrationsEnabled: %v,\n", c.APIIntegrationsEnabled)
 	fmt.Fprintf(&sb, "  APIIntegrationsDir: %s,\n", c.APIIntegrationsDir)
 	fmt.Fprintf(&sb, "  APIIntegrationsRetention: %v,\n", c.APIIntegrationsRetention)
+	fmt.Fprintf(&sb, "  MistralRetention: %v,\n", c.MistralRetention)
 
 	// Redact Cursor token
 	cursorDisplay := redactAPIKey(c.CursorToken, "")
@@ -998,6 +1043,7 @@ func (c *Config) String() string {
 	opencodeDisplay := redactAPIKey(c.OpenCodeGoAuthCookie, "")
 	fmt.Fprintf(&sb, "  OpenCodeGoWorkspaceID: %s,\n", c.OpenCodeGoWorkspaceID)
 	fmt.Fprintf(&sb, "  OpenCodeGoAuthCookie: %s,\n", opencodeDisplay)
+	fmt.Fprintf(&sb, "  OpenCodeGoAPIKey: %s,\n", redactAPIKey(c.OpenCodeGoAPIKey, ""))
 	fmt.Fprintf(&sb, "  OllamaAPIKey: %s,\n", redactAPIKey(c.OllamaAPIKey, ""))
 	if c.OllamaMonthlyLimit > 0 {
 		fmt.Fprintf(&sb, "  OllamaMonthlyLimit: %.2f,\n", c.OllamaMonthlyLimit)
@@ -1179,4 +1225,10 @@ const DefaultAdminPass = "changeme"
 // a user may have changed from the dashboard.
 func (c *Config) IsDefaultPassword() bool {
 	return c.AdminPass == DefaultAdminPass
+}
+
+// OpenCodeGoConfigured reports whether OpenCode Go tracking has credentials:
+// a usage-API key (preferred) or the workspace ID + console session cookie pair.
+func (c *Config) OpenCodeGoConfigured() bool {
+	return c.OpenCodeGoAPIKey != "" || (c.OpenCodeGoWorkspaceID != "" && c.OpenCodeGoAuthCookie != "")
 }

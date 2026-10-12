@@ -12,7 +12,6 @@ import (
 	"context"
 	"os/exec"
 	"runtime"
-	"strings"
 	"time"
 )
 
@@ -34,21 +33,11 @@ func Running(windowsImage string, match func(cmdline string) bool) bool {
 	return RunningContext(context.Background(), windowsImage, match)
 }
 
-// Match reports the matched command line or Windows image name if running, or "" when none is running.
-func Match(windowsImage string, match func(cmdline string) bool) string {
-	return MatchContext(context.Background(), windowsImage, match)
-}
-
 // RunningContext is Running with a caller-supplied context. The scan is always
 // bounded by ScanTimeout on top of whatever the caller supplies: agent contexts
 // are cancel-only with no deadline, so passing one straight to exec would let a
 // wedged `ps` hold a poll goroutine until daemon shutdown.
 func RunningContext(ctx context.Context, windowsImage string, match func(cmdline string) bool) bool {
-	return MatchContext(ctx, windowsImage, match) != ""
-}
-
-// MatchContext is Match with a caller-supplied context, bounded by ScanTimeout.
-func MatchContext(ctx context.Context, windowsImage string, match func(cmdline string) bool) string {
 	ctx, cancel := context.WithTimeout(ctx, ScanTimeout)
 	defer cancel()
 	if runtime.GOOS == "windows" {
@@ -56,25 +45,22 @@ func MatchContext(ctx context.Context, windowsImage string, match func(cmdline s
 		// could break out of the quoted argument is refused outright rather
 		// than escaped. Callers pass a plain executable name.
 		if !validWindowsImage(windowsImage) {
-			return ""
+			return false
 		}
 		// tasklist always exits 0; findstr verifies a real match.
 		query := `tasklist /FI "IMAGENAME eq ` + windowsImage + `" /NH 2>nul | findstr /I "` + windowsImage + `"`
-		if _, err := execCommandContext(ctx, "cmd", "/C", query); err == nil {
-			return windowsImage
-		}
-		return ""
+		return runCommandContext(ctx, "cmd", "/C", query) == nil
 	}
 	if match == nil {
-		return ""
+		return false
 	}
 	// `ps -Ao args=` is POSIX and prints the full command line of every process
 	// on both macOS and Linux.
 	out, err := execCommandContext(ctx, "ps", "-Ao", "args=")
 	if err != nil {
-		return ""
+		return false
 	}
-	return ScanMatch(out, match)
+	return Scan(out, match)
 }
 
 // validWindowsImage reports whether an image name is safe to interpolate into
@@ -95,27 +81,29 @@ func validWindowsImage(name string) bool {
 	return true
 }
 
-// execCommandContext runs the process listing. A variable so tests can assert
-// the deadline the scan actually receives.
+// execCommandContext runs the unix process listing and returns its output. A
+// variable so tests can assert the deadline the scan actually receives.
 var execCommandContext = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).Output()
 }
 
-// ScanMatch reports the first command line in psOutput satisfying match, or "".
-func ScanMatch(psOutput []byte, match func(cmdline string) bool) string {
-	if match == nil {
-		return ""
-	}
-	for _, line := range bytes.Split(psOutput, []byte("\n")) {
-		candidate := strings.TrimSpace(string(line))
-		if match(candidate) {
-			return candidate
-		}
-	}
-	return ""
+// runCommandContext runs the Windows tasklist|findstr check, which only needs
+// the exit status. Run (not Output) leaves stdout on the null device, so no
+// pipe is held open by the tasklist/findstr grandchildren after the deadline
+// kills cmd.exe. A variable so tests can assert the deadline on Windows too.
+var runCommandContext = func(ctx context.Context, name string, args ...string) error {
+	return exec.CommandContext(ctx, name, args...).Run()
 }
 
 // Scan reports whether any line of a process listing satisfies match.
 func Scan(psOutput []byte, match func(cmdline string) bool) bool {
-	return ScanMatch(psOutput, match) != ""
+	if match == nil {
+		return false
+	}
+	for _, line := range bytes.Split(psOutput, []byte("\n")) {
+		if match(string(line)) {
+			return true
+		}
+	}
+	return false
 }

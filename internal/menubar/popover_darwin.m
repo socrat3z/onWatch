@@ -28,7 +28,34 @@ static void onwatch_run_on_main_sync(dispatch_block_t block) {
   dispatch_sync(dispatch_get_main_queue(), block);
 }
 
+extern void onwatchGoGrantBrowserAccess(uint64_t token);
+static NSMapTable *onwatchGrantHosts;
+
+bool onwatch_grant_origin_allowed(const char *configuredURL, const char *scheme, const char *host, int port, bool mainFrame) {
+  if (!configuredURL || !scheme || !host || !mainFrame) return false;
+  NSURL *configured = [NSURL URLWithString:[NSString stringWithUTF8String:configuredURL]];
+  return [configured.scheme isEqualToString:@"http"] &&
+    ([configured.host isEqualToString:@"localhost"] || [configured.host isEqualToString:@"127.0.0.1"]) &&
+    [configured.scheme isEqualToString:[NSString stringWithUTF8String:scheme]] &&
+    [configured.host isEqualToString:[NSString stringWithUTF8String:host]] &&
+    port == (configured.port ? configured.port.integerValue : 80);
+}
+
+// Reply for a grant or status message. A rejected grant from the main frame
+// still answers so the page never waits forever; subframes get nothing, and
+// nothing may reset an open picker. Status replays report only an open picker:
+// finished results were delivered live, and replaying them would resurrect
+// stale feedback on every popover open.
+const char *onwatch_grant_reply(bool allowed, bool mainFrame, bool grant, bool pending) {
+  if (!allowed) return mainFrame && grant && !pending ? "unavailable" : NULL;
+  return pending ? "pending" : "idle";
+}
+
 @interface OnWatchPopoverController : NSObject <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler>
+@property(nonatomic, assign) uint64_t grantToken;
+@property(nonatomic, assign) BOOL grantPending;
+// Last completion, kept for the granttest harness; it is not replayed.
+@property(nonatomic, copy) NSString *grantResult;
 @property(nonatomic, strong) OnWatchBorderlessPanel *panel;
 @property(nonatomic, strong) NSView *containerView;
 @property(nonatomic, strong) WKWebView *webView;
@@ -447,6 +474,26 @@ static void onwatch_run_on_main_sync(dispatch_block_t block) {
     return;
   }
 
+  if ([action isEqualToString:@"grant_browser_access"] || [action isEqualToString:@"browser_access_status"]) {
+    WKSecurityOrigin *origin = message.frameInfo.securityOrigin;
+    BOOL allowed = self.grantToken && onwatch_grant_origin_allowed(self.loadedURLString.UTF8String,
+        origin.protocol.UTF8String, origin.host.UTF8String, (int)origin.port, message.frameInfo.isMainFrame);
+    BOOL grant = [action isEqualToString:@"grant_browser_access"];
+    if (allowed && grant && !self.grantPending) {
+      self.grantPending = YES;
+      self.grantResult = @"pending";
+      onwatchGoGrantBrowserAccess(self.grantToken);
+    }
+    const char *reply = onwatch_grant_reply(allowed, message.frameInfo.isMainFrame, grant, self.grantPending);
+    if (!reply) {
+      return;
+    }
+    // Status replay accompanies the page's own refresh, so it must not fetch
+    // another snapshot. Only a new completion requests an extra refresh.
+    [self.webView evaluateJavaScript:[NSString stringWithFormat:@"window.__onwatchBrowserGrantResult && window.__onwatchBrowserGrantResult('%s', false)", reply] completionHandler:nil];
+    return;
+  }
+
   if ([action isEqualToString:@"close"]) {
     [self close];
     return;
@@ -499,7 +546,31 @@ void onwatch_popover_destroy(void *handle) {
 
   onwatch_run_on_main_sync(^{
     OnWatchPopoverController *controller = (__bridge_transfer OnWatchPopoverController *)handle;
+    [onwatchGrantHosts removeObjectForKey:@(controller.grantToken)];
     [controller close];
+  });
+}
+
+void onwatch_grant_register(void *handle, uint64_t token) {
+  onwatch_run_on_main_sync(^{
+    if (!onwatchGrantHosts) onwatchGrantHosts = [NSMapTable strongToWeakObjectsMapTable];
+    OnWatchPopoverController *controller = onwatch_popover_controller(handle);
+    [onwatchGrantHosts removeObjectForKey:@(controller.grantToken)];
+    controller.grantToken = token;
+    [onwatchGrantHosts setObject:controller forKey:@(token)];
+    WKUserScript *capability = [[WKUserScript alloc] initWithSource:@"window.__onwatchCanGrantBrowserAccess = true;" injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES];
+    [controller.webView.configuration.userContentController addUserScript:capability];
+  });
+}
+
+void onwatch_grant_finish(uint64_t token, const char *result) {
+  NSString *value = result ? [NSString stringWithUTF8String:result] : @"unavailable";
+  dispatch_async(dispatch_get_main_queue(), ^{
+    OnWatchPopoverController *controller = [onwatchGrantHosts objectForKey:@(token)];
+    if (!controller) return;
+    controller.grantPending = NO;
+    controller.grantResult = value;
+    [controller.webView evaluateJavaScript:[NSString stringWithFormat:@"window.__onwatchBrowserGrantResult && window.__onwatchBrowserGrantResult('%@')", value] completionHandler:nil];
   });
 }
 

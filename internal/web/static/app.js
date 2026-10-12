@@ -76,6 +76,7 @@ function getCurrentProvider() {
   if (grokGrid) return 'grok';
   const kimiGrid = document.getElementById('quota-grid-kimi');
   if (kimiGrid) return 'kimi';
+  if (document.getElementById('quota-grid-mistral')) return 'mistral';
   const opencodeGrid = document.getElementById('quota-grid-opencode');
   if (opencodeGrid) return 'opencode';
   const ollamaGrid = document.getElementById('quota-grid-ollama');
@@ -1008,6 +1009,7 @@ function quotaOrderForProvider(provider) {
   if (provider === 'anthropic') return anthropicQuotaOrder;
   if (provider === 'codex') return codexQuotaOrder;
   if (provider === 'cursor') return cursorQuotaOrder;
+  if (provider === 'mistral') return ['api_included', 'vibe_included'];
   if (provider === 'opencode') return opencodeQuotaOrder;
   if (provider === 'ollama') return ollamaQuotaOrder;
   if (provider === 'muse') return museQuotaOrder;
@@ -1227,6 +1229,12 @@ const renewalCategories = {
   openrouter: [
     { label: 'Credits', groupBy: 'credits' }
   ],
+  moonshot: [
+    { label: 'Balance', groupBy: 'balance' }
+  ],
+  deepseek: [
+    { label: 'Balance', groupBy: 'balance' }
+  ],
   grok: [
     { label: 'Credits', groupBy: 'credits' }
   ],
@@ -1238,6 +1246,7 @@ const renewalCategories = {
     { label: 'Credits', groupBy: 'credits' },
     { label: 'On-Demand', groupBy: 'on_demand' }
   ],
+  mistral: [ {key:'api_included',label:'Included API',groupBy:'api_included'}, {key:'vibe_included',label:'Included Vibe Code',groupBy:'vibe_included'} ],
   opencode: [
     { label: '5-Hour', groupBy: 'five_hour' },
     { label: 'Weekly', groupBy: 'weekly' },
@@ -1308,6 +1317,16 @@ const providerQuotaDisplayOverrides = {
     five_hour: '5-Hour Credits',
     weekly: 'Weekly Credits',
     monthly: 'Monthly Credits'
+  },
+  moonshot: {
+    available_balance: 'Available',
+    voucher_balance: 'Voucher',
+    cash_balance: 'Cash'
+  },
+  deepseek: {
+    total_balance: 'Total Balance',
+    granted_balance: 'Granted',
+    topped_up_balance: 'Topped Up'
   }
 };
 
@@ -2520,6 +2539,104 @@ function updateOpenRouterCard(credits) {
   if (resetEl) resetEl.textContent = hasLimit ? 'Remaining: ' + remainStr : '';
 }
 
+// ── Balance providers (Moonshot, DeepSeek) ──
+// These report a remaining balance with no limit, so their cards show the
+// amount instead of a utilization bar.
+const balanceProviderFields = {
+  moonshot: [
+    { key: 'available', historyKey: 'available_balance', label: 'Available', primary: true },
+    { key: 'voucher', historyKey: 'voucher_balance', label: 'Voucher' },
+    { key: 'cash', historyKey: 'cash_balance', label: 'Cash' }
+  ],
+  deepseek: [
+    { key: 'total', historyKey: 'total_balance', label: 'Total Balance', primary: true },
+    { key: 'granted', historyKey: 'granted_balance', label: 'Granted' },
+    { key: 'toppedUp', historyKey: 'topped_up_balance', label: 'Topped Up' }
+  ]
+};
+const balanceChartColors = [
+  { border: '#0D9488', bg: 'rgba(13, 148, 136, 0.06)' },
+  { border: '#F59E0B', bg: 'rgba(245, 158, 11, 0.06)' },
+  { border: '#3B82F6', bg: 'rgba(59, 130, 246, 0.06)' }
+];
+
+function isBalanceProvider(provider) {
+  return Object.prototype.hasOwnProperty.call(balanceProviderFields, provider);
+}
+
+// Moonshot does not report a currency, so its amounts are shown bare.
+function formatBalanceAmount(value, currency) {
+  const amount = Number(value || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (currency === 'USD') return '$' + amount;
+  if (currency === 'CNY') return '\u00A5' + amount;
+  return currency ? `${amount} ${currency}` : amount;
+}
+
+function renderBalanceCards(provider, balance, containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  // Before the first poll the API returns a zero placeholder with no status;
+  // show that as "no data" rather than a healthy zero balance.
+  if (!balance || !balance.status) {
+    container.innerHTML = '<p class="empty-state">No balance data yet</p>';
+    return;
+  }
+  State.balanceCurrency = balance.currency || '';
+  const fields = balanceProviderFields[provider] || [];
+  if (container.querySelectorAll('.balance-card').length !== fields.length) {
+    const icon = '<line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>';
+    container.innerHTML = fields.map((field, i) => `<article class="quota-card balance-card" data-quota="${field.historyKey}" data-provider="${provider}" style="animation-delay: ${i * 60}ms">
+      <header class="card-header">
+        <h2 class="quota-title">
+          <svg class="quota-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${icon}</svg>
+          ${field.label}
+        </h2>
+      </header>
+      <div class="progress-stats">
+        <span class="usage-percent" data-balance-amount></span>
+        <span class="usage-fraction" data-balance-detail></span>
+      </div>
+      ${field.primary ? `<footer class="card-footer">
+        <span class="status-badge" data-balance-status></span>
+      </footer>` : ''}
+    </article>`).join('');
+  }
+  updateBalanceCards(provider, balance, container);
+}
+
+function updateBalanceCards(provider, balance, container) {
+  const currency = balance.currency || '';
+  const rate = Number(balance.rate || 0);
+  const cards = container.querySelectorAll('.balance-card');
+  (balanceProviderFields[provider] || []).forEach((field, i) => {
+    const card = cards[i];
+    if (!card) return;
+    card.querySelector('[data-balance-amount]').textContent = formatBalanceAmount(balance[field.key], currency);
+    card.querySelector('[data-balance-detail]').textContent = field.primary && rate > 0
+      ? `Spending ${formatBalanceAmount(rate, currency)}/h`
+      : '';
+    const statusEl = card.querySelector('[data-balance-status]');
+    if (statusEl) {
+      const status = balance.status || 'healthy';
+      const statusCfg = statusConfig[status] || statusConfig.healthy;
+      statusEl.setAttribute('data-status', status);
+      statusEl.innerHTML = `<svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${statusCfg.icon}"/></svg>${statusCfg.label}`;
+    }
+  });
+}
+
+function buildBalanceDatasets(provider, rows, range) {
+  const fields = balanceProviderFields[provider] || [];
+  const datasets = buildFixedDatasetsForRows(rows, range, fields.map((field, i) => ({
+    label: field.label,
+    key: field.historyKey,
+    color: balanceChartColors[i % balanceChartColors.length].border,
+    bg: balanceChartColors[i % balanceChartColors.length].bg
+  })));
+  datasets.forEach((ds, i) => { ds.hidden = State.hiddenQuotas.has(fields[i].historyKey); });
+  return datasets;
+}
+
 function getQuotaStatus(percent) {
   if (percent >= 90) return 'critical';
   if (percent >= 75) return 'warning';
@@ -2711,16 +2828,17 @@ function syncCodexAutoStartBadges() {
   });
 }
 
-function renderCodexQuotaCards(quotas, containerId, planType) {
+function renderCodexQuotaCards(quotas, containerId, planType, usageSourceNote) {
   const container = document.getElementById(containerId);
   if (!container) return;
   const visibleQuotas = filterCodexQuotasForPlan(quotas, planType);
+  const sourceNoteHTML = codexUsageSourceNoteHTML(usageSourceNote);
   if (visibleQuotas.length === 0) {
-    container.innerHTML = '<p class="empty-state">No Codex quota data available yet.</p>';
+    container.innerHTML = `${sourceNoteHTML}<p class="empty-state">No Codex quota data available yet.</p>`;
     return;
   }
 
-  container.innerHTML = visibleQuotas.map((q, i) => {
+  container.innerHTML = sourceNoteHTML + visibleQuotas.map((q, i) => {
     const icon = anthropicQuotaIcons[q.name] || '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>';
     const displayName = q.displayName || codexDisplayNames[q.name] || q.name;
     const cardPercent = q.cardPercent != null ? q.cardPercent : (q.utilization || 0);
@@ -2775,24 +2893,31 @@ function renderCodexQuotaCards(quotas, containerId, planType) {
   });
 }
 
-function formatCodexPlan(planType) {
+function formatCodexPlan(planType, planLabel) {
+  if (typeof planLabel === 'string' && planLabel.trim()) return planLabel.trim();
   const normalized = normalizeCodexPlanType(planType);
   if (!normalized) return 'Unknown Plan';
-  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  return toTitleCase(normalized);
+}
+
+function codexUsageSourceNoteHTML(note) {
+  if (!note) return '';
+  return `<p class="codex-usage-source-note" role="note">${escapeHTML(note)}</p>`;
 }
 
 // Render Codex cards for a specific account (used in "both" view with multiple accounts)
-function renderCodexQuotaCardsForAccount(quotas, container, accountName, planType, accountId) {
+function renderCodexQuotaCardsForAccount(quotas, container, accountName, planType, accountId, usageSourceNote, planLabel) {
   const visibleQuotas = filterCodexQuotasForPlan(quotas, planType);
   const safeAccountId = String(accountId || accountName || 'default').replace(/[^a-zA-Z0-9_-]/g, '-');
 
   const header = document.createElement('div');
   header.className = 'codex-account-header';
   header.innerHTML = `
-    <span class="codex-account-name">${accountName}</span>
-    <span class="codex-account-plan">${formatCodexPlan(planType)}</span>
+    <span class="codex-account-name">${escapeHTML(accountName)}</span>
+    <span class="codex-account-plan">${escapeHTML(formatCodexPlan(planType, planLabel))}</span>
   `;
   container.appendChild(header);
+  container.insertAdjacentHTML('beforeend', codexUsageSourceNoteHTML(usageSourceNote));
 
   if (visibleQuotas.length === 0) {
     const empty = document.createElement('p');
@@ -2814,7 +2939,7 @@ function renderCodexQuotaCardsForAccount(quotas, container, accountName, planTyp
     const statusCfg = statusConfig[status] || statusConfig.healthy;
     const cardKey = `codex-${safeAccountId}-${q.name}`;
 
-    return `<article class="quota-card codex-card" id="card-${cardKey}" data-quota="${q.name}" data-provider="codex" data-account-id="${accountId}" aria-label="${accountName} ${displayName}" style="animation-delay: ${i * 60}ms">
+    return `<article class="quota-card codex-card" id="card-${cardKey}" data-quota="${q.name}" data-provider="codex" data-account-id="${accountId}" aria-label="${escapeHTML(`${accountName} ${displayName}`)}" style="animation-delay: ${i * 60}ms">
       <header class="card-header">
         <h2 class="quota-title">
           <svg class="quota-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${icon}</svg>
@@ -2861,7 +2986,7 @@ function renderCodexAccountSections(accounts) {
     const section = document.createElement('section');
     section.className = 'codex-account-section';
     section.dataset.accountId = String(accountId);
-    renderCodexQuotaCardsForAccount(account.quotas || [], section, accountName, account.planType, accountId);
+    renderCodexQuotaCardsForAccount(account.quotas || [], section, accountName, account.planType, accountId, account.usageSourceNote, account.planLabel);
     container.appendChild(section);
   });
 }
@@ -4700,6 +4825,8 @@ async function fetchCurrent() {
             updateKimiQuotaCards(data.quotas || [], 'quota-grid-kimi');
           }
         }
+      } else if (provider === 'mistral') {
+        renderMistralCards(data);
       } else if (provider === 'opencode') {
         if (data.quotas) {
           const container = document.getElementById('quota-grid-opencode');
@@ -4756,6 +4883,9 @@ async function fetchCurrent() {
             data.quotas.forEach(q => updateCommandCodeCard(q));
           }
         }
+
+      } else if (isBalanceProvider(provider)) {
+        renderBalanceCards(provider, data.balance, `quota-grid-${provider}`);
 
       } else if (provider === 'zai') {
         updateCard('tokensLimit', data.tokensLimit);
@@ -4831,8 +4961,10 @@ async function fetchCodexUsage(options = {}) {
     if (!container) return;
 
     const renderedCount = container.querySelectorAll('.quota-card.codex-card').length;
-    if (container.children.length === 0 || renderedCount !== visibleQuotas.length || planChanged) {
-      renderCodexQuotaCards(visibleQuotas, 'quota-grid-codex', State.codexPlanType);
+    const sourceNote = payload.usageSourceNote || '';
+    const sourceNoteChanged = (container.querySelector('.codex-usage-source-note')?.textContent || '') !== sourceNote;
+    if (container.children.length === 0 || renderedCount !== visibleQuotas.length || planChanged || quotaNamesChanged || sourceNoteChanged) {
+      renderCodexQuotaCards(visibleQuotas, 'quota-grid-codex', State.codexPlanType, payload.usageSourceNote);
     }
 
     visibleQuotas.forEach(q => updateCodexCard(q));
@@ -4893,7 +5025,8 @@ function accountOverviewQuotas(provider, account) {
 function accountOverviewCardHTML(provider, account, idx) {
   const accountId = account.accountId || account.id || idx + 1;
   const accountName = account.accountName || account.name || `Account ${accountId}`;
-  const badge = provider === 'codex' && account.planType ? formatCodexPlan(account.planType) : '';
+  const badge = provider === 'codex' && (account.planLabel || account.planType)
+    ? formatCodexPlan(account.planType, account.planLabel) : '';
   const rows = accountOverviewQuotas(provider, account);
   const balanceHTML = provider === 'codex' && account.creditsBalance != null
     ? `<div class="account-overview-balance"><span>Credits Balance</span><strong>${escapeHTML(Number(account.creditsBalance).toFixed(2))}</strong></div>`
@@ -4924,6 +5057,7 @@ function accountOverviewCardHTML(provider, account, idx) {
       ${badge ? `<span class="account-overview-badge">${escapeHTML(badge)}</span>` : ''}
     </header>
     ${balanceHTML}
+    ${provider === 'codex' ? codexUsageSourceNoteHTML(account.usageSourceNote) : ''}
     <div class="account-overview-quotas">${quotaHTML}</div>
     <span class="account-overview-cta">View details &rarr;</span>
   </article>`;
@@ -5764,10 +5898,14 @@ function initChart() {
     defaultDatasets = []; // Grok datasets are dynamic - populated when history data arrives
   } else if (provider === 'kimi') {
     defaultDatasets = []; // Kimi datasets are dynamic - populated when history data arrives
+  } else if (provider === 'mistral') {
+    defaultDatasets = [];
   } else if (provider === 'opencode') {
     defaultDatasets = []; // OpenCode datasets are dynamic
   } else if (provider === 'ollama') {
     defaultDatasets = []; // Ollama datasets are dynamic
+  } else if (isBalanceProvider(provider)) {
+    defaultDatasets = []; // Balance datasets are built when history data arrives
   } else if (provider === 'zai') {
     defaultDatasets = [
       { label: zaiQuotaLabel('tokensLimit', 'Tokens Limit'), data: [], borderColor: getComputedStyle(document.documentElement).getPropertyValue('--chart-subscription').trim() || '#0D9488', backgroundColor: 'rgba(13, 148, 136, 0.06)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, hidden: State.hiddenQuotas.has('tokensLimit') },
@@ -5795,15 +5933,20 @@ function initChart() {
       ? []
     : provider === 'kimi'
       ? []
+    : provider === 'mistral'
+      ? []
     : provider === 'opencode'
       ? []
     : provider === 'ollama'
+      ? []
+    : isBalanceProvider(provider)
       ? []
     : provider === 'api-integrations'
       ? []
     : ['subscription', 'search', 'toolCalls'];
 
   const isAPIIntegrations = provider === 'api-integrations';
+  const isBalance = isBalanceProvider(provider);
   State.chart = new Chart(ctx, {
     type: 'line',
     data: {
@@ -5825,7 +5968,7 @@ function initChart() {
             meta.hidden = meta.hidden === null ? !ci.data.datasets[index].hidden : null;
             ci.update('none');
             // Recalculate Y-axis based on visible datasets
-            State.chartYMax = computeYMax(ci.data.datasets, ci);
+            State.chartYMax = computeYMax(ci.data.datasets, ci, isBalance ? { cap: false } : {});
             ci.options.scales.y.max = State.chartYMax;
             ci.update();
           }
@@ -5854,6 +5997,9 @@ function initChart() {
                 }
                 return `${ctx.dataset.label}: ${formatNumber(Number(ctx.parsed.y || 0))}`;
               }
+              if (isBalance) {
+                return `${ctx.dataset.label}: ${formatBalanceAmount(ctx.parsed.y, State.balanceCurrency)}`;
+              }
               return `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}%`;
             }
           }
@@ -5876,7 +6022,7 @@ function initChart() {
                 : ((State.apiIntegrationsSelectedMetric || 'tokenPerCall') === 'tokenPerCall'
                   ? formatNumber(Number(v || 0).toFixed(1))
                   : formatNumber(Number(v || 0))))
-              : v + '%'
+              : (isBalance ? formatBalanceAmount(v, State.balanceCurrency) : v + '%')
           },
           title: {
             display: isAPIIntegrations,
@@ -6328,6 +6474,10 @@ async function fetchHistory(range) {
       State.chart.update();
       return;
     }
+    if (provider === 'mistral') {
+      State.chart.data.datasets = buildDynamicDatasetsForRows(historyRows.map(row => {const flat={capturedAt:row.capturedAt}; (row.quotas||[]).forEach(q=>{flat[q.name]=q.utilization;});return flat;}), range, mistralDisplayNames, mistralChartColors, opencodeChartColorFallback, 'mistral');
+      updateTimeScale(State.chart, range); State.chart.update(); return;
+    }
     if (provider === 'opencode') {
       const flattenedRows = historyRows.map(row => {
         const flat = { capturedAt: row.capturedAt };
@@ -6382,6 +6532,16 @@ async function fetchHistory(range) {
       return;
     }
 
+    if (isBalanceProvider(provider)) {
+      const lastRow = historyRows[historyRows.length - 1];
+      if (lastRow) State.balanceCurrency = lastRow.currency || '';
+      State.chart.data.datasets = buildBalanceDatasets(provider, historyRows, range);
+      updateTimeScale(State.chart, range);
+      State.chartYMax = computeYMax(State.chart.data.datasets, State.chart, { cap: false });
+      State.chart.options.scales.y.max = State.chartYMax;
+      State.chart.update();
+      return;
+    }
 
     if (provider === 'codex') {
       // Codex history: array of { capturedAt, five_hour, seven_day, ... }
@@ -6472,6 +6632,7 @@ const bothProviderNames = {
   cursor: 'Cursor',
   grok: 'Grok',
   kimi: 'Kimi Code',
+  mistral: 'Mistral',
   opencode: 'OpenCode',
   ollama: 'Ollama',
   muse: 'Muse',
@@ -6859,8 +7020,9 @@ function buildAllProviderEntries() {
           cardKey,
           title: `Codex - Account: ${accountName}`,
           snapshotAt: account.snapshotAt || null,
-          badge: toTitleCase(account.planType || ''),
+          badge: account.planLabel || account.planType ? formatCodexPlan(account.planType, account.planLabel) : '',
           planType: account.planType || '',
+          usageSourceNote: account.usageSourceNote || '',
           quotas: normalizeBothQuotas('codex', account),
           insights: insightPayload,
           historyRows: Array.isArray(historyPayload?.history)
@@ -6949,7 +7111,7 @@ function buildAllProviderEntries() {
         ? 'Beta'
         : (provider === 'ollama'
           ? toTitleCase(payload.plan || '')
-          : (provider === 'cursor' || provider === 'opencode'
+          : (provider === 'mistral' || provider === 'cursor' || provider === 'opencode'
             ? (payload.planName || toTitleCase(payload.accountType || ''))
             : toTitleCase(payload.planType || ''))),
       snapshotAt: payload.snapshotAt || null,
@@ -6959,6 +7121,8 @@ function buildAllProviderEntries() {
       promoHtml: provider === 'anthropic' && payload.promo ? promoTagHTML() : '',
       planType: payload.planType || '',
       quotas: normalizeBothQuotas(provider, payload),
+      billing: provider === "mistral" ? payload.billing : null,
+      showBilling: payload.showBilling !== false,
       insights: insights[provider] || { stats: [], insights: [] },
       historyRows: Array.isArray(history[provider]) ? history[provider] : [],
     });
@@ -6999,7 +7163,7 @@ function renderProviderKPIHTML(quotas, provider) {
     const displayName = quota.displayName || quota.name || 'Quota';
     const label = quota.cardLabel || 'Utilization';
     const subtitle = quota.subtitle || minimaxSharedSubtitle(quota.sharedModels);
-    const usageFraction = Number.isFinite(Number(quota.used)) && Number.isFinite(Number(quota.total)) && Number(quota.total) > 0
+    const usageFraction = provider === "mistral" ? (quota.percentOnly ? "Allowance amount unavailable" : mistralMoney(quota.used,quota.currency)+" / "+mistralMoney(quota.limit,quota.currency)) : Number.isFinite(Number(quota.used)) && Number.isFinite(Number(quota.total)) && Number(quota.total) > 0
       ? `${formatNumber(quota.used)} / ${formatNumber(quota.total)}`
       : label;
     const icon = anthropicQuotaIcons[quota.name]
@@ -7510,7 +7674,7 @@ function buildProviderCardDatasets(provider, rows, range) {
   if (provider === 'gemini') {
     return buildDynamicDatasetsForRows(rows, range, geminiDisplayNames, geminiChartColorMap, geminiChartColorFallback, 'gemini');
   }
-  if (provider === 'cursor' || provider === 'opencode' || provider === 'ollama' || provider === 'muse' || provider === 'commandcode') {
+  if (provider === 'mistral' || provider === 'cursor' || provider === 'opencode' || provider === 'ollama' || provider === 'muse' || provider === 'commandcode') {
     const normalizedRows = rows.map((row) => {
       if (!Array.isArray(row.quotas)) return row;
       const entry = { capturedAt: row.capturedAt };
@@ -7522,6 +7686,7 @@ function buildProviderCardDatasets(provider, rows, range) {
     if (provider === 'cursor') {
       return buildDynamicDatasetsForRows(normalizedRows, range, cursorDisplayNames, cursorChartColorMap, cursorChartColorFallback, 'cursor');
     }
+    if (provider === 'mistral') return buildDynamicDatasetsForRows(normalizedRows, range, mistralDisplayNames, mistralChartColors, opencodeChartColorFallback, 'mistral');
     if (provider === 'ollama') {
       return buildDynamicDatasetsForRows(normalizedRows, range, ollamaDisplayNames, ollamaChartColorMap, ollamaChartColorFallback, 'ollama');
     }
@@ -7543,25 +7708,8 @@ function buildProviderCardDatasets(provider, rows, range) {
     const orFallback = [{ border: '#8B5CF6', bg: 'rgba(139, 92, 246, 0.06)' }];
     return buildDynamicDatasetsForRows(rows, range, orDisplayNames, orColors, orFallback, 'openrouter');
   }
-  if (provider === 'moonshot') {
-    const msDisplayNames = { available_balance: 'Available', voucher_balance: 'Voucher', cash_balance: 'Cash' };
-    const msColors = {
-      available_balance: { border: '#0D9488', bg: 'rgba(13, 148, 136, 0.06)' },
-      voucher_balance: { border: '#F59E0B', bg: 'rgba(245, 158, 11, 0.06)' },
-      cash_balance: { border: '#3B82F6', bg: 'rgba(59, 130, 246, 0.06)' }
-    };
-    const msFallback = [{ border: '#8B5CF6', bg: 'rgba(139, 92, 246, 0.06)' }];
-    return buildDynamicDatasetsForRows(rows, range, msDisplayNames, msColors, msFallback, 'moonshot');
-  }
-  if (provider === 'deepseek') {
-    const dsDisplayNames = { total_balance: 'Total Balance', granted_balance: 'Granted', topped_up_balance: 'Topped Up' };
-    const dsColors = {
-      total_balance: { border: '#0D9488', bg: 'rgba(13, 148, 136, 0.06)' },
-      granted_balance: { border: '#F59E0B', bg: 'rgba(245, 158, 11, 0.06)' },
-      topped_up_balance: { border: '#3B82F6', bg: 'rgba(59, 130, 246, 0.06)' }
-    };
-    const dsFallback = [{ border: '#8B5CF6', bg: 'rgba(139, 92, 246, 0.06)' }];
-    return buildDynamicDatasetsForRows(rows, range, dsDisplayNames, dsColors, dsFallback, 'deepseek');
+  if (isBalanceProvider(provider)) {
+    return buildBalanceDatasets(provider, rows, range);
   }
   if (provider === 'grok') {
     const grokDisplay = { credits: 'Credits' };
@@ -7689,6 +7837,8 @@ function renderAllProvidersView() {
       ${cardHeader}
       <div class="provider-card-body">
         <div class="homepage-harness-metrics">${renderHomepageMetricsHTML(entry.quotas)}</div>
+        ${entry.provider === 'codex' ? codexUsageSourceNoteHTML(entry.usageSourceNote) : ''}
+        ${entry.provider === "mistral" && entry.showBilling ? `<p>Pay-as-you-go: ${escapeHTML(mistralMoney(entry.billing?.amount,entry.billing?.currency))}</p>` : ""}
       </div>
     </section>`;
   }).join('');
@@ -8053,7 +8203,7 @@ async function fetchCycles() {
   const requestSeq = (State.cyclesRequestSeq || 0) + 1;
   State.cyclesRequestSeq = requestSeq;
   const provider = requestProvider;
-  const loggingHistoryProviders = new Set(['synthetic', 'zai', 'anthropic', 'copilot', 'codex', 'antigravity', 'minimax', 'gemini', 'cursor', 'grok', 'kimi', 'opencode', 'ollama', 'muse', 'commandcode']);
+  const loggingHistoryProviders = new Set(['synthetic', 'zai', 'anthropic', 'copilot', 'codex', 'antigravity', 'minimax', 'gemini', 'cursor', 'grok', 'kimi', 'mistral', 'opencode', 'ollama', 'muse', 'commandcode', 'moonshot', 'deepseek']);
 
   // All-accounts overview: fetch each account's logging history and merge,
   // tagging every row with its account name for the combined table.
@@ -8123,6 +8273,7 @@ async function fetchCycles() {
         crossQuotas: log.crossQuotas || [],
       }));
       State.cyclesQuotaNames = data.quotaNames || [];
+      if (isBalanceProvider(requestProvider)) State.balanceCurrency = data.currency || '';
       State.cyclesPage = 1;
       State.isLoggingHistory = true;
       renderCyclesTable();
@@ -8247,8 +8398,8 @@ function renderCyclesTable() {
 
   const provider = getCurrentProvider();
   const quotaNames = State.cyclesQuotaNames;
-  const usePercent = provider === 'anthropic' || provider === 'copilot' || provider === 'codex' || provider === 'antigravity' || provider === 'minimax' || provider === 'gemini' || provider === 'openrouter' || provider === 'cursor' || provider === 'grok' || provider === 'kimi' || provider === 'moonshot' || provider === 'deepseek' || provider === 'opencode' || provider === 'ollama';
-  const deltaUsesPercent = usePercent && provider !== 'minimax' && provider !== 'moonshot' && provider !== 'deepseek';
+  const usePercent = provider === 'anthropic' || provider === 'copilot' || provider === 'codex' || provider === 'antigravity' || provider === 'minimax' || provider === 'gemini' || provider === 'openrouter' || provider === 'cursor' || provider === 'grok' || provider === 'kimi' || provider === 'mistral' || provider === 'opencode' || provider === 'ollama';
+  const deltaUsesPercent = usePercent && provider !== 'minimax';
   const isLoggingHistory = State.isLoggingHistory === true;
   const showAccount = isAccountsOverviewMode(provider);
   const accountTh = showAccount ? '<th data-sort-key="account" role="button" tabindex="0">Account <span class="sort-arrow"></span></th>' : '';
@@ -8449,6 +8600,9 @@ function renderCyclesTable() {
             cellVal = limit > 0
               ? `${formatNumber(used)} / ${formatNumber(limit)} <span class="delta">(${percentText})</span>${deltaText}`
               : `${formatNumber(used)} <span class="delta">(${percentText})</span>${deltaText}`;
+          } else if (isBalanceProvider(provider)) {
+            const cq = getCrossQuotaValue(row, qn);
+            cellVal = cq ? escapeHTML(formatBalanceAmount(cq.value, State.balanceCurrency)) : '--';
           } else if (usePercent) {
             cellVal = fmtPctWithDelta(pct, delta);
           } else {
@@ -9595,6 +9749,7 @@ async function fetchCycleOverview() {
 
     State.allOverviewData = data.cycles || [];
     State.overviewQuotaNames = data.quotaNames || [];
+    if (isBalanceProvider(requestProvider)) State.balanceCurrency = data.currency || '';
     renderOverviewTable();
   } catch (e) {
     // cycle overview fetch error - non-critical
@@ -9610,7 +9765,7 @@ function renderOverviewTable() {
 
   const quotaNames = State.overviewQuotaNames;
   const overviewProv = getOverviewProvider();
-  const usePercent = overviewProv === 'anthropic' || overviewProv === 'codex' || overviewProv === 'antigravity' || overviewProv === 'minimax' || overviewProv === 'gemini' || overviewProv === 'openrouter' || overviewProv === 'cursor' || overviewProv === 'grok' || overviewProv === 'kimi' || overviewProv === 'opencode' || overviewProv === 'ollama' || overviewProv === 'muse' || overviewProv === 'commandcode';
+  const usePercent = overviewProv === 'anthropic' || overviewProv === 'codex' || overviewProv === 'antigravity' || overviewProv === 'minimax' || overviewProv === 'gemini' || overviewProv === 'openrouter' || overviewProv === 'cursor' || overviewProv === 'grok' || overviewProv === 'kimi' || overviewProv === 'mistral' || overviewProv === 'opencode' || overviewProv === 'ollama' || overviewProv === 'muse' || overviewProv === 'commandcode';
   const deltaUsesPercent = usePercent && overviewProv !== 'minimax';
   // MiniMax reports a percentage-based quota; the Duration and Total Delta
   // columns add no signal there, so omit them for this provider.
@@ -9729,7 +9884,7 @@ function renderOverviewTable() {
       if (showDurationDelta) {
         html += `
         <td>${duration}</td>
-        <td>${fmtOverviewWithRate(row.totalDelta, durationHrs, suffix)}</td>`;
+        <td>${isBalanceProvider(overviewProv) ? escapeHTML(formatBalanceAmount(row.totalDelta, State.balanceCurrency)) : fmtOverviewWithRate(row.totalDelta, durationHrs, suffix)}</td>`;
       }
 
       quotaNames.forEach(qn => {
@@ -10079,6 +10234,9 @@ function isSettingsPage() {
 
 async function initSettingsPage() {
   setupSettingsTabs();
+  // The password form does not depend on loaded settings. Wire it before the
+  // awaits below, or a click during a slow load silently does nothing.
+  setupSettingsPassword();
   await setupMenubarSettings();
   populateTimezoneSelect();
   await loadSettings();
@@ -10088,9 +10246,10 @@ async function initSettingsPage() {
   setupSMTPTest();
   setupWebhookTest();
   setupPushNotifications();
-  setupSettingsPassword();
   setupThresholdSliders();
   setupOverrides();
+  // Signals that every settings control is wired (used by the e2e suite).
+  document.querySelector('.settings-page')?.setAttribute('data-ready', 'true');
 }
 
 function activateSettingsTab(tabName) {
@@ -10750,6 +10909,7 @@ const DEFAULT_PROVIDER_TAB_LABELS = {
   cursor: 'Cursor',
   grok: 'Grok',
   kimi: 'Kimi',
+  mistral: 'Mistral',
   opencode: 'OpenCode',
   ollama: 'Ollama',
   muse: 'Muse',
@@ -11467,12 +11627,24 @@ const providerSettingsConfig = {
     desc: 'Gemini is auto-detected from your local credentials. Use the telemetry toggle to enable or disable tracking.',
     fields: [],
   },
+  mistral: {
+    title: 'Mistral', desc: 'Track included API and Vibe allowances plus separate pay-as-you-go charges. Authentication changes require a daemon restart; display changes apply immediately.',
+    fields: [
+      {id:'enabled',label:'Enable Mistral',type:'select',options:[{value:'true',text:'Enabled'},{value:'false',text:'Disabled'}],default:'false'},
+      {id:'auth_mode',label:'Authentication',type:'select',options:[{value:'automatic',text:'Automatic browser import'},{value:'manual',text:'Manual cookies'}],default:'automatic'},
+      {id:'browser',label:'Browser',type:'select',options:[{value:'auto',text:'Automatic'},{value:'chrome',text:'Chrome'},{value:'firefox',text:'Firefox'},{value:'safari',text:'Safari (macOS)'},{value:'edge',text:'Edge'}],default:'auto'},
+      {id:'browser_profile',label:'Browser profile',type:'text',placeholder:'First working profile',hint:'Profile directory or name. Firefox containers: append ::container=ID. The selected source remains fixed until these settings change.'},
+      {id:'auth_cookie',label:'Manual Cookie header',type:'password',placeholder:'Not configured',sensitive:true,hint:'Must contain an ory_session_ cookie. Only sent to Mistral. Overrides MISTRAL_AUTH_COOKIE.'},
+      {id:'show_payg',label:'Show pay-as-you-go spend',type:'select',options:[{value:'true',text:'Show'},{value:'false',text:'Hide'}],default:'true',noRestart:true,hint:'Hide the PAYG card and menu bar amount if you only use included allowances. This does not change billing at Mistral.'},
+    ]
+  },
   opencode: {
     title: 'OpenCode Go',
-    desc: 'Configure OpenCode Go quota tracking. Changes take effect after daemon restart.',
+    desc: 'Configure OpenCode Go quota tracking. onWatch reads your plan\'s 5-hour, weekly and monthly meters from the OpenCode console, using a service-account key or your browser session. Changes take effect after daemon restart.',
     fields: [
-      { id: 'workspace_id', label: 'Workspace ID', type: 'text', placeholder: 'wrk_...', hint: 'Your OpenCode Go workspace ID. Overrides OPENCODE_GO_WORKSPACE_ID from .env.' },
-      { id: 'auth_cookie', label: 'Auth Cookie', type: 'password', placeholder: 'Not configured', hint: 'The auth cookie value required for scraping the dashboard. Overrides OPENCODE_GO_AUTH_COOKIE from .env.', sensitive: true },
+      { id: 'api_key', label: 'Usage API Key', type: 'password', placeholder: 'Not configured', hint: 'OpenCode console service-account key (oc_sk_...) of the account with the Go subscription. Used instead of the session cookie when set. Overrides OPENCODE_GO_API_KEY from .env.', sensitive: true },
+      { id: 'workspace_id', label: 'Workspace ID', type: 'text', placeholder: 'wrk_...', hint: 'Session mode: your OpenCode Go workspace ID (wrk_...). Overrides OPENCODE_GO_WORKSPACE_ID from .env.' },
+      { id: 'auth_cookie', label: 'Session Cookie', type: 'password', placeholder: 'Not configured', hint: 'Session mode: the __Host-console_session cookie value from opencode.ai (the old auth cookie no longer works). Overrides OPENCODE_GO_AUTH_COOKIE from .env.', sensitive: true },
     ],
   },
   ollama: {
@@ -11502,6 +11674,20 @@ const providerSettingsConfig = {
   },
 };
 
+// isProviderConfigured reports whether the daemon currently treats a
+// provider as switched on, from whatever source (settings, .env or a key).
+async function isProviderConfigured(key) {
+  try {
+    const res = await authFetch(`${API_BASE}/api/providers/status`);
+    if (!res.ok) return false;
+    const data = await res.json();
+    const p = (Array.isArray(data.providers) ? data.providers : []).find(x => x.key === key);
+    return !!(p && p.configured);
+  } catch (e) {
+    return false;
+  }
+}
+
 async function openProviderSettingsModal(providerKey) {
   const config = providerSettingsConfig[providerKey];
   if (!config) return;
@@ -11517,6 +11703,15 @@ async function openProviderSettingsModal(providerKey) {
 
   const saved = (State.providerSettings && State.providerSettings[providerKey]) || {};
 
+  // A field shows its default when nothing is saved. Mistral's on/off switch
+  // must show the real state instead: Mistral can be switched on from .env,
+  // and showing "Disabled" there would switch it off on the next save.
+  const effectiveDefaults = {};
+  if (providerKey === 'mistral' && saved.enabled === undefined) {
+    effectiveDefaults.enabled = (await isProviderConfigured('mistral')) ? 'true' : 'false';
+  }
+  modal._effectiveDefaults = effectiveDefaults;
+
   // Build fields HTML (shared for non-Codex providers)
   let buildFieldsHTML = () => {
     if (config.fields.length === 0) {
@@ -11531,7 +11726,7 @@ async function openProviderSettingsModal(providerKey) {
       if (f.type === 'select') {
         html += `<select id="ps-${providerKey}-${f.id}" class="settings-input">`;
         f.options.forEach(o => {
-          const sel = (saved[f.id] || f.default) === o.value ? ' selected' : '';
+          const sel = (saved[f.id] || effectiveDefaults[f.id] || f.default) === o.value ? ' selected' : '';
           html += `<option value="${o.value}"${sel}>${o.text}</option>`;
         });
         html += '</select>';
@@ -11784,7 +11979,8 @@ async function openProviderSettingsModal(providerKey) {
       accountsList.innerHTML = '<p style="color:var(--text-secondary);font-size:13px">Failed to load accounts</p>';
     }
   } else {
-    bodyEl.innerHTML = buildFieldsHTML();
+    const intro = providerKey === 'mistral' ? `<div class="provider-intro provider-intro-settings">${mistralIntroHTML('settings')}</div>` : '';
+    bodyEl.innerHTML = intro + buildFieldsHTML();
   }
 
   // Store which provider is being edited
@@ -11849,7 +12045,7 @@ async function saveProviderSettings() {
       if (!(f.id in provData)) return;
       const changed = (f.type === 'password' && f.sensitive)
         ? true // sensitive fields are only present when newly typed
-        : String(provData[f.id]) !== String(baseline[f.id] === undefined ? (f.default ?? '') : baseline[f.id]);
+        : String(provData[f.id]) !== String(baseline[f.id] === undefined ? ((modal._effectiveDefaults || {})[f.id] ?? f.default ?? '') : baseline[f.id]);
       if (!changed) return;
       anyChange = true;
       if (!f.noRestart) restartNeeded = true;
@@ -12664,6 +12860,7 @@ const _overrideQuotasByProvider = {
     { key: 'tokens', label: 'Tokens Limit' },
     { key: 'time', label: 'Time Limit' },
   ],
+  mistral: [ {key:'api_included',label:'Included API',groupBy:'api_included'}, {key:'vibe_included',label:'Included Vibe Code',groupBy:'vibe_included'} ],
   opencode: [
     { key: 'five_hour', label: '5-Hour Limit' },
     { key: 'weekly', label: 'Weekly Limit' },
@@ -13125,3 +13322,87 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
 });
+
+// Mistral is tracked differently from other providers, so the settings
+// window and a one-time panel on the Mistral page explain it in plain words.
+// Both render from this one list so they cannot drift apart.
+const MISTRAL_INTRO_DISMISSED_KEY = 'onwatch-mistral-intro-dismissed';
+function mistralIntroPoints(where) {
+  const manual = where === 'settings' ? 'choose <strong>Manual cookies</strong> below' : 'choose <strong>Manual cookies</strong> in Mistral\'s settings';
+  return [
+    '<strong>Uses your browser login.</strong> Unlike most providers, Mistral isn\'t tracked with an API key. onWatch reads your usage from the Mistral website using the login saved in your browser. It only reads Mistral\'s own login cookies, and never saves them.',
+    '<strong>On a Mac, you may see a password prompt.</strong> macOS may ask for your Mac password so onWatch can read your browser\'s saved logins. If browser access is denied, right-click the onWatch menubar icon and choose <strong>Grant Browser Access</strong>, then pick the folder it suggests. onWatch retries after access is granted. You can also use <strong>Retry connection</strong> after signing in or allowing a credential prompt.',
+    '<strong>Prefer not to use your browser?</strong> Sign in to Mistral with Firefox, which avoids the password prompt, or ' + manual + ' and paste your Mistral cookie yourself.'
+  ];
+}
+function mistralIntroHTML(where) {
+  const items = mistralIntroPoints(where).map(p => `<li>${p}</li>`).join('');
+  return `<p class="provider-intro-title">How Mistral tracking works</p><ul class="provider-intro-list">${items}</ul>`;
+}
+function renderMistralIntro() {
+  const panel = document.getElementById('mistral-intro');
+  if (!panel || panel.dataset.ready === '1') return;
+  panel.dataset.ready = '1';
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(MISTRAL_INTRO_DISMISSED_KEY) === '1'; } catch (e) { /* storage unavailable: show it */ }
+  if (dismissed) return;
+  panel.innerHTML = mistralIntroHTML('page') + '<button type="button" class="provider-intro-dismiss">Got it</button>';
+  panel.querySelector('.provider-intro-dismiss').addEventListener('click', () => {
+    panel.hidden = true;
+    try { localStorage.setItem(MISTRAL_INTRO_DISMISSED_KEY, '1'); } catch (e) { /* hide for this visit only */ }
+  });
+  panel.hidden = false;
+}
+const mistralDisplayNames = {api_included:'Included API usage',vibe_included:'Included Vibe Code usage'};
+const mistralChartColors = {api_included:{border:'#ff7000',bg:'rgba(255,112,0,.08)'},vibe_included:{border:'#f5b400',bg:'rgba(245,180,0,.08)'}};
+function mistralMoney(value,currency) {
+  if (value == null || !Number.isFinite(value)) return 'Unavailable';
+  try {return new Intl.NumberFormat(undefined,{style:'currency',currency}).format(value);} catch {return value.toFixed(2)+' '+(currency || '');}
+}
+let mistralRecovery = null;
+let mistralConnectionData = null;
+function renderMistralConnection(data) {
+  const element = document.getElementById('mistral-connection-status');
+  if (!element) return;
+  if (!window.MistralRecovery) { element.textContent = data.connection?.message || ''; return; }
+  mistralConnectionData = data;
+  if (!mistralRecovery) {
+    mistralRecovery = new window.MistralRecovery({
+      root:element, endpoint:`${API_BASE}/api/mistral/retry`,
+      refresh:async signal => {
+        const response = await authFetch(`${API_BASE}/api/current?provider=mistral`, {signal});
+        if (!response.ok) throw new Error('Mistral status unavailable');
+        const fresh = await response.json();
+        renderMistralCards(fresh);
+        return fresh.connection;
+      },
+      render:() => { element.innerHTML = mistralRecovery.markup(mistralConnectionData.connection, mistralConnectionData.status); }
+    });
+  }
+  element.innerHTML = mistralRecovery.markup(data.connection, data.status);
+}
+function renderMistralCards(data) {
+  renderMistralIntro();
+  const container=document.getElementById('quota-grid-mistral'); if(!container) return;
+  container.replaceChildren();
+  const add=(title,value,detail,footer,pct,name)=>{
+    const card=document.createElement('article');card.className='quota-card';card.dataset.provider='mistral';
+    if(name){card.dataset.quota=name;card.tabIndex=0;card.setAttribute('role','button');}
+    const h=document.createElement('h2');h.className='quota-title';h.textContent=title;card.append(h);
+    const v=document.createElement('p');v.className='usage-percent';v.textContent=value;card.append(v);
+    const d=document.createElement('p');d.className='usage-fraction';d.textContent=detail;card.append(d);
+    if(Number.isFinite(pct)){const bar=document.createElement('div');bar.className='progress-bar';bar.setAttribute('role','progressbar');bar.setAttribute('aria-valuemin','0');bar.setAttribute('aria-valuemax','100');bar.setAttribute('aria-valuenow',String(Math.min(100,pct)));const fill=document.createElement('div');fill.className='progress-fill';fill.style.width=Math.max(0,Math.min(100,pct))+'%';bar.append(fill);card.append(bar);}
+    const f=document.createElement('p');f.className='reset-time';f.textContent=footer;card.append(f);container.append(card);
+  };
+  for(const name of ['api_included','vibe_included']){
+    const q=(data.quotas||[]).find(q=>q.name===name);
+    if(!q){add(mistralDisplayNames[name],'Unavailable','Waiting for allowance data','',null,name);continue;}
+    const pct=q.cardPercent ?? q.utilization;
+    add(mistralDisplayNames[name],pct.toFixed(1)+'%',q.percentOnly ? 'Allowance amount unavailable' : mistralMoney(q.used,q.currency)+' / '+mistralMoney(q.limit,q.currency)+' · '+mistralMoney(q.remaining,q.currency)+' remaining',(q.isStale?'Stale · ':'')+'Updated '+new Date(q.lastUpdatedAt).toLocaleString()+(q.resetsAt?' · Resets '+new Date(q.resetsAt).toLocaleDateString():''),pct,name);
+  }
+  const b=data.billing||{};
+  if (data.showBilling !== false) {
+    add('Pay-as-you-go spend',mistralMoney(b.amount,b.currency),b.amount==null?'Mistral has not returned a reliable spend amount.':new Date(b.periodStart).toLocaleDateString()+' - '+new Date(b.periodEnd).toLocaleDateString(),b.capturedAt&&b.amount!=null?(b.status==='stale'?'Stale · ':'')+'Updated '+new Date(b.capturedAt).toLocaleString():'You can hide PAYG in Settings > Providers > Mistral.',null);
+  }
+  renderMistralConnection(data);
+}

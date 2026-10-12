@@ -255,13 +255,14 @@ func findOnwatchOnPort(port int) []int {
 	return pids
 }
 
-// isOnwatchProcess checks if a PID belongs to an onwatch (or legacy syntrack) binary.
+// isOnwatchProcess checks if a PID belongs to an onwatch (or legacy syntrack)
+// binary. processCommandName is per-platform: ps on Unix, the process image
+// path on Windows, which has no ps.
 func isOnwatchProcess(pid int) bool {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-	if err != nil {
+	if pid <= 0 {
 		return false
 	}
-	cmd := strings.ToLower(strings.TrimSpace(string(out)))
+	cmd := strings.ToLower(processCommandName(pid))
 	return strings.Contains(cmd, "onwatch") || strings.Contains(cmd, "syntrack")
 }
 
@@ -390,8 +391,8 @@ func migrateDBLocation(newPath string, logger *slog.Logger) {
 	oldPaths := []string{
 		"./onwatch.db",
 	}
-	oldHome := os.Getenv("HOME")
-	if oldHome != "" {
+	// os.UserHomeDir, not $HOME: Windows keeps the profile in USERPROFILE.
+	if oldHome, err := os.UserHomeDir(); err == nil && oldHome != "" {
 		oldPaths = append(oldPaths,
 			filepath.Join(oldHome, ".onwatch", "onwatch.db"),
 		)
@@ -523,8 +524,12 @@ func testDaemonIsolationEnv(exe string) []string {
 		return nil
 	}
 	_ = os.MkdirAll(filepath.Join(dir, ".onwatch", "data"), 0o755)
+	// HOME is the home directory on Unix, USERPROFILE on Windows, and
+	// LOCALAPPDATA holds the Windows PID directory.
 	env := []string{
 		"HOME=" + dir,
+		"USERPROFILE=" + dir,
+		"LOCALAPPDATA=" + dir,
 		"ONWATCH_DB_PATH=" + filepath.Join(dir, "onwatch.db"),
 	}
 	if port, err := freeLocalPort(); err == nil {
@@ -1110,14 +1115,22 @@ func run() error {
 
 	var moonshotClient *api.MoonshotClient
 	if cfg.HasProvider("moonshot") {
-		moonshotClient = api.NewMoonshotClient(cfg.MoonshotAPIKey, logger)
-		logger.Info("Moonshot API client configured")
+		var moonshotOpts []api.MoonshotOption
+		if cfg.MoonshotBaseURL != "" {
+			moonshotOpts = append(moonshotOpts, api.WithMoonshotBaseURL(strings.TrimRight(cfg.MoonshotBaseURL, "/")))
+		}
+		moonshotClient = api.NewMoonshotClient(cfg.MoonshotAPIKey, logger, moonshotOpts...)
+		logger.Info("Moonshot API client configured", "base_url_override", cfg.MoonshotBaseURL != "")
 	}
 
 	var deepseekClient *api.DeepSeekClient
 	if cfg.HasProvider("deepseek") {
-		deepseekClient = api.NewDeepSeekClient(cfg.DeepSeekAPIKey, logger)
-		logger.Info("DeepSeek API client configured")
+		var deepseekOpts []api.DeepSeekOption
+		if cfg.DeepSeekBaseURL != "" {
+			deepseekOpts = append(deepseekOpts, api.WithDeepSeekBaseURL(strings.TrimRight(cfg.DeepSeekBaseURL, "/")))
+		}
+		deepseekClient = api.NewDeepSeekClient(cfg.DeepSeekAPIKey, logger, deepseekOpts...)
+		logger.Info("DeepSeek API client configured", "base_url_override", cfg.DeepSeekBaseURL != "")
 	}
 
 	// Gemini provider - env vars or auto-detect from ~/.gemini/oauth_creds.json
@@ -1512,7 +1525,11 @@ func run() error {
 	}
 	var opencodeAg *agent.OpenCodeAgent
 	if cfg.HasProvider("opencode") {
-		opencodeClient := api.NewOpenCodeClient(logger)
+		var opencodeOpts []api.OpenCodeClientOption
+		if cfg.OpenCodeGoBaseURL != "" {
+			opencodeOpts = append(opencodeOpts, api.WithOpenCodeBaseURL(cfg.OpenCodeGoBaseURL))
+		}
+		opencodeClient := api.NewOpenCodeClient(logger, opencodeOpts...)
 		opencodeSm := agent.NewSessionManager(db, "opencode", idleTimeout, logger)
 		opencodeAg = agent.NewOpenCodeAgent(opencodeClient, db, opencodeTr, cfg, cfg.PollInterval, logger, opencodeSm)
 	}
@@ -1962,6 +1979,14 @@ func run() error {
 	if kimiAg != nil {
 		agentMgr.RegisterFactory("kimi", func() (agent.AgentRunner, error) { return kimiAg, nil })
 	}
+	if cfg.HasProvider("mistral") {
+		agentMgr.RegisterFactory("mistral", func() (agent.AgentRunner, error) {
+			mistralAg := agent.NewMistralAgent(db, cfg, logger)
+			mistralAg.SetNotifier(notifier)
+			mistralAg.SetPollingCheck(func() bool { return isPollingEnabled("mistral") })
+			return mistralAg, nil
+		})
+	}
 	if opencodeAg != nil {
 		agentMgr.RegisterFactory("opencode", func() (agent.AgentRunner, error) { return opencodeAg, nil })
 	}
@@ -2019,7 +2044,7 @@ func run() error {
 
 	// Start configured agents through the manager.
 	startedAny := false
-	for _, providerKey := range []string{"synthetic", "zai", "anthropic", "copilot", "codex", "antigravity", "minimax", "openrouter", "gemini", "cursor", "grok", "kimi", "moonshot", "deepseek", "opencode", "ollama", "muse", "commandcode"} {
+	for _, providerKey := range []string{"synthetic", "zai", "anthropic", "copilot", "codex", "antigravity", "minimax", "openrouter", "gemini", "cursor", "grok", "kimi", "moonshot", "deepseek", "opencode", "mistral", "ollama", "muse", "commandcode"} {
 		if !isPollingEnabled(providerKey) {
 			continue
 		}
@@ -2631,6 +2656,11 @@ func printHelp() {
 	fmt.Println("  MINIMAX_API_KEY         MiniMax API key")
 	fmt.Println("  MINIMAX_REGION          MiniMax region: global or cn (default: global)")
 	fmt.Println("  OPENROUTER_API_KEY      OpenRouter API key")
+	fmt.Println("  MISTRAL_ENABLED        Enable Mistral subscription and pay-as-you-go tracking")
+	fmt.Println("  MISTRAL_AUTH_COOKIE    Manual Mistral Cookie header (keep private)")
+	fmt.Println("  MISTRAL_BROWSER        auto, chrome, firefox, safari, or edge")
+	fmt.Println("  MISTRAL_BROWSER_PROFILE Browser profile path/name; optional ::container=ID")
+	fmt.Println("  MISTRAL_RETENTION      How long Mistral history is kept (default 2160h; 0 disables)")
 	fmt.Println("  OLLAMA_API_KEY          Ollama Cloud API key (ollama.com/settings/keys)")
 	fmt.Println("  OLLAMA_MONTHLY_LIMIT    Ollama included usage cap in USD (0 = derive from plan)")
 	fmt.Println("  OLLAMA_RESET_DAY        Ollama reset day of month (1-31; 0 = account anniversary)")

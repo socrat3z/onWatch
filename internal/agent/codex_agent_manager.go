@@ -565,13 +565,26 @@ func (m *CodexAgentManager) startAgentForProfile(profile CodexProfile) error {
 		profilePath = filepath.Join(m.profilesDir, profile.Name+".json")
 	}
 	isDefaultProfile := profile.Name == "default" && !profile.Native
+	defaultCredentials := func() *api.CodexCredentials {
+		current := api.DetectCodexCredentials(m.logger)
+		if current == nil {
+			return nil
+		}
+		// Defaults without identity metadata can still rotate tokens, but
+		// newly present, missing, or different IDs require a new agent.
+		if strings.TrimSpace(current.AccountID) != strings.TrimSpace(profile.AccountID) ||
+			strings.TrimSpace(current.UserID) != strings.TrimSpace(profile.UserID) {
+			return nil
+		}
+		return current
+	}
 
 	agent.SetTokenRefresh(func() string {
 		if isDefaultProfile {
-			if systemCreds := api.DetectCodexCredentials(m.logger); systemCreds != nil {
+			if systemCreds := defaultCredentials(); systemCreds != nil {
 				return systemCreds.AccessToken
 			}
-			return profile.Tokens.AccessToken
+			return ""
 		}
 
 		if profile.Native {
@@ -613,7 +626,7 @@ func (m *CodexAgentManager) startAgentForProfile(profile CodexProfile) error {
 
 	agent.SetCredentialsRefresh(func() *api.CodexCredentials {
 		if isDefaultProfile {
-			return api.DetectCodexCredentials(m.logger)
+			return defaultCredentials()
 		}
 
 		if profile.Native {
@@ -648,11 +661,12 @@ func (m *CodexAgentManager) startAgentForProfile(profile CodexProfile) error {
 			// Write back to whichever file the credentials came from, in its
 			// native format. OpenCode-sourced tokens must stay in OpenCode
 			// format (one-time-use refresh tokens must not be lost).
-			source := api.CredentialSourceCodex
-			if cur := api.DetectCodexCredentials(m.logger); cur != nil {
-				source = cur.Source
+			// A login switch must not replace another identity's credentials.
+			cur := defaultCredentials()
+			if cur == nil {
+				return fmt.Errorf("active Codex credentials do not match tracked default profile")
 			}
-			return api.WriteCredentialsBySource(source, accessToken, refreshToken, idToken, expiresIn)
+			return api.WriteCredentialsBySource(cur.Source, accessToken, refreshToken, idToken, expiresIn)
 		}
 
 		// Named profiles save only to their own credential file.

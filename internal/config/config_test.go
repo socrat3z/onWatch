@@ -1,13 +1,43 @@
 package config
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// preservedTestEnv holds the process variables clearTestEnv keeps: the ones
+// that locate the OS temp directory (os.TempDir, t.TempDir) plus the Windows
+// system root. Without TMP/TEMP, Windows falls back to C:\Windows as the temp
+// directory. HOME and USERPROFILE are deliberately NOT kept, so loadEnvFile
+// can never pick up the developer's real ~/.onwatch/.env during a test.
+var preservedTestEnv = func() map[string]string {
+	keep := map[string]string{}
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "SystemRoot", "windir"} {
+		if v, ok := os.LookupEnv(key); ok {
+			keep[key] = v
+		}
+	}
+	return keep
+}()
+
+// clearTestEnv empties the process environment like os.Clearenv, but keeps
+// the temp-dir and system variables in preservedTestEnv.
+func clearTestEnv() {
+	os.Clearenv()
+	for key, v := range preservedTestEnv {
+		os.Setenv(key, v)
+	}
+}
+
+// setTestHome points os.UserHomeDir at dir on every OS: it reads HOME on
+// Unix and USERPROFILE on Windows.
+func setTestHome(dir string) {
+	os.Setenv("HOME", dir)
+	os.Setenv("USERPROFILE", dir)
+}
 
 func TestConfig_LoadsFromEnv(t *testing.T) {
 	os.Setenv("SYNTHETIC_API_KEY", "syn_test_key_123")
@@ -1091,8 +1121,10 @@ func TestConfig_LogWriter_TestMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LogWriter() failed: %v", err)
 	}
-	if closer, ok := writer.(io.Closer); ok {
-		defer closer.Close()
+	// Close the log file before TempDir cleanup: Windows cannot delete a
+	// file that still has an open handle.
+	if file, ok := writer.(*os.File); ok && file != os.Stdout {
+		t.Cleanup(func() { _ = file.Close() })
 	}
 	if writer == os.Stdout {
 		t.Error("TestMode background should not return os.Stdout")
@@ -1281,11 +1313,8 @@ func TestIsOnwatchEnvFile_NonexistentFile(t *testing.T) {
 }
 
 func TestLoadEnvFile_PrefersStandardLocation(t *testing.T) {
-	// Save original HOME and restore after test
-	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
-
-	// Create temp directory structure
+	// Point the home directory (HOME on Unix, USERPROFILE on Windows) at a
+	// temp dir; t.Setenv restores the originals after the test.
 	tmpDir := t.TempDir()
 	setTestUserHome(t, tmpDir)
 
@@ -1315,13 +1344,9 @@ func TestLoadEnvFile_PrefersStandardLocation(t *testing.T) {
 }
 
 func TestLoadEnvFile_FallsBackToLocalOnwatchEnv(t *testing.T) {
-	// Save original HOME and cwd
-	origHome := os.Getenv("HOME")
+	// Save original cwd; t.Setenv restores HOME/USERPROFILE after the test.
 	origDir, _ := os.Getwd()
-	defer func() {
-		os.Setenv("HOME", origHome)
-		os.Chdir(origDir)
-	}()
+	defer os.Chdir(origDir)
 
 	// Create temp directory with NO ~/.onwatch/.env
 	tmpDir := t.TempDir()
@@ -1355,13 +1380,9 @@ func TestLoadEnvFile_FallsBackToLocalOnwatchEnv(t *testing.T) {
 }
 
 func TestLoadEnvFile_IgnoresNonOnwatchLocalEnv(t *testing.T) {
-	// Save original HOME and cwd
-	origHome := os.Getenv("HOME")
+	// Save original cwd; t.Setenv restores HOME/USERPROFILE after the test.
 	origDir, _ := os.Getwd()
-	defer func() {
-		os.Setenv("HOME", origHome)
-		os.Chdir(origDir)
-	}()
+	defer os.Chdir(origDir)
 
 	// Create temp directory with NO ~/.onwatch/.env
 	tmpDir := t.TempDir()
@@ -1549,5 +1570,57 @@ func TestOpenRotatingLogFile_CreatesMissingParentDir(t *testing.T) {
 
 	if _, err := os.Stat(logPath); err != nil {
 		t.Fatalf("log file not created: %v", err)
+	}
+}
+
+func TestConfig_MistralRetention_Default(t *testing.T) {
+	os.Clearenv()
+	defer os.Clearenv()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if cfg.MistralRetention != 90*24*time.Hour {
+		t.Errorf("MistralRetention = %v, want %v", cfg.MistralRetention, 90*24*time.Hour)
+	}
+}
+
+func TestConfig_MistralRetention_LoadsFromEnv(t *testing.T) {
+	os.Clearenv()
+	os.Setenv("MISTRAL_RETENTION", "168h")
+	defer os.Clearenv()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if cfg.MistralRetention != 168*time.Hour {
+		t.Errorf("MistralRetention = %v, want %v", cfg.MistralRetention, 168*time.Hour)
+	}
+}
+
+func TestConfig_MistralRetention_Disabled(t *testing.T) {
+	os.Clearenv()
+	os.Setenv("MISTRAL_RETENTION", "0")
+	defer os.Clearenv()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if cfg.MistralRetention != 0 {
+		t.Errorf("MistralRetention = %v, want 0", cfg.MistralRetention)
+	}
+}
+
+// A negative duration parses fine, so Validate has to reject it.
+func TestConfig_MistralRetention_RejectsNegative(t *testing.T) {
+	os.Clearenv()
+	os.Setenv("MISTRAL_RETENTION", "-5h")
+	defer os.Clearenv()
+
+	if _, err := Load(); err == nil {
+		t.Fatal("negative MISTRAL_RETENTION was accepted")
 	}
 }

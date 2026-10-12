@@ -17,7 +17,7 @@ func TestDeepSeekDefaultCurrency(t *testing.T) {
 
 	t.Run("falls back to CNY without a snapshot", func(t *testing.T) {
 		t.Parallel()
-		if got := (&Handler{}).deepSeekDefaultCurrency(); got != "CNY" {
+		if got := (&Handler{}).deepseekCurrency(""); got != "CNY" {
 			t.Fatalf("currency = %q, want CNY", got)
 		}
 	})
@@ -40,7 +40,7 @@ func TestDeepSeekDefaultCurrency(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if got := (&Handler{store: s}).deepSeekDefaultCurrency(); got != "USD" {
+		if got := (&Handler{store: s}).deepseekCurrency(""); got != "USD" {
 			t.Fatalf("currency = %q, want USD", got)
 		}
 	})

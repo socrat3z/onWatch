@@ -100,3 +100,4 @@ mise.*.local.toml
 
 # Agent worktrees, local scratch state
 .claude/worktrees/
+tests/e2e/test-results/

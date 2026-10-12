@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,38 +17,12 @@ import (
 	"github.com/onllm-dev/onwatch/v2/internal/tracker"
 )
 
-type oauthRedirectTransport struct {
-	base   http.RoundTripper
-	target *url.URL
-}
-
-func (t oauthRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Host == "console.anthropic.com" && req.URL.Path == "/v1/oauth/token" {
-		cloned := req.Clone(req.Context())
-		newURL := *cloned.URL
-		newURL.Scheme = t.target.Scheme
-		newURL.Host = t.target.Host
-		cloned.URL = &newURL
-		return t.base.RoundTrip(cloned)
-	}
-	return t.base.RoundTrip(req)
-}
-
+// withAnthropicOAuthRedirect points OAuth token refresh at a mock server, so
+// the test never reaches the real Anthropic endpoint whatever its URL is.
 func withAnthropicOAuthRedirect(t *testing.T, oauthServerURL string) {
 	t.Helper()
-	target, err := url.Parse(oauthServerURL)
-	if err != nil {
-		t.Fatalf("parse oauth server url: %v", err)
-	}
-
-	base := http.DefaultTransport
-	http.DefaultTransport = oauthRedirectTransport{
-		base:   base,
-		target: target,
-	}
-	t.Cleanup(func() {
-		http.DefaultTransport = base
-	})
+	api.SetOAuthURLForTest(oauthServerURL)
+	t.Cleanup(func() { api.SetOAuthURLForTest(api.AnthropicOAuthTokenURL) })
 }
 
 type blockingRunner struct {

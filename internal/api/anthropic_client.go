@@ -103,8 +103,8 @@ func (c *AnthropicClient) FetchQuotas(ctx context.Context) (*AnthropicQuotaRespo
 	token := c.getToken()
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
-	req.Header.Set("User-Agent", "claude-code/2.1.69")
+	req.Header.Set("anthropic-beta", anthropicOAuthBeta)
+	req.Header.Set("User-Agent", "claude-code/"+claudeCodeVersion)
 
 	// Log request (with redacted token)
 	c.logger.Debug("fetching Anthropic quotas",

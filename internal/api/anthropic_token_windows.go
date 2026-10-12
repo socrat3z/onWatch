@@ -4,7 +4,6 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,33 +11,29 @@ import (
 	"time"
 )
 
-// testMode disables keychain/keyring operations during tests.
-// On Windows this is a no-op (no keychain), but the variable must exist
-// for cross-platform compilation.
-var testMode bool
-
-// SetTestMode enables or disables test mode.
-func SetTestMode(enabled bool) {
-	testMode = enabled
+// anthropicCredentialsFilePath returns %USERPROFILE%\.claude\.credentials.json,
+// the only place Claude Code keeps its OAuth tokens on Windows. In test mode
+// it refuses the real account profile (see anthropicHomeBlocked).
+func anthropicCredentialsFilePath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	if anthropicHomeBlocked(home) {
+		return "", errRealCredentialsInTestMode
+	}
+	return filepath.Join(home, ".claude", ".credentials.json"), nil
 }
 
-// getCredentialsFilePath returns the path to the Claude credentials file.
-// Windows has no keychain, so this file is the only credential store. HOME is
-// checked first (unlike os.UserHomeDir, which reads USERPROFILE on Windows)
-// so tests can redirect it the same way the Unix build does.
+// getCredentialsFilePath returns the path to the Claude credentials file, or ""
+// when it cannot be determined. Windows has no keychain, so this file is the
+// only credential store.
 func getCredentialsFilePath() string {
-	home := os.Getenv("HOME")
-	if home == "" {
-		var err error
-		home, err = os.UserHomeDir()
-		if err != nil {
-			home = ""
-		}
-	}
-	if home == "" {
+	credPath, err := anthropicCredentialsFilePath()
+	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".claude", ".credentials.json")
+	return credPath
 }
 
 // detectAnthropicCredentialsPlatform tries to detect full OAuth credentials on Windows.
@@ -47,8 +42,8 @@ func detectAnthropicCredentialsPlatform(logger *slog.Logger) *AnthropicCredentia
 		logger = slog.Default()
 	}
 
-	credPath := getCredentialsFilePath()
-	if credPath == "" {
+	credPath, err := anthropicCredentialsFilePath()
+	if err != nil {
 		return nil
 	}
 	data, err := os.ReadFile(credPath)
@@ -76,15 +71,12 @@ func detectAnthropicCredentialsPlatform(logger *slog.Logger) *AnthropicCredentia
 //
 // Related: https://github.com/onllm-dev/onWatch/issues/16
 func WriteAnthropicCredentials(accessToken, refreshToken string, expiresIn int) error {
-	credPath := getCredentialsFilePath()
-	if credPath == "" {
-		return fmt.Errorf("failed to determine home directory")
+	credPath, err := anthropicCredentialsFilePath()
+	if err != nil {
+		return err
 	}
 	data, err := os.ReadFile(credPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
 
@@ -130,8 +122,8 @@ func detectAnthropicTokenPlatform(logger *slog.Logger) string {
 		logger = slog.Default()
 	}
 
-	credPath := getCredentialsFilePath()
-	if credPath == "" {
+	credPath, err := anthropicCredentialsFilePath()
+	if err != nil {
 		return ""
 	}
 	data, err := os.ReadFile(credPath)
