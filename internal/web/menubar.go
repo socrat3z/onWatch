@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/onllm-dev/onwatch/v2/internal/agent"
 	"github.com/onllm-dev/onwatch/v2/internal/menubar"
 )
 
@@ -29,6 +30,19 @@ type menubarProviderOption struct {
 	Subtitle     string               `json:"subtitle,omitempty"`
 	Visible      bool                 `json:"visible"`
 	Quotas       []menubarQuotaOption `json:"quotas"`
+}
+
+// SetPollStatusRegistry wires the agent-side last-poll-outcome registry. The
+// menubar reads it only to explain a stale card ("network error"); it never
+// carries raw error text.
+func (h *Handler) SetPollStatusRegistry(r *agent.PollStatusRegistry) {
+	h.pollStatus = r
+	// Every poll outcome may change a card (new numbers, or a staleness
+	// reason), so it schedules a background snapshot rebuild.
+	r.SetOnPoll(func(provider string) {
+		h.responses.notePoll(provider)
+		h.scheduleMenubarPrebuild()
+	})
 }
 
 // Capabilities returns runtime capabilities for the current build.
@@ -49,12 +63,13 @@ func (h *Handler) Capabilities(w http.ResponseWriter, r *http.Request) {
 // no longer gates on the remote address.
 // Does not require a native companion build (menubar.IsSupported).
 func (h *Handler) MenubarSummary(w http.ResponseWriter, r *http.Request) {
-	snapshot, err := h.BuildMenubarSnapshot()
+	snapshot, err := h.menubarSnapshotForRequest(r.Context())
 	if err != nil {
 		h.logger.Error("failed to build menubar snapshot", "error", err)
-		respondError(w, http.StatusInternalServerError, "failed to build menubar snapshot")
+		respondMenubarSnapshotError(w, err, "failed to build menubar snapshot")
 		return
 	}
+	h.setMenubarRefreshingHeader(w)
 	respondJSON(w, http.StatusOK, snapshot)
 }
 
@@ -62,16 +77,17 @@ func (h *Handler) MenubarSummary(w http.ResponseWriter, r *http.Request) {
 // same rules as the macOS menubar companion, so GNOME can stay in sync without
 // reimplementing formatting.
 func (h *Handler) MenubarTrayTitle(w http.ResponseWriter, r *http.Request) {
-	snapshot, err := h.BuildMenubarSnapshot()
+	data, err := h.menubarDataForRequest(r.Context())
 	if err != nil {
 		h.logger.Error("failed to build menubar snapshot for tray title", "error", err)
-		respondError(w, http.StatusInternalServerError, "failed to build menubar tray title")
+		respondMenubarSnapshotError(w, err, "failed to build menubar tray title")
 		return
 	}
-	settings, err := h.menubarSettings()
-	if err != nil {
-		settings = menubar.DefaultSettings()
-	}
+	snapshot := h.menubarStaleData(data).Snapshot
+	// Format from the settings the build captured (last good on a failed read):
+	// a cached or stale response must not issue another settings query, and the
+	// title must never fail on a settings read error.
+	settings := h.menubarServeSettings(data)
 	title := menubar.TrayTitle(snapshot, settings)
 	segments := menubar.TraySegments(snapshot, settings)
 	tooltip := ""
@@ -93,14 +109,28 @@ func (h *Handler) MenubarTrayTitle(w http.ResponseWriter, r *http.Request) {
 			if len(parts) > 0 {
 				tooltip = strings.Join(parts, " · ")
 			}
+			// Stale providers get their own lines; GNOME shows the tooltip and
+			// dims the matching segments from the same flag.
+			if lines := menubar.StaleProviderTooltipLines(snapshot, time.Now()); len(lines) > 0 {
+				tooltip += "\n" + strings.Join(lines, "\n")
+			}
 		}
 	}
-	respondJSON(w, http.StatusOK, map[string]interface{}{
+	response := map[string]interface{}{
 		"title":    title,
 		"tooltip":  tooltip,
 		"online":   snapshot != nil,
 		"segments": segments,
-	})
+	}
+	// Surface LatestAt so tray companions can keep counting up even when the
+	// daemon cannot be reached. Mirror the snapshot's omitzero behaviour:
+	// never emit the zero time as "0001-01-01T00:00:00Z", which clients render
+	// as hundreds of thousands of days.
+	if snapshot != nil && !snapshot.LatestAt.IsZero() {
+		response["latest_at"] = snapshot.LatestAt.UTC().Format(time.RFC3339)
+	}
+	h.setMenubarRefreshingHeader(w)
+	respondJSON(w, http.StatusOK, response)
 }
 
 // MenubarPage renders the compact browser UI used by the tray companions and
@@ -161,19 +191,22 @@ func (h *Handler) MenubarTest(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) MenubarPreferences(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		settings, err := h.reconcileMenubarSettings()
+		// Preferences are derived from the same cached build as the summary:
+		// the one build supplies the unfiltered card list, so opening the
+		// popover never starts a second set of queries next to a summary
+		// refresh. If the build fails and there is no cached data, fall back to
+		// the last good settings with no options rather than 500.
+		data, err := h.menubarDataForRequest(r.Context())
 		if err != nil {
 			h.logger.Error("failed to load menubar preferences", "error", err)
-			respondError(w, http.StatusInternalServerError, "failed to load menubar preferences")
+			respondMenubarSnapshotError(w, err, "failed to load menubar preferences")
 			return
 		}
-		providers, err := h.buildMenubarProviderOptions(settings)
-		if err != nil {
-			h.logger.Error("failed to build menubar provider options", "error", err)
-			respondError(w, http.StatusInternalServerError, "failed to load menubar preferences")
-			return
-		}
-		respondJSON(w, http.StatusOK, menubarPreferencesResponse(settings, providers))
+		// Settings come from the same captured build, so a cached GET makes no
+		// database call at all. A save invalidates the cache, so the next GET
+		// rebuilds with the new settings.
+		effective := h.menubarServeSettings(data)
+		respondJSON(w, http.StatusOK, menubarPreferencesResponse(effective, h.buildMenubarProviderOptions(effective, data.AllProviders)))
 	case http.MethodPut:
 		if h.store == nil {
 			respondError(w, http.StatusInternalServerError, "store not available")
@@ -197,13 +230,18 @@ func (h *Handler) MenubarPreferences(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.triggerMenubarRefresh()
-		providers, err := h.buildMenubarProviderOptions(normalized)
+		// Derive only the provider options from the shared build; the settings
+		// in the response are always the ones just saved. When the rebuild
+		// exceeds the wait budget the build data still carries the pre-save
+		// settings, and echoing them here would make the popover persist them
+		// into localStorage and revert the user's change.
+		data, err := h.menubarDataForRequest(r.Context())
 		if err != nil {
 			h.logger.Error("failed to rebuild menubar provider options", "error", err)
-			respondError(w, http.StatusInternalServerError, "failed to save menubar preferences")
+			respondJSON(w, http.StatusOK, menubarPreferencesResponse(normalized, nil))
 			return
 		}
-		respondJSON(w, http.StatusOK, menubarPreferencesResponse(normalized, providers))
+		respondJSON(w, http.StatusOK, menubarPreferencesResponse(normalized, h.buildMenubarProviderOptions(normalized, data.AllProviders)))
 	default:
 		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -214,10 +252,25 @@ func (h *Handler) MenubarRefresh(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if _, err := h.BuildMenubarSnapshot(); err != nil {
+	// A manual refresh must actually rebuild, even inside the fresh window,
+	// but it keeps the last snapshot as the fallback: if the rebuild stalls
+	// past the wait budget the request still answers with the previous data.
+	h.markMenubarSnapshotStale()
+	if _, err := h.menubarSnapshotForRequest(r.Context()); err != nil {
 		h.logger.Debug("menubar refresh snapshot rebuild failed", "error", err)
 	}
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// respondMenubarSnapshotError maps a snapshot failure to a status. A wedged
+// first build is temporary, so it answers 503 (retry later) rather than 500;
+// the client keeps its last data either way.
+func respondMenubarSnapshotError(w http.ResponseWriter, err error, message string) {
+	if err == errMenubarSnapshotTimeout {
+		respondError(w, http.StatusServiceUnavailable, message)
+		return
+	}
+	respondError(w, http.StatusInternalServerError, message)
 }
 
 func isLoopbackRequest(r *http.Request) bool {
@@ -244,25 +297,150 @@ func isLocalMenubarPublicPath(path string) bool {
 }
 
 // BuildMenubarSnapshot constructs the shared menubar UI contract.
+//
+// When the stored settings cannot be read, the last settings that were read
+// successfully stand in, so a transient store failure does not turn the whole
+// menubar into a 500. Only when no settings have ever been read does it fail.
 func (h *Handler) BuildMenubarSnapshot() (*menubar.Snapshot, error) {
-	settings, err := h.reconcileMenubarSettings()
+	built, err := h.buildMenubarSnapshotWithAllProviders()
 	if err != nil {
 		return nil, err
 	}
+	return h.menubarStaleData(built).Snapshot, nil
+}
 
-	providers, latest := h.buildMenubarProviders(settings, false)
+// buildMenubarSnapshotWithAllProviders builds the filtered snapshot the
+// clients see plus the unfiltered card list the preferences endpoint derives
+// its options from. Building both in one pass keeps preferences off a second
+// set of queries.
+func (h *Handler) buildMenubarSnapshotWithAllProviders() (menubarBuiltData, error) {
+	settings, err := h.reconcileMenubarSettings()
+	if err != nil {
+		settings = h.menubarLastSettingsSnapshot()
+		if settings == nil {
+			return menubarBuiltData{}, err
+		}
+		h.logger.Warn("menubar settings read failed; building from the last good settings", "error", err)
+	}
+
+	// Build with hidden cards included, then filter, so one pass supplies both
+	// the snapshot and the options list.
+	allProviders, latest, visibility := h.buildMenubarProviders(settings, true)
+	normalized := settings.Normalize()
+	providers := filterMenubarProviders(allProviders, normalized.VisibleProviders)
+	if providers == nil {
+		providers = []menubar.ProviderCard{}
+	}
 	aggregate := buildAggregate(providers)
-	return &menubar.Snapshot{
-		GeneratedAt:    time.Now().UTC(),
-		UpdatedAgo:     timeAgo(latest),
-		Aggregate:      aggregate,
-		Providers:      providers,
-		MistralEnabled: h.config != nil && h.config.HasProvider("mistral"),
+	return menubarBuiltData{
+		Snapshot: &menubar.Snapshot{
+			GeneratedAt: time.Now().UTC(),
+			// UpdatedAgo and LatestAt both describe the newest provider data, not
+			// this build: a header age computed from them keeps growing when every
+			// provider has stopped polling.
+			UpdatedAgo:     timeAgo(latest),
+			LatestAt:       latest.UTC(),
+			Aggregate:      aggregate,
+			Providers:      providers,
+			MistralEnabled: h.config != nil && h.config.HasProvider("mistral"),
+		},
+		AllProviders: allProviders,
+		Settings:     normalized,
+		Visibility:   visibility,
 	}, nil
 }
 
-func (h *Handler) buildMenubarProviders(settings *menubar.Settings, includeHidden bool) ([]menubar.ProviderCard, time.Time) {
+// applyMenubarStaleness marks cards whose data is older than their provider's
+// expected cadence. It mutates the cards in place (they were just built for
+// this snapshot) and never changes Status: stale is a freshness flag, not a
+// severity.
+//
+// The card's UpdatedAtTime comes from its honest capture time (oldest quota
+// for multi-quota providers); the threshold comes from the ONE table in
+// menubar_stale.go. The registry only supplies the reason class.
+func (h *Handler) applyMenubarStaleness(providers []menubar.ProviderCard, visibility map[string]map[string]bool) {
+	if len(providers) == 0 {
+		return
+	}
+	now := h.menubarNowTime().UTC()
+	interval := time.Duration(h.getPollIntervalSec()) * time.Second
+	registry := h.pollStatus
+	if registry == nil {
+		registry = agent.GetPollStatusRegistry()
+	}
+	for i := range providers {
+		card := &providers[i]
+		base := card.BaseProvider
+		if base == "" {
+			base = providerKeyBase(card.ID)
+		}
+		polling := true
+		if pv, ok := visibility[card.ID]; ok {
+			if value, exists := pv["polling"]; exists {
+				polling = value
+			}
+		} else if pv, ok := visibility[base]; ok {
+			if value, exists := pv["polling"]; exists {
+				polling = value
+			}
+		}
+		var account string
+		if idx := strings.IndexByte(card.ID, ':'); idx >= 0 {
+			account = card.ID[idx+1:]
+		}
+		var outcome agent.PollOutcome
+		if registry != nil {
+			if got, ok := registry.Get(base, account); ok {
+				outcome = got
+			}
+		}
+		window := staleAfterFor(staleContext{
+			Provider:        card.ID,
+			Base:            base,
+			Polling:         polling,
+			PollInterval:    interval,
+			Status:          card.ConnectionStatus,
+			Outcome:         outcome,
+			AnthropicSource: h.anthropicSource(),
+		})
+		if window <= 0 {
+			// Manual (polling:false) providers never age out for network
+			// reasons: their age grows by design until the dashboard refreshes
+			// them. The card still carries its real age label.
+			card.StaleAfterSeconds = 0
+			continue
+		}
+		card.StaleAfterSeconds = int64(window.Seconds())
+		source := card.UpdatedAtTime
+		if card.StaleCheckedAt != "" {
+			// Staleness is judged from a different timestamp than the age label
+			// (Anthropic hybrid: primary windows only, see
+			// applyMenubarOldestCapturedAt).
+			source = card.StaleCheckedAt
+		}
+		captured, err := time.Parse(time.RFC3339, source)
+		if err != nil || captured.IsZero() {
+			continue
+		}
+		age := now.Sub(captured)
+		if age <= window {
+			continue
+		}
+		card.Stale = true
+		if outcome != "" {
+			card.StaleReason = outcome.Reason()
+		}
+		if card.StaleReason == "" {
+			card.StaleReason = menubar.StaleReasonText(age)
+		}
+	}
+}
+
+func (h *Handler) buildMenubarProviders(settings *menubar.Settings, includeHidden bool) ([]menubar.ProviderCard, time.Time, map[string]map[string]bool) {
 	normalized := settings.Normalize()
+	if h.menubarProvidersBuildHook != nil {
+		h.menubarProvidersBuildHook()
+	}
 	// Reuse dashboard tab renames (Settings → Tab name) for menubar cards.
 	labels := h.loadDashboardProviderLabels()
 
@@ -270,216 +448,619 @@ func (h *Handler) buildMenubarProviders(settings *menubar.Settings, includeHidde
 	providers := make([]menubar.ProviderCard, 0, 10)
 	latest := time.Time{}
 
-	if h.config != nil && h.config.HasProvider("synthetic") && h.providerDashboardVisible("synthetic", visibility) {
-		payload := h.buildSyntheticCurrent()
-		if card := normalizeProviderCard("synthetic", resolveProviderTabLabel("synthetic", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
+	// attempted holds every card ID this build considered (configured and
+	// dashboard-visible). After the build, cached cards outside this set are
+	// evicted, so a removed provider or deleted account does not linger.
+	attempted := make(map[string]struct{}, 10)
+	defer h.pruneMenubarLastGood(attempted)
+
+	// add appends a resolved card and folds its data time into latest. A cached
+	// card keeps its original timestamp, which is a real data time, so LatestAt
+	// still comes only from real data.
+	add := func(card *menubar.ProviderCard, captured time.Time) {
+		if card == nil {
+			return
 		}
+		providers = append(providers, *card)
+		if captured.After(latest) {
+			latest = captured
+		}
+	}
+
+	if h.config != nil && h.config.HasProvider("synthetic") && h.providerDashboardVisible("synthetic", visibility) {
+		attempted["synthetic"] = struct{}{}
+		payload, readOK, hasData := h.buildSyntheticCurrentOK()
+		add(h.menubarResolveCard("synthetic", resolveProviderTabLabel("synthetic", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 	if h.config != nil && h.config.HasProvider("zai") && h.providerDashboardVisible("zai", visibility) {
-		payload := h.buildZaiCurrent()
-		if card := normalizeProviderCard("zai", resolveProviderTabLabel("zai", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["zai"] = struct{}{}
+		payload, readOK, hasData := h.buildZaiCurrentOK()
+		add(h.menubarResolveCard("zai", resolveProviderTabLabel("zai", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 	if h.config != nil && h.config.HasProvider("anthropic") && h.providerDashboardVisible("anthropic", visibility) {
-		payload := h.buildAnthropicCurrent()
-		if card := normalizeProviderCard("anthropic", resolveProviderTabLabel("anthropic", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			if promoData, ok := payload["promo"]; ok && promoData != nil {
-				if p, ok := promoData.(*anthropicPromo); ok {
-					compactText := "Off-peak hours"
-					if isAnthropicPeakHours(p, time.Now()) {
-						compactText = "Peak hours"
-					}
-					card.Promo = &menubar.ProviderPromo{
-						ID:               p.ID,
-						Title:            p.Title,
-						CompactText:      compactText,
-						PeakStartHourET:  p.PeakStartHourET,
-						PeakEndHourET:    p.PeakEndHourET,
-						PeakWeekdaysOnly: p.PeakWeekdaysOnly,
-						EndsAt:           p.EndsAt,
-					}
-				}
-			}
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["anthropic"] = struct{}{}
+		payload, readOK, hasData := h.buildAnthropicCurrentOK()
+		add(h.menubarResolveCard("anthropic", resolveProviderTabLabel("anthropic", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 	if h.config != nil && h.config.HasProvider("copilot") && h.providerDashboardVisible("copilot", visibility) {
-		payload := h.buildCopilotCurrent()
-		if card := normalizeProviderCard("copilot", resolveProviderTabLabel("copilot", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["copilot"] = struct{}{}
+		payload, readOK, hasData := h.buildCopilotCurrentOK()
+		add(h.menubarResolveCard("copilot", resolveProviderTabLabel("copilot", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 	if h.config != nil && h.config.HasProvider("codex") && h.providerDashboardVisible("codex", visibility) {
-		codexAccounts := h.codexUsageAccounts()
-		multiCodex := len(codexAccounts) > 1
-		for _, usage := range codexAccounts {
-			accountID := codexUsageAccountID(usage)
-			providerKey := fmt.Sprintf("codex:%d", accountID)
-			if !providerDashboardVisibleForKey(visibility, providerKey, "codex") {
-				continue
-			}
-			name := stringValue(usage, "accountName")
-			if name == "" {
-				name = "default"
-			}
-			subtitle := "ChatGPT account"
-			label := menubarAccountLabel("codex", labels, name, multiCodex)
-			if card := normalizeProviderCard(providerKey, label, subtitle, usage, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-				providers = append(providers, *card)
-				if captured := parseCapturedAt(usage); captured.After(latest) {
-					latest = captured
+		codexAccounts, enumerated := h.codexUsageAccountsOK()
+		if enumerated {
+			multiCodex := len(codexAccounts) > 1
+			for _, account := range codexAccounts {
+				usage := account.Usage
+				accountID := codexUsageAccountID(usage)
+				providerKey := fmt.Sprintf("codex:%d", accountID)
+				if !providerDashboardVisibleForKey(visibility, providerKey, "codex") {
+					continue
 				}
+				attempted[providerKey] = struct{}{}
+				name := stringValue(usage, "accountName")
+				if name == "" {
+					name = "default"
+				}
+				subtitle := "ChatGPT account"
+				label := menubarAccountLabel("codex", labels, name, multiCodex)
+				add(h.menubarResolveCard(providerKey, label, subtitle, usage, account.ReadOK, account.HasData, normalized.WarningPercent, normalized.CriticalPercent, codexResetCreditsDecorator(usage)))
+			}
+		} else {
+			// The account list could not be read. Keep every known account card
+			// and leave the cache untouched: an enumeration failure says nothing
+			// about which accounts still exist.
+			for _, entry := range h.menubarCachedAccountCards("codex", attempted, visibility) {
+				add(entry.card, entry.captured)
 			}
 		}
 	}
 	if h.config != nil && h.config.HasProvider("antigravity") && h.providerDashboardVisible("antigravity", visibility) {
-		payload := h.buildAntigravityCurrent(h.defaultProviderAccountID("antigravity"))
-		if card := normalizeProviderCard("antigravity", resolveProviderTabLabel("antigravity", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["antigravity"] = struct{}{}
+		payload, readOK, hasData := h.buildAntigravityCurrentOK(h.defaultProviderAccountID("antigravity"))
+		add(h.menubarResolveCard("antigravity", resolveProviderTabLabel("antigravity", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 	if h.config != nil && h.config.HasProvider("minimax") && h.providerDashboardVisible("minimax", visibility) {
-		minimaxAccounts := h.minimaxUsageAccounts()
-		multiMiniMax := len(minimaxAccounts) > 1
-		for _, usage := range minimaxAccounts {
-			accountID := minimaxUsageAccountID(usage)
-			providerKey := fmt.Sprintf("minimax:%d", accountID)
-			if !providerDashboardVisibleForKey(visibility, providerKey, "minimax") {
-				continue
-			}
-			name := stringValue(usage, "accountName")
-			if name == "" {
-				name = "default"
-			}
-			subtitle := "MiniMax account"
-			label := menubarAccountLabel("minimax", labels, name, multiMiniMax)
-			if card := normalizeProviderCard(providerKey, label, subtitle, usage, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-				providers = append(providers, *card)
-				if captured := parseCapturedAt(usage); captured.After(latest) {
-					latest = captured
+		minimaxAccounts, enumerated := h.minimaxUsageAccountsOK()
+		if enumerated {
+			multiMiniMax := len(minimaxAccounts) > 1
+			for _, account := range minimaxAccounts {
+				usage := account.Usage
+				accountID := minimaxUsageAccountID(usage)
+				providerKey := fmt.Sprintf("minimax:%d", accountID)
+				if !providerDashboardVisibleForKey(visibility, providerKey, "minimax") {
+					continue
 				}
+				attempted[providerKey] = struct{}{}
+				name := stringValue(usage, "accountName")
+				if name == "" {
+					name = "default"
+				}
+				subtitle := "MiniMax account"
+				label := menubarAccountLabel("minimax", labels, name, multiMiniMax)
+				add(h.menubarResolveCard(providerKey, label, subtitle, usage, account.ReadOK, account.HasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
+			}
+		} else {
+			// The account list could not be read: keep the known account cards
+			// and do not prune them.
+			for _, entry := range h.menubarCachedAccountCards("minimax", attempted, visibility) {
+				add(entry.card, entry.captured)
 			}
 		}
 	}
 	if h.config != nil && h.config.HasProvider("openrouter") && h.providerDashboardVisible("openrouter", visibility) {
-		payload := h.buildOpenRouterCurrent()
-		if card := normalizeProviderCard("openrouter", resolveProviderTabLabel("openrouter", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["openrouter"] = struct{}{}
+		payload, readOK, hasData := h.buildOpenRouterCurrentOK()
+		add(h.menubarResolveCard("openrouter", resolveProviderTabLabel("openrouter", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 	if h.config != nil && h.config.HasProvider("gemini") && h.providerDashboardVisible("gemini", visibility) {
-		payload := h.buildGeminiCurrent()
-		if card := normalizeProviderCard("gemini", resolveProviderTabLabel("gemini", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["gemini"] = struct{}{}
+		payload, readOK, hasData := h.buildGeminiCurrentOK()
+		add(h.menubarResolveCard("gemini", resolveProviderTabLabel("gemini", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 	if h.config != nil && h.config.HasProvider("grok") && h.providerDashboardVisible("grok", visibility) {
-		payload := h.buildGrokCurrent()
-		if card := normalizeProviderCard("grok", resolveProviderTabLabel("grok", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["grok"] = struct{}{}
+		payload, readOK, hasData := h.buildGrokCurrentOK()
+		add(h.menubarResolveCard("grok", resolveProviderTabLabel("grok", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 	if h.config != nil && h.config.HasProvider("kimi") && h.providerDashboardVisible("kimi", visibility) {
-		payload := h.buildKimiCurrent()
-		if card := normalizeProviderCard("kimi", "Kimi Code", "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["kimi"] = struct{}{}
+		payload, readOK, hasData := h.buildKimiCurrentOK()
+		add(h.menubarResolveCard("kimi", "Kimi Code", "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 	if h.config != nil && h.config.HasProvider("mistral") && h.providerDashboardVisible("mistral", visibility) {
-		payload := h.buildMistralCurrent()
-		if card := normalizeProviderCard("mistral", resolveProviderTabLabel("mistral", labels), mistralBillingSubtitle(payload), payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["mistral"] = struct{}{}
+		payload, readOK, hasData := h.buildMistralCurrentOK()
+		add(h.menubarResolveCard("mistral", resolveProviderTabLabel("mistral", labels), mistralBillingSubtitle(payload), payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 	if h.config != nil && h.config.HasProvider("opencode") && h.providerDashboardVisible("opencode", visibility) {
-		payload := h.buildOpenCodeCurrent()
-		if card := normalizeProviderCard("opencode", resolveProviderTabLabel("opencode", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["opencode"] = struct{}{}
+		payload, readOK, hasData := h.buildOpenCodeCurrentOK()
+		add(h.menubarResolveCard("opencode", resolveProviderTabLabel("opencode", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, openCodePeakDecorator))
 	}
 	if h.config != nil && h.config.HasProvider("ollama") && h.providerDashboardVisible("ollama", visibility) {
-		payload := h.buildOllamaCurrent()
-		if card := normalizeProviderCard("ollama", resolveProviderTabLabel("ollama", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["ollama"] = struct{}{}
+		payload, readOK, hasData := h.buildOllamaCurrentOK()
+		add(h.menubarResolveCard("ollama", resolveProviderTabLabel("ollama", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 	if h.config != nil && h.config.HasProvider("muse") && h.providerDashboardVisible("muse", visibility) {
-		payload := h.buildMuseCurrent()
-		if card := normalizeProviderCard("muse", resolveProviderTabLabel("muse", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["muse"] = struct{}{}
+		payload, readOK, hasData := h.buildMuseCurrentOK()
+		add(h.menubarResolveCard("muse", resolveProviderTabLabel("muse", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 	if h.config != nil && h.config.HasProvider("commandcode") && h.providerDashboardVisible("commandcode", visibility) {
-		payload := h.buildCommandCodeCurrent()
-		if card := normalizeProviderCard("commandcode", resolveProviderTabLabel("commandcode", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["commandcode"] = struct{}{}
+		payload, readOK, hasData := h.buildCommandCodeCurrentOK()
+		add(h.menubarResolveCard("commandcode", resolveProviderTabLabel("commandcode", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, commandCodePeakDecorator))
 	}
 	if h.config != nil && h.config.HasProvider("cursor") && h.providerDashboardVisible("cursor", visibility) {
-		payload := h.buildCursorCurrent()
-		if card := normalizeProviderCard("cursor", resolveProviderTabLabel("cursor", labels), "", payload, normalized.WarningPercent, normalized.CriticalPercent); card != nil {
-			providers = append(providers, *card)
-			if captured := parseCapturedAt(payload); captured.After(latest) {
-				latest = captured
-			}
-		}
+		attempted["cursor"] = struct{}{}
+		payload, readOK, hasData := h.buildCursorCurrentOK()
+		add(h.menubarResolveCard("cursor", resolveProviderTabLabel("cursor", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 
 	sortProviderCards(providers, normalized.ProvidersOrder)
 	if !includeHidden {
 		providers = filterMenubarProviders(providers, normalized.VisibleProviders)
 	}
-	return providers, latest
+	if providers == nil {
+		// An empty build still serialises as [] rather than null.
+		providers = []menubar.ProviderCard{}
+	}
+	return providers, latest, visibility
+}
+
+// menubarStaleData returns a copy of the built data with staleness freshly
+// evaluated at serve time. The cached build itself is immutable and may be up
+// to menubarFreshWindow old; staleness depends on the wall clock, so it is
+// recomputed on every read. That is what makes a card turn stale while the
+// daemon is otherwise healthy but one provider stopped polling.
+//
+// It reuses the visibility map the build captured. Re-reading it here would put
+// a context-free settings query on every cached response - including the 3s
+// stale fallback, which exists precisely for moments when the database cannot
+// answer - and a failed read would silently treat every provider as polling.
+func (h *Handler) menubarStaleData(data menubarBuiltData) menubarBuiltData {
+	if data.Snapshot == nil {
+		return data
+	}
+	fresh := make([]menubar.ProviderCard, len(data.Snapshot.Providers))
+	copy(fresh, data.Snapshot.Providers)
+	h.applyMenubarStaleness(fresh, data.Visibility)
+
+	snapshotCopy := *data.Snapshot
+	snapshotCopy.Providers = fresh
+	return menubarBuiltData{
+		Snapshot:     &snapshotCopy,
+		AllProviders: data.AllProviders,
+		Settings:     data.Settings,
+		Visibility:   data.Visibility,
+	}
+}
+
+// menubarResolveCard normalizes one provider payload into a card and applies
+// the last-good cache. decorate, when non-nil, runs on a freshly built card
+// before it is cached.
+//
+// readOK reports whether the provider's storage read succeeded; hasData reports
+// whether it returned stored rows. A read failure is distinct from a genuine
+// "no data yet": on failure the cached card is served unchanged (or the
+// provider is omitted when nothing was cached). A successful read with no rows
+// means the history is genuinely gone, so any cached card is evicted; the
+// provider is omitted, except for Mistral's connection-only placeholder, which
+// carries retry state but must never claim a data time.
+func (h *Handler) menubarResolveCard(id, label, subtitle string, payload map[string]interface{}, readOK, hasData bool, warningPercent, criticalPercent int, decorate func(*menubar.ProviderCard)) (*menubar.ProviderCard, time.Time) {
+	if !readOK {
+		return h.menubarCachedCard(id)
+	}
+	if !hasData {
+		h.forgetMenubarCard(id)
+		if providerKeyBase(id) != "mistral" {
+			return nil, time.Time{}
+		}
+		// Mistral still shows a connection-only placeholder so the user can see
+		// the reconnect/browser-access state and retry. It must not carry a
+		// capturedAt: that would fabricate a fresh age and feed LatestAt.
+		timeless := make(map[string]interface{}, len(payload))
+		for key, value := range payload {
+			if key == "capturedAt" {
+				continue
+			}
+			timeless[key] = value
+		}
+		card := normalizeProviderCard(id, label, subtitle, timeless, warningPercent, criticalPercent)
+		if card == nil {
+			return nil, time.Time{}
+		}
+		if decorate != nil {
+			decorate(card)
+		}
+		return card, time.Time{}
+	}
+	card := normalizeProviderCard(id, label, subtitle, payload, warningPercent, criticalPercent)
+	if card == nil {
+		// Stored rows that produce nothing recognizable are not evidence that
+		// the history is gone (some polls store a snapshot with no quota
+		// values). Serve the last good card instead of dropping it: with
+		// return nil here the card vanished now and reappeared later with
+		// older numbers.
+		return h.menubarCachedCard(id)
+	}
+	if decorate != nil {
+		decorate(card)
+	}
+	captured := h.applyMenubarOldestCapturedAt(card, id, payload)
+	h.storeMenubarCard(id, card)
+	return card, captured
+}
+
+// applyMenubarOldestCapturedAt sets the card's age source to the OLDEST quota
+// capture time for the providers whose builders merge per-quota snapshots.
+// Their payload capturedAt is the newest quota's time, so a fresh quota hides
+// a days-old one and the card reads as fresh. This is menubar-only: dashboard
+// responses keep reporting the newest time (the API contract there).
+//
+// Age and staleness share one rule: a quota's time comes from the CURRENT
+// payload while that quota is present. Only a quota missing from the payload
+// (aged out of the builder's query window) contributes its last-seen time,
+// and that memory is dropped once every quota is back - otherwise the card
+// would stay pinned to its first old reading forever.
+//
+// Providers without per-quota timestamps keep the payload capturedAt. The
+// returned time feeds LatestAt, so it is the same honest capture time the age
+// label shows.
+func (h *Handler) applyMenubarOldestCapturedAt(card *menubar.ProviderCard, id string, payload map[string]interface{}) time.Time {
+	current := parseCapturedAt(payload)
+	base := providerKeyBase(id)
+	switch base {
+	case "anthropic", "mistral", "cursor":
+	default:
+		return current
+	}
+	present := quotaCapturedTimes(payload)
+	// Cursor's builder reads only the newest snapshot, so a quota missing from
+	// the payload is gone, not windowed out. Remembering it would pin the card
+	// stale for up to menubarQuotaMemoryBound after the quota disappeared.
+	// Anthropic and Mistral read a window (per-quota merge and per-quota latest
+	// snapshots), where a missing quota may simply have aged out.
+	var reportedAt time.Time
+	if base == "anthropic" && h.anthropicSource() != "statusline" {
+		// In statusline mode an old API poll says nothing about the current
+		// plan, and the lookup would scan every statusline row since it.
+		reportedAt = h.anthropicLastAPIReport()
+	}
+	oldest := h.mergeQuotaTimes(id, present, base != "cursor", reportedAt)
+	if oldest.IsZero() {
+		return current
+	}
+	if !current.IsZero() && current.Before(oldest) {
+		// The builder's own time is older still (for example a statusline
+		// snapshot newer quotas do not cover); keep the older one.
+		return current
+	}
+	card.UpdatedAtTime = oldest.UTC().Format(time.RFC3339)
+	card.UpdatedAt = timeAgo(oldest)
+	if base == "anthropic" && h.anthropicSource() != "api" {
+		// Anthropic's statusline supplies the primary windows every few
+		// minutes while API-only quotas (Sonnet, extra usage) refresh only
+		// every tenth poll in hybrid mode. Judging staleness from the oldest
+		// quota would flap the card for a quota that is expected to be 20m
+		// old. Staleness follows the newest PRIMARY window; the age label
+		// still shows the honest oldest time.
+		if primary, ok := anthropicPrimaryCapturedAt(present); ok && !primary.IsZero() {
+			card.StaleCheckedAt = primary.UTC().Format(time.RFC3339)
+		}
+	}
+	return oldest
+}
+
+// anthropicSource returns the configured Anthropic data source. Empty means
+// the default ("auto", hybrid statusline + API).
+func (h *Handler) anthropicSource() string {
+	if h.config == nil {
+		return "auto"
+	}
+	source := strings.ToLower(strings.TrimSpace(h.config.AnthropicSource))
+	if source == "" {
+		return "auto"
+	}
+	return source
+}
+
+// anthropicLastAPIReport returns when the newest Anthropic usage API poll was
+// stored, or zero when unknown. API polls carry every quota the plan has, so a
+// quota last seen before this time is no longer reported.
+func (h *Handler) anthropicLastAPIReport() time.Time {
+	if h.store == nil {
+		return time.Time{}
+	}
+	at, ok, err := h.store.LastAnthropicAPISnapshot()
+	if err != nil || !ok {
+		return time.Time{}
+	}
+	// Payload quota times are whole seconds; the stored poll time keeps
+	// nanoseconds. Without truncation a quota from this very poll would read
+	// as older than it and be dropped.
+	return at.Truncate(time.Second)
+}
+
+// anthropicPrimaryCapturedAt returns the newest capture time among the two
+// primary windows the statusline feeds. They are what the card and tray show,
+// so their freshness is what the card's staleness means. A payload without
+// them (API-only mode before the first poll) reports false and the age source
+// is used.
+func anthropicPrimaryCapturedAt(times map[string]time.Time) (time.Time, bool) {
+	var newest time.Time
+	found := false
+	for _, name := range []string{"five_hour", "seven_day"} {
+		at, ok := times[name]
+		if !ok || at.IsZero() {
+			continue
+		}
+		if !found || at.After(newest) {
+			newest = at
+			found = true
+		}
+	}
+	return newest, found
+}
+
+// menubarQuotaMemoryBound is how long a quota remembered from an earlier
+// payload keeps pinning a card's age after it disappears from the payload.
+//
+// The bound is 24h, not 2x the stale threshold. A quota that vanishes because
+// the provider stopped reporting it (extra usage switched off, a renamed
+// window) can never come back through the builder's query window (Cursor reads
+// only the newest snapshot, Anthropic the last 50), so remembering it forever
+// pins the age until restart. The card still shows its real (old) data until
+// the next successful build of the remaining quotas, and the age it reports is
+// the real capture time of the last data that still exists. A 24h horizon
+// covers a quota that merely aged out of the window while the provider was
+// idle (the builders query at most a few hours of history), while anything
+// older than that is not data the card is still displaying.
+const menubarQuotaMemoryBound = 24 * time.Hour
+
+// mergeQuotaTimes folds the payload's per-quota times into the remembered set
+// and returns the oldest time the card should show. A present quota always
+// updates its entry to the current time, so a refreshed quota moves forward;
+// a quota absent from the payload contributes its last-seen time until it has
+// been missing longer than menubarQuotaMemoryBound, at which point the entry
+// is dropped. Without that bound a permanently removed quota would pin the
+// card's age (and its stale flag) until the daemon restarted.
+//
+// rememberMissing must be false for providers whose builder reads only the
+// latest snapshot (Cursor): a quota absent there is gone, so it stops counting
+// immediately instead of pinning the card until the bound expires.
+//
+// reportedAt is when the provider last sent a complete report (for Anthropic,
+// the newest API poll). A missing quota last seen before it was left out of
+// that report, so it no longer exists (a plan downgrade drops per-model weekly
+// buckets) and is dropped at once. Zero disables the check.
+func (h *Handler) mergeQuotaTimes(id string, present map[string]time.Time, rememberMissing bool, reportedAt time.Time) time.Time {
+	h.menubarLastGoodMu.Lock()
+	defer h.menubarLastGoodMu.Unlock()
+	if len(present) == 0 && rememberMissing {
+		// Nothing in the payload to age; leave the remembered set untouched
+		// for a later pass that can tell which quotas are missing.
+		return time.Time{}
+	}
+	if h.menubarQuotas == nil {
+		h.menubarQuotas = make(map[string]map[string]time.Time, 8)
+	}
+	lastSeen := h.menubarQuotas[id]
+	if lastSeen == nil {
+		lastSeen = make(map[string]time.Time, len(present))
+		h.menubarQuotas[id] = lastSeen
+	}
+	if h.menubarQuotaMissing == nil {
+		h.menubarQuotaMissing = make(map[string]map[string]time.Time, 8)
+	}
+	missing := h.menubarQuotaMissing[id]
+	if missing == nil {
+		missing = make(map[string]time.Time, 2)
+		h.menubarQuotaMissing[id] = missing
+	}
+	now := h.menubarNowTime().UTC()
+	for name, at := range present {
+		if !at.IsZero() {
+			lastSeen[name] = at
+			delete(missing, name)
+		}
+	}
+	// Drop quotas that have been missing from the payload for longer than the
+	// bound, measured from the first pass that did not carry them. A quota
+	// that is merely absent from one payload (aged out of the builder's
+	// window) stays remembered; one that is gone for good stops pinning the
+	// card's age. Latest-snapshot builders have no window: a missing quota is
+	// dropped at once.
+	for name := range lastSeen {
+		if _, ok := present[name]; ok {
+			continue
+		}
+		if !rememberMissing || lastSeen[name].Before(reportedAt) {
+			delete(lastSeen, name)
+			delete(missing, name)
+			continue
+		}
+		since, seen := missing[name]
+		if !seen {
+			missing[name] = now
+			continue
+		}
+		if now.Sub(since) > menubarQuotaMemoryBound {
+			delete(lastSeen, name)
+			delete(missing, name)
+		}
+	}
+	if len(lastSeen) == 0 {
+		delete(h.menubarQuotas, id)
+		delete(h.menubarQuotaMissing, id)
+		return time.Time{}
+	}
+	var oldest time.Time
+	for _, at := range lastSeen {
+		if oldest.IsZero() || at.Before(oldest) {
+			oldest = at
+		}
+	}
+	return oldest
+}
+
+// quotaCapturedTimes maps quota name to its lastUpdatedAt from a payload.
+func quotaCapturedTimes(payload map[string]interface{}) map[string]time.Time {
+	var rawQuotas []interface{}
+	switch typed := payload["quotas"].(type) {
+	case []interface{}:
+		rawQuotas = typed
+	case []map[string]interface{}:
+		rawQuotas = make([]interface{}, 0, len(typed))
+		for _, item := range typed {
+			rawQuotas = append(rawQuotas, item)
+		}
+	default:
+		return nil
+	}
+	out := make(map[string]time.Time, len(rawQuotas))
+	for _, raw := range rawQuotas {
+		item, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name := stringValue(item, "name")
+		if name == "" {
+			name = stringValue(item, "label")
+		}
+		value := stringValue(item, "lastUpdatedAt")
+		if name == "" || value == "" {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil || parsed.IsZero() {
+			continue
+		}
+		out[name] = parsed
+	}
+	return out
+}
+
+// oldestQuotaCapturedAt scans the payload quotas for the earliest
+// lastUpdatedAt. It reports false when no quota carries a timestamp.
+func oldestQuotaCapturedAt(payload map[string]interface{}) (time.Time, bool) {
+	times := quotaCapturedTimes(payload)
+	var oldest time.Time
+	for _, at := range times {
+		if oldest.IsZero() || at.Before(oldest) {
+			oldest = at
+		}
+	}
+	if oldest.IsZero() {
+		return time.Time{}, false
+	}
+	return oldest, true
+}
+
+// menubarCachedCard serves the last good card for a provider whose storage read
+// failed. With nothing cached the provider is omitted rather than fabricated
+// with a zero-value card stamped now.
+func (h *Handler) menubarCachedCard(id string) (*menubar.ProviderCard, time.Time) {
+	h.menubarLastGoodMu.Lock()
+	cached, ok := h.menubarLastGood[id]
+	h.menubarLastGoodMu.Unlock()
+	if !ok {
+		return nil, time.Time{}
+	}
+	card := cached
+	captured, _ := time.Parse(time.RFC3339, card.UpdatedAtTime)
+	return &card, captured
+}
+
+func (h *Handler) forgetMenubarCard(id string) {
+	h.menubarLastGoodMu.Lock()
+	defer h.menubarLastGoodMu.Unlock()
+	delete(h.menubarLastGood, id)
+	delete(h.menubarQuotas, id)
+	delete(h.menubarQuotaMissing, id)
+}
+
+func (h *Handler) storeMenubarCard(id string, card *menubar.ProviderCard) {
+	h.menubarLastGoodMu.Lock()
+	defer h.menubarLastGoodMu.Unlock()
+	if h.menubarLastGood == nil {
+		h.menubarLastGood = make(map[string]menubar.ProviderCard, 8)
+	}
+	h.menubarLastGood[id] = *card
+}
+
+// pruneMenubarLastGood drops cached cards for providers this build did not
+// consider, so a removed provider, a deleted account or a disabled provider
+// does not linger in the menubar.
+func (h *Handler) pruneMenubarLastGood(attempted map[string]struct{}) {
+	h.menubarLastGoodMu.Lock()
+	defer h.menubarLastGoodMu.Unlock()
+	for id := range h.menubarLastGood {
+		if _, ok := attempted[id]; !ok {
+			delete(h.menubarLastGood, id)
+			delete(h.menubarQuotas, id)
+			delete(h.menubarQuotaMissing, id)
+		}
+	}
+}
+
+// menubarCachedAccountEntry is one cached card handed back while a
+// multi-account provider's account enumeration is failing.
+type menubarCachedAccountEntry struct {
+	card     *menubar.ProviderCard
+	captured time.Time
+}
+
+// menubarCachedAccountCards serves every cached card for a multi-account
+// provider whose account list could not be read. The entries are marked
+// attempted so deferred pruning keeps them; pruning waits for a successful
+// enumeration, which is the only evidence that an account was deleted.
+func (h *Handler) menubarCachedAccountCards(base string, attempted map[string]struct{}, visibility map[string]map[string]bool) []menubarCachedAccountEntry {
+	h.menubarLastGoodMu.Lock()
+	defer h.menubarLastGoodMu.Unlock()
+	entries := make([]menubarCachedAccountEntry, 0, len(h.menubarLastGood))
+	for id, card := range h.menubarLastGood {
+		if providerKeyBase(id) != base {
+			continue
+		}
+		if !providerDashboardVisibleForKey(visibility, id, base) {
+			continue
+		}
+		attempted[id] = struct{}{}
+		stored := card
+		captured, _ := time.Parse(time.RFC3339, stored.UpdatedAtTime)
+		entries = append(entries, menubarCachedAccountEntry{card: &stored, captured: captured})
+	}
+	// Stable order so tests and clients see the same account order even though
+	// the cache is a map.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].card.ID < entries[j].card.ID })
+	return entries
+}
+
+// menubarCardAccountID extracts the account ID from an account-scoped card ID
+// ("codex:2", "minimax:3"). Providers without a scope return 0.
+func menubarCardAccountID(cardID string) int64 {
+	idx := strings.IndexByte(cardID, ':')
+	if idx < 0 {
+		return 0
+	}
+	id, err := strconv.ParseInt(cardID[idx+1:], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
 }
 
 // updateMenubarProviderHistory changes one settings value so provider history
 // and automatic visibility are saved together. A nil history marks settings
 // written before provider discovery was tracked.
 func updateMenubarProviderHistory(settings *menubar.Settings, configured []string) bool {
+	if settings == nil {
+		return false
+	}
 	changed := settings.KnownProviders == nil
 	if settings.KnownProviders == nil {
 		settings.KnownProviders = []string{}
@@ -519,12 +1100,19 @@ func (h *Handler) reconcileMenubarSettings() (*menubar.Settings, error) {
 	h.menubarSettingsMu.Lock()
 	defer h.menubarSettingsMu.Unlock()
 	settings, err := h.menubarSettings()
-	if err != nil || h.store == nil {
+	if err != nil {
 		return settings, err
+	}
+	// Record the read that succeeded before any write below can fail; the
+	// values themselves are valid even if persisting the discovery history
+	// does not work.
+	h.recordMenubarLastSettings(settings)
+	if h.store == nil {
+		return settings, nil
 	}
 	if updateMenubarProviderHistory(settings, h.configuredMenubarProviders()) {
 		if err := h.store.SetMenubarSettings(settings); err != nil {
-			return nil, err
+			return settings, err
 		}
 	}
 	return settings, nil
@@ -541,7 +1129,13 @@ func (h *Handler) saveMenubarSettings(settings *menubar.Settings) error {
 	}
 	updateMenubarProviderHistory(current, h.configuredMenubarProviders())
 	settings.KnownProviders = append([]string{}, current.KnownProviders...)
-	return h.store.SetMenubarSettings(settings)
+	if err := h.store.SetMenubarSettings(settings); err != nil {
+		return err
+	}
+	// Menubar output just changed: the next summary/tray-title request must
+	// rebuild rather than serve the previous settings' snapshot.
+	h.invalidateMenubarSnapshot()
+	return nil
 }
 
 // menubarAccountLabel builds multi-account menubar titles using the dashboard
@@ -586,6 +1180,7 @@ func (h *Handler) renderMenubarHTML(view menubar.ViewType, settings *menubar.Set
 	}
 	content := strings.Replace(string(page), "__ONWATCH_MENUBAR_BOOTSTRAP__", string(bootstrap), 1)
 	content = strings.ReplaceAll(content, "__ONWATCH_MISTRAL_ASSET_VERSION__", mistralRecoveryAssetVersion)
+	content = strings.ReplaceAll(content, "__ONWATCH_PEAK_ASSET_VERSION__", peakHoursAssetVersion)
 	basePath := h.getBasePath()
 	baseJSON, _ := json.Marshal(basePath)
 	content = strings.ReplaceAll(content, "__ONWATCH_BASE_PATH_JSON__", string(baseJSON))
@@ -597,9 +1192,8 @@ func (h *Handler) renderMenubarHTML(view menubar.ViewType, settings *menubar.Set
 	return strings.Replace(content, "__ONWATCH_MENUBAR_VERSION__", version, 1), nil
 }
 
-func (h *Handler) buildMenubarProviderOptions(settings *menubar.Settings) ([]menubarProviderOption, error) {
+func (h *Handler) buildMenubarProviderOptions(settings *menubar.Settings, providers []menubar.ProviderCard) []menubarProviderOption {
 	normalized := settings.Normalize()
-	providers, _ := h.buildMenubarProviders(normalized, true)
 	visibleKeys := normalized.VisibleProviders
 	options := make([]menubarProviderOption, 0, len(providers))
 	for _, provider := range providers {
@@ -620,7 +1214,7 @@ func (h *Handler) buildMenubarProviderOptions(settings *menubar.Settings) ([]men
 			Quotas:       quotaOptions,
 		})
 	}
-	return options, nil
+	return options
 }
 
 func menubarPreferencesResponse(settings *menubar.Settings, providers []menubarProviderOption) map[string]interface{} {
@@ -768,8 +1362,28 @@ func normalizeProviderCard(id, label, subtitle string, payload map[string]interf
 	}
 	status := "healthy"
 	connectionStatus := stringValue(payload, "status")
-	if connectionStatus == "reconnect" || connectionStatus == "stale" {
+	// reconnect and partial describe a connection that needs action (some or
+	// all data unavailable), so they stay a warning floor. Plain staleness does
+	// not: see the isStale branch below.
+	if connectionStatus == "reconnect" || connectionStatus == "partial" || connectionStatus == "paused" {
 		status = "warning"
+	}
+	// A paused account needs re-authentication. That is a warning floor, not a
+	// ceiling: the quota loop below still worsens the status, so a paused
+	// account at 100% keeps showing critical while the tooltip signals re-auth
+	// (#147 review, item 6).
+	paused, _ := payload["paused"].(bool)
+	if paused {
+		status = worsenStatus(status, "warning")
+		connectionStatus = "paused"
+	} else if stale, _ := payload["isStale"].(bool); stale {
+		// Staleness is shown only through the per-card age label. It must not
+		// raise the dot severity: a healthy card that is merely old stays
+		// healthy. The connection_status still marks the state for the clients
+		// that need it (Mistral recovery text); it does not drive color here.
+		if connectionStatus == "" {
+			connectionStatus = "stale"
+		}
 	}
 	if connection != nil && connection.Reason != "" {
 		status = "warning"
@@ -781,9 +1395,6 @@ func normalizeProviderCard(id, label, subtitle string, payload map[string]interf
 			highest = quota.Percent
 		}
 		status = worsenStatus(status, quota.Status)
-		if quota.IsStale {
-			status = worsenStatus(status, "warning")
-		}
 		points := quota.SparklinePoints
 		if len(points) == 0 {
 			points = []float64{quota.Percent, quota.Percent, quota.Percent, quota.Percent}
@@ -795,6 +1406,16 @@ func normalizeProviderCard(id, label, subtitle string, payload map[string]interf
 			Points: points,
 		})
 	}
+	// Age is computed from the provider's own last stored snapshot time
+	// (capturedAt), not the summary build time. That way it keeps growing when
+	// this provider's polls stop, even though the daemon is still serving
+	// snapshots for other providers.
+	updatedAt := ""
+	updatedAtTime := ""
+	if captured := parseCapturedAt(payload); !captured.IsZero() {
+		updatedAt = timeAgo(captured)
+		updatedAtTime = captured.UTC().Format(time.RFC3339)
+	}
 	return &menubar.ProviderCard{
 		ID:               id,
 		BaseProvider:     providerKeyBase(id),
@@ -804,7 +1425,8 @@ func normalizeProviderCard(id, label, subtitle string, payload map[string]interf
 		Connection:       connection,
 		Status:           status,
 		HighestPercent:   highest,
-		UpdatedAt:        timeAgo(parseCapturedAt(payload)),
+		UpdatedAt:        updatedAt,
+		UpdatedAtTime:    updatedAtTime,
 		Quotas:           quotas,
 		Trends:           trends,
 	}
@@ -850,12 +1472,19 @@ func normalizeQuotas(payload map[string]interface{}, warningPercent, criticalPer
 			continue
 		}
 		percent := firstFloat(item, "cardPercent", "usagePercent", "percent", "utilization", "remainingPercent")
+		statusLabel := stringValue(item, "statusLabel")
+		percentOnly := false
+		if v, ok := item["percentOnly"].(bool); ok {
+			percentOnly = v
+		}
 		meter := menubar.QuotaMeter{
 			Key:            strings.ToLower(strings.ReplaceAll(label, " ", "_")),
 			Label:          label,
 			DisplayValue:   displayValue(item, percent),
 			Percent:        percent,
 			Status:         quotaStatus(item, percent, warningPercent, criticalPercent),
+			StatusLabel:    statusLabel,
+			PercentOnly:    percentOnly,
 			Used:           firstFloat(item, "usage", "used", "currentUsage", "currentUsed"),
 			Limit:          firstFloat(item, "limit", "total", "currentLimit", "entitlement"),
 			Format:         stringValue(item, "format"),
@@ -881,6 +1510,11 @@ func normalizeQuotas(payload map[string]interface{}, warningPercent, criticalPer
 }
 
 func quotaStatus(item map[string]interface{}, percent float64, warningPercent, criticalPercent int) string {
+	// An upstream window status that is not "ok" (OpenCode key mode) is
+	// authoritative: a blocked window is critical whatever its percent.
+	if label := stringValue(item, "statusLabel"); label != "" && !strings.EqualFold(label, "ok") {
+		return "critical"
+	}
 	rawStatus := stringValue(item, "status")
 	if _, ok := item["remainingPercent"]; ok || strings.EqualFold(stringValue(item, "cardLabel"), "Remaining") {
 		if rawStatus != "" {
@@ -919,6 +1553,38 @@ func buildAggregate(providers []menubar.ProviderCard) menubar.Aggregate {
 		aggregate.Label = "All Good"
 	}
 	return aggregate
+}
+
+// commandCodePeakDecorator attaches the DeepSeek peak schedule to the Command
+// Code card. Command Code serves the DeepSeek models, so the provider-level
+// card shows the schedule, model note, and peak pricing together.
+func commandCodePeakDecorator(card *menubar.ProviderCard) {
+	card.Peak = menubar.NewDeepSeekPeak("commandcode", "Command Code DeepSeek models", menubar.DeepSeekPeakPricing)
+}
+
+// openCodePeakDecorator attaches the DeepSeek peak schedule to the OpenCode Go
+// card. The schedule applies to the DeepSeek models the Go plan exposes.
+func openCodePeakDecorator(card *menubar.ProviderCard) {
+	card.Peak = menubar.NewDeepSeekPeak("opencode", menubar.DeepSeekPeakModelNote, "")
+}
+
+// codexResetCreditsDecorator attaches the banked reset count to a Codex card.
+// The count is available_count, the number the Codex CLI shows; the payload's
+// applicable count is narrower (usable right now) and would read as 0 while a
+// reset is banked. Zero or unknown counts add nothing, so the header stays clean.
+func codexResetCreditsDecorator(usage map[string]interface{}) func(*menubar.ProviderCard) {
+	rc, _ := usage["resetCredits"].(map[string]interface{})
+	if rc == nil {
+		return nil
+	}
+	count, ok := rc["available_count"].(int64)
+	if !ok || count <= 0 {
+		return nil
+	}
+	next, _ := rc["next_expires_at"].(string)
+	return func(card *menubar.ProviderCard) {
+		card.ResetCredits = &menubar.ProviderResetCredits{Count: count, NextExpiresAt: next}
+	}
 }
 
 func sortProviderCards(cards []menubar.ProviderCard, preferred []string) {

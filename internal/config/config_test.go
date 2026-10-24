@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1625,5 +1626,77 @@ func TestConfig_MistralRetention_RejectsNegative(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("negative MISTRAL_RETENTION was accepted")
+	}
+}
+
+// HasProvider and AvailableProviders read key fields that a settings save
+// rewrites. Both must take the read lock so concurrent saves cannot race them.
+// Run under -race.
+func TestConfig_HasProviderAndAvailableProvidersRaceWithSaves(t *testing.T) {
+	cfg := &Config{AnthropicToken: "a", SyntheticAPIKey: "s", OpenCodeGoAPIKey: "k", OpenCodeGoWorkspaceID: "w", OpenCodeGoAuthCookie: "c", MistralEnabled: true}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			cfg.WithWrite(func() {
+				if i%2 == 0 {
+					cfg.OpenCodeGoAPIKey = "k"
+					cfg.MistralAuthCookie = "c"
+				} else {
+					cfg.OpenCodeGoAPIKey = ""
+					cfg.MistralAuthCookie = ""
+				}
+			})
+		}
+	}()
+
+	for i := 0; i < 2000; i++ {
+		_ = cfg.HasProvider("opencode")
+		_ = cfg.HasProvider("mistral")
+		_ = cfg.AvailableProviders()
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// A nested call while a writer is waiting must not deadlock: a recursive RLock
+// starves once a writer queues behind it. Code that already holds the read lock
+// (for example isProviderConfiguredLocked) must use the *Locked variants, which
+// take no lock. This holds the read lock, queues a writer, then calls them.
+func TestConfig_NestedLockedVariantsNoDeadlock(t *testing.T) {
+	cfg := &Config{OpenCodeGoAPIKey: "k", OpenCodeGoWorkspaceID: "w", OpenCodeGoAuthCookie: "c", MistralEnabled: true}
+
+	cfg.ReadLock()
+	defer cfg.ReadUnlock()
+
+	// Queue a writer behind the read lock.
+	writerStarted := make(chan struct{})
+	go func() {
+		close(writerStarted)
+		cfg.WithWrite(func() {})
+	}()
+	<-writerStarted
+
+	done := make(chan struct{})
+	go func() {
+		// The locked variants must not re-acquire the read lock, or they block
+		// behind the queued writer.
+		_ = cfg.hasProviderLocked("opencode")
+		_ = cfg.hasProviderLocked("mistral")
+		_ = cfg.availableProvidersLocked()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("locked variants deadlocked with a waiting writer")
 	}
 }

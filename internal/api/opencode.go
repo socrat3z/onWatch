@@ -15,7 +15,11 @@ type OpenCodeQuota struct {
 	Limit       float64
 	Utilization float64
 	Format      OpenCodeQuotaFormat
-	ResetsAt    *time.Time
+	// Status is the upstream window status ("ok", "exhausted", ...) from the
+	// key-mode usage API. Empty for cookie mode, which reports no status.
+	// A value other than "ok" means the window is blocked whatever its percent.
+	Status   string
+	ResetsAt *time.Time
 }
 
 type OpenCodeAccountType string

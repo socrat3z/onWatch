@@ -173,20 +173,23 @@ func TestFixExplicitDBPath_RedirectsToCanonicalWhenBetter(t *testing.T) {
 		t.Fatalf("write canonical: %v", err)
 	}
 
-	t.Run("missing explicit path", func(t *testing.T) {
-		cfg := &config.Config{DBPath: filepath.Join(t.TempDir(), "missing.db")}
+	// Only the legacy relative default is migrated; run from an empty dir so
+	// ./onwatch.db resolves to nothing.
+	t.Chdir(t.TempDir())
+
+	t.Run("missing legacy relative path", func(t *testing.T) {
+		cfg := &config.Config{DBPath: "./onwatch.db"}
 		fixExplicitDBPath(cfg, testLogger())
 		if cfg.DBPath != canonical {
 			t.Fatalf("expected redirect to canonical, got %q", cfg.DBPath)
 		}
 	})
 
-	t.Run("smaller explicit file", func(t *testing.T) {
-		explicit := filepath.Join(t.TempDir(), "explicit.db")
-		if err := os.WriteFile(explicit, []byte("small"), 0o600); err != nil {
+	t.Run("smaller legacy relative file", func(t *testing.T) {
+		if err := os.WriteFile("./syntrack.db", []byte("small"), 0o600); err != nil {
 			t.Fatalf("write explicit: %v", err)
 		}
-		cfg := &config.Config{DBPath: explicit}
+		cfg := &config.Config{DBPath: "./syntrack.db"}
 		fixExplicitDBPath(cfg, testLogger())
 		if cfg.DBPath != canonical {
 			t.Fatalf("expected redirect to canonical, got %q", cfg.DBPath)

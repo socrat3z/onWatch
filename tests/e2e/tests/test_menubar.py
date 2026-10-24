@@ -32,7 +32,9 @@ class TestMenubarStandardView:
         expect(first_card).to_be_visible()
         expect(first_card.locator(".provider-icon")).to_be_visible()
         expect(authenticated_page.locator(".quota-meter").first).to_be_visible()
-        expect(authenticated_page.locator(".quota-reset-line").first).to_be_visible()
+        # The standard view draws the reset countdown inside the quota ring;
+        # .quota-reset-line only exists in the detailed view.
+        expect(authenticated_page.locator(".quota-ring-reset").first).to_be_visible()
 
     def test_footer_refresh_and_links_are_visible(self, authenticated_page: Page) -> None:
         open_menubar(authenticated_page, "standard")

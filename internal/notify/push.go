@@ -196,11 +196,11 @@ func encryptPayload(payload, clientPubBytes, authSecret []byte) ([]byte, error) 
 	}
 
 	// Derive content encryption key and nonce
-	cek, err := hkdfDerive(salt, ikm, buildCEKInfo("Content-Encoding: aes128gcm\x00\x01"), 16)
+	cek, err := hkdfDerive(salt, ikm, buildCEKInfo("Content-Encoding: aes128gcm\x00"), 16)
 	if err != nil {
 		return nil, fmt.Errorf("derive CEK: %w", err)
 	}
-	nonce, err := hkdfDerive(salt, ikm, buildCEKInfo("Content-Encoding: nonce\x00\x01"), 12)
+	nonce, err := hkdfDerive(salt, ikm, buildCEKInfo("Content-Encoding: nonce\x00"), 12)
 	if err != nil {
 		return nil, fmt.Errorf("derive nonce: %w", err)
 	}
@@ -236,11 +236,10 @@ func buildInfo(label string, clientPub, serverPub []byte) []byte {
 	var info bytes.Buffer
 	info.WriteString(label)
 	info.WriteByte(0x00)
-	// Client public key (with 2-byte length prefix)
-	binary.Write(&info, binary.BigEndian, uint16(len(clientPub)))
+	// RFC 8291 section 3.4: key_info = "WebPush: info" || 0x00 || ua_public || as_public.
+	// The keys are concatenated without length prefixes (those belong to the
+	// legacy "aesgcm" draft and make browsers fail with "AES-GCM decryption failed").
 	info.Write(clientPub)
-	// Server public key (with 2-byte length prefix)
-	binary.Write(&info, binary.BigEndian, uint16(len(serverPub)))
 	info.Write(serverPub)
 	return info.Bytes()
 }

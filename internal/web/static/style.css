@@ -495,6 +495,22 @@ button, input, select { font-family: inherit; }
   box-shadow: 0 0 0 3px var(--status-warning-bg);
 }
 
+/* Chart stale marker: amber hollow dot with a hover tooltip. Shown only when
+   a failed history load left older lines on screen. */
+.chart-stale-dot {
+  display: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid var(--status-warning);
+  background: transparent;
+  flex: 0 0 auto;
+  cursor: help;
+}
+.chart-stale-dot.stale {
+  display: inline-block;
+}
+
 .theme-toggle {
   display: flex;
   align-items: center;
@@ -1396,6 +1412,11 @@ button, input, select { font-family: inherit; }
   border-radius: var(--radius-md);
   border: 1px solid color-mix(in srgb, var(--accent-teal) 15%, var(--border-light));
   transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+  /* Long values (for example an account name) must stay inside the card and
+     never paint over the neighbouring stat. min-width:0 lets the grid track
+     shrink below its content width so the value below can ellipsize. */
+  min-width: 0;
+  overflow: hidden;
 }
 .insight-stat:hover {
   transform: translateY(-1px);
@@ -1409,6 +1430,16 @@ button, input, select { font-family: inherit; }
   font-family: var(--font-primary);
   color: var(--text-primary);
   line-height: 1.2;
+  /* Truncate rather than overflow. The full value is exposed via the title
+     attribute set at render time, and long strings shrink first (see
+     .is-long) so a name like "aniketpratapsiny5..." still fits. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.insight-stat-value.is-long {
+  font-size: 15px;
+  letter-spacing: -0.01em;
 }
 
 .insight-stat-label {
@@ -2829,6 +2860,21 @@ select.settings-input {
   margin-top: 4px;
 }
 
+/* Explicit clear control for a saved credential (blank input means "keep"). */
+.settings-clear-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.settings-clear-field input[type="checkbox"] {
+  margin: 0;
+}
+
 /* Threshold slider group */
 .threshold-input-group {
   display: flex;
@@ -3734,6 +3780,23 @@ select.settings-input {
   line-height: 1.45;
 }
 
+/* Paused Codex account: needs re-authentication. Minimal UI - a status dot
+   whose tooltip carries the reason, no inline text (#147). */
+.codex-paused-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status-warning);
+  flex: 0 0 auto;
+  vertical-align: middle;
+  margin: 0 6px 2px 0;
+}
+
+#quota-grid-codex > .codex-paused-dot {
+  grid-column: 1 / -1;
+}
+
 #quota-grid-codex > .codex-usage-source-note {
   grid-column: 1 / -1;
 }
@@ -3757,6 +3820,27 @@ select.settings-input {
   background: var(--accent-teal-muted);
   border-radius: var(--radius-full);
   padding: 2px 8px;
+}
+
+/* Banked reset credits (issue #152): a compact chip in the first card header,
+   or in the account header in the multi-account view. Shares the peak chip's
+   shape and floating tooltip. */
+.codex-account-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.quota-title .reset-chip-wrap,
+.codex-account-meta .reset-chip-wrap {
+  margin-top: 0;
+  vertical-align: middle;
+}
+
+.peak-chip.reset-chip {
+  background: var(--accent-teal-muted);
+  color: var(--accent-teal-text);
 }
 
 .codex-account-cards {
@@ -4194,32 +4278,69 @@ body.accounts-overview-mode #sessions-section {
 }
 
 /* ═══════════════════════════════════════════
-   19. ANTHROPIC PROMO TAG (inline in quota cards)
+   PEAK/OFF-PEAK CHIP (Command Code, OpenCode, DeepSeek)
    ═══════════════════════════════════════════ */
 
-.promo-tag-inline {
+.peak-chip-wrap {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 4px;
+  border-radius: var(--radius-full, 999px);
+  cursor: default;
+}
+
+.peak-chip-wrap:focus-visible {
+  outline: 2px solid var(--accent-teal);
+  outline-offset: 2px;
+}
+
+.peak-chip {
   display: inline-block;
+  max-width: 100%;
   padding: 2px 8px;
   border-radius: var(--radius-full, 999px);
   font-size: 10px;
   font-weight: 600;
-  cursor: pointer;
-  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   transition: var(--transition-base);
 }
 
-.promo-tag-inline:hover {
-  filter: brightness(0.9);
-}
-
-.promo-tag-inline.promo-offpeak {
+.peak-chip.promo-offpeak {
   background: var(--accent-teal-muted);
   color: var(--accent-teal-text);
 }
 
-.promo-tag-inline.promo-peak {
+.peak-chip.promo-peak {
   background: var(--accent-peach-muted);
   color: var(--accent-peach-text);
+}
+
+/* The dashboard card clips overflow, so the child tip stays hidden and the
+   shared floating tip is used instead. */
+.peak-chip-tip {
+  display: none;
+}
+
+/* Floating tooltip shared by every chip. Fixed positioning keeps it clear of
+   the card's overflow clipping. */
+.peak-chip-floating-tip {
+  position: fixed;
+  z-index: 1200;
+  max-width: 260px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border-default);
+  background: var(--surface-card);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  box-shadow: var(--shadow-card-hover);
+  pointer-events: none;
 }
 
 /* ═══════════════════════════════════════════

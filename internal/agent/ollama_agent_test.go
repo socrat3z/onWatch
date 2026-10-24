@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -191,6 +192,42 @@ func ollamaSnapAt(captured time.Time, used float64, resetsAt time.Time) *api.Oll
 			Format: api.OllamaQuotaFormatCurrency, ResetsAt: &r,
 		}},
 	}
+}
+
+// A settings save mutates the shared config while Ollama polls. The agent must
+// snapshot reset_day at build time so a poll never reads the live pointer. Run
+// under -race; a regression would be a data race on OllamaResetDay.
+func TestOllamaAgent_DoesNotReadLiveConfigDuringPoll(t *testing.T) {
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer st.Close()
+
+	shared := &config.Config{OllamaAPIKey: "k"}
+	snapshot := ollamaSnapAt(time.Now().UTC(), 1.0, time.Now().UTC().Add(24*time.Hour))
+	ag := NewOllamaAgent(&stubOllamaClient{snapshot: snapshot}, st, tracker.NewOllamaTracker(st, nil), shared, time.Second, slog.Default(), nil)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 1; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			shared.OllamaResetDay = i % 28
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		ag.poll(context.Background())
+	}
+	close(stop)
+	wg.Wait()
 }
 
 func TestOllamaAgent_LearnsResetDayFromUsageDrop(t *testing.T) {

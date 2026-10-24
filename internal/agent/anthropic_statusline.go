@@ -280,9 +280,45 @@ func isValidStatuslineData(rl *StatuslineRateLimits) bool {
 	return hasValid
 }
 
+// readStatuslineMtime returns the statusline file's mtime exactly as the
+// filesystem reports it. It is the dedupe key: a future mtime (clock skew, or
+// a file synced from another host) must still compare equal on every poll, or
+// the same unchanged data is appended to history forever. It reports false
+// when the file is missing or unreadable.
+func readStatuslineMtime(path string) (time.Time, bool) {
+	if path == "" {
+		return time.Time{}, false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return info.ModTime().UTC(), true
+}
+
+// readStatuslineCapturedAt returns the statusline file's mtime, which is the
+// only honest data time it carries: the payload has no timestamp of its own.
+// A missing or unreadable file falls back to now so a poll that somehow loses
+// the race with the writer still stamps something plausible rather than zero.
+// A future mtime is clamped to now for display; dedupe uses the raw mtime (see
+// readStatuslineMtime), not this clamped value.
+func readStatuslineCapturedAt(path string, now time.Time) time.Time {
+	if mtime, ok := readStatuslineMtime(path); ok {
+		if !mtime.After(now) {
+			return mtime
+		}
+		return now
+	}
+	return now
+}
+
 // statuslineToSnapshot converts statusline rate limit data to an AnthropicSnapshot
 // compatible with the existing store and tracker pipeline.
 // Both statusline and the OAuth API report utilization as 0-100 percentage values.
+//
+// capturedAt must be the statusline file's mtime (see readStatuslineCapturedAt),
+// not the poll time: the data can be up to statuslineStalenessDefault old, and
+// re-stamping it now would make stale data display as fresh.
 func statuslineToSnapshot(rl *StatuslineRateLimits, capturedAt time.Time) *api.AnthropicSnapshot {
 	snapshot := &api.AnthropicSnapshot{
 		CapturedAt: capturedAt,

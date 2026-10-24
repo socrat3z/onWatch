@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -192,6 +194,52 @@ func TestOpenCodeAgent_Fetch_PrefersUsageAPIKeyOverCookie(t *testing.T) {
 	}
 	if client.usageKey != "oc_sk_test" {
 		t.Fatalf("usage called with key=%q", client.usageKey)
+	}
+}
+
+// A settings save mutates the shared config while a poll is running. The agent
+// must not read the config during a poll: it snapshots credentials at build
+// time. This test mutates the config concurrently with a fetch and is intended
+// to be run under -race.
+func TestOpenCodeAgent_Fetch_DoesNotReadLiveConfigDuringPoll(t *testing.T) {
+	cfg := &config.Config{
+		OpenCodeGoWorkspaceID: "ws",
+		OpenCodeGoAuthCookie:  "cookie",
+		OpenCodeGoAPIKey:      "oc_sk_initial",
+	}
+	client := &stubOpenCodeClient{snapshot: &api.OpenCodeSnapshot{}}
+	ag := NewOpenCodeAgent(client, nil, nil, cfg, time.Second, slog.Default(), nil)
+
+	// Simulate reconcileProviderAgents / ApplyProviderSettingsFromDB rewriting
+	// the shared config while the agent polls.
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			cfg.OpenCodeGoAPIKey = "oc_sk_rotated_" + strconv.Itoa(i)
+			cfg.OpenCodeGoWorkspaceID = "ws_" + strconv.Itoa(i)
+			cfg.OpenCodeGoAuthCookie = "cookie_" + strconv.Itoa(i)
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		if _, err := ag.fetch(context.Background()); err != nil {
+			t.Fatalf("fetch: %v", err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+
+	// The agent keeps using the credentials captured at build time.
+	if client.usageKey != "oc_sk_initial" {
+		t.Fatalf("agent used key %q, want the build-time snapshot", client.usageKey)
 	}
 }
 

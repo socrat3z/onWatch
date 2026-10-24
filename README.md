@@ -19,7 +19,7 @@ See history, get alerts, and open a local web dashboard before you hit throttlin
 
 **Compatibility & Docs**
 
-[![Version](https://img.shields.io/badge/Version-v2.14.11-0EA5E9?style=for-the-badge)](https://github.com/onllm-dev/onwatch/releases/tag/v2.14.11)
+[![Version](https://img.shields.io/badge/Version-v2.14.16-0EA5E9?style=for-the-badge)](https://github.com/onllm-dev/onwatch/releases/tag/v2.14.16)
 [![VS Code Marketplace](https://vsmarketplacebadges.dev/version-short/onllm-dev.onwatch.svg?style=for-the-badge&label=VS%20Code&logo=visualstudiocode&logoColor=white&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=onllm-dev.onwatch)
 [![Go 1.25+](https://img.shields.io/badge/Go-1.25+-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev)
 [![Platform](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-orange?style=for-the-badge&logo=apple&logoColor=white)](#quick-start)
@@ -229,7 +229,7 @@ The tray is currently in beta. Feedback is highly appreciated at [github.com/onl
 
 **Push notifications (Beta)** -- Receive browser push notifications when quotas cross thresholds. onWatch is a PWA (Progressive Web App) - install it from your browser for a native app experience. Uses Web Push protocol (VAPID) with zero external dependencies. Configure delivery channels (email, push, webhook, or any combination) per your preference.
 
-**Webhook notifications (Beta)** -- POST a JSON payload to any HTTP endpoint on warning, critical, reset, auth error, and Codex quota-starter events. Works with ntfy, Gotify, and custom services, with optional bearer-token auth and custom headers. Payloads never contain credentials. See [docs/WEBHOOK_SETUP.md](docs/WEBHOOK_SETUP.md).
+**Webhook notifications (Beta)** -- POST a JSON payload to any HTTP endpoint on warning, critical, reset, auth error, Codex quota-starter, and banked Codex reset expiry events. Works with ntfy, Gotify, and custom services, with optional bearer-token auth and custom headers. Payloads never contain credentials. See [docs/WEBHOOK_SETUP.md](docs/WEBHOOK_SETUP.md).
 
 **Dark/Light mode** -- Toggle via sun/moon icon in the header. Auto-detects system preference on first visit and persists your choice across sessions.
 

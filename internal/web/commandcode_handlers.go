@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -24,7 +25,12 @@ func (h *Handler) currentCommandCode(w http.ResponseWriter, _ *http.Request) {
 type commandCodeInsightsResponse struct {
 	Stats    []commandCodeInsightStat `json:"stats"`
 	Insights []insightItem            `json:"insights"`
+	// partial marks an answer built after a swallowed read error; it is
+	// served but never cached.
+	partial bool
 }
+
+func (r commandCodeInsightsResponse) isPartial() bool { return r.partial }
 
 // commandCodeInsightStat carries linked forecast metadata for the dashboard.
 type commandCodeInsightStat struct {
@@ -85,10 +91,10 @@ func (h *Handler) computeCommandCodeRate(quotaName string, currentUtil float64, 
 			first := points[0]
 			last := points[len(points)-1]
 			elapsed := last.CapturedAt.Sub(first.CapturedAt)
-			if elapsed >= 5*time.Minute {
-				if delta := last.Utilization - first.Utilization; delta > 0 {
-					result.Rate = delta / elapsed.Hours()
-				}
+			// Match the OpenCode window: a short burst cannot support an
+			// hourly projection, especially over a multi-week window.
+			if elapsed >= 20*time.Minute {
+				result.Rate = math.Max(0, last.Utilization-first.Utilization) / elapsed.Hours()
 				result.HasRate = true
 			}
 		}
@@ -135,20 +141,15 @@ func buildCommandCodeBurnRateInsight(quota api.CommandCodeQuota, rate commandCod
 	}
 
 	if !rate.HasRate {
-		item.Type = "forecast"
-		item.Severity = "info"
-		item.Metric = "Analyzing..."
-		item.Sublabel = sublabel
-		item.Desc = fmt.Sprintf("Currently at %.0f%%. Collecting more snapshots to estimate burn rate and refine reset projection.", quota.Utilization)
 		return item
 	}
 
 	if rate.Rate < 0.01 {
 		item.Type = "forecast"
 		item.Severity = "positive"
-		item.Metric = "Idle"
+		item.Metric = "Flat"
 		item.Sublabel = sublabel
-		item.Desc = fmt.Sprintf("Currently at %.0f%%. No meaningful burn detected recently, so this quota looks stable through the rest of the cycle.", quota.Utilization)
+		item.Desc = fmt.Sprintf("Currently at %.0f%%. No measurable increase in the last 30 minutes, so this window is on pace to finish near %.0f%%.", quota.Utilization, projected)
 		return item
 	}
 
@@ -172,20 +173,33 @@ func buildCommandCodeBurnRateInsight(quota api.CommandCodeQuota, rate commandCod
 }
 
 func (h *Handler) buildCommandCodeCurrent() map[string]interface{} {
+	response, _, _ := h.buildCommandCodeCurrentOK()
+	return response
+}
+
+// buildCommandCodeCurrentOK is buildCommandCodeCurrent with an explicit storage
+// outcome. readOK is false only when the read that supplied the payload failed.
+// The per-quota read is a refinement, so its failure still leaves the latest
+// snapshot payload intact.
+func (h *Handler) buildCommandCodeCurrentOK() (response map[string]interface{}, readOK bool, hasData bool) {
 	now := time.Now().UTC()
-	response := map[string]interface{}{
+	response = map[string]interface{}{
 		"capturedAt": now.Format(time.RFC3339),
 		"quotas":     []interface{}{},
 	}
 
 	if h.store == nil {
-		return response
+		return response, true, false
 	}
 
 	latest, err := h.store.QueryLatestCommandCode()
-	if err != nil || latest == nil {
-		return response
+	if err != nil {
+		return response, false, false
 	}
+	if latest == nil {
+		return response, true, false
+	}
+	hasData = true
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
 	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
@@ -281,7 +295,7 @@ func (h *Handler) buildCommandCodeCurrent() map[string]interface{} {
 			response["quotas"] = append(response["quotas"].([]interface{}), quotaFromLatest(q, latest.CapturedAt))
 		}
 		applyDisplayModeToResponse(response, h.getDisplayMode("commandcode"))
-		return response
+		return response, true, hasData
 	}
 
 	sort.SliceStable(latestPerQuota, func(i, j int) bool {
@@ -307,7 +321,7 @@ func (h *Handler) buildCommandCodeCurrent() map[string]interface{} {
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("commandcode"))
-	return response
+	return response, true, hasData
 }
 
 func (h *Handler) historyCommandCode(w http.ResponseWriter, r *http.Request) {
@@ -318,7 +332,7 @@ func (h *Handler) historyCommandCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start, end := parseProviderHistoryRange(r.URL.Query().Get("range"))
-	snapshots, err := h.store.QueryCommandCodeRange(start, end, 200)
+	snapshots, err := h.store.QueryCommandCodeChartRange(start, end)
 	if err != nil {
 		h.logger.Error("failed to query Command Code history", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query history")
@@ -437,7 +451,7 @@ func (h *Handler) cycleOverviewCommandCode(w http.ResponseWriter, r *http.Reques
 		groupBy = api.CommandCodeQuotaFiveHour
 	}
 
-	overview, err := h.store.QueryCommandCodeCycleOverview(groupBy, parseCycleOverviewLimit(r))
+	overview, err := h.store.QueryCommandCodeCycleOverview(groupBy, cycleOverviewProviderLimit(r))
 	if err != nil {
 		h.logger.Error("failed to query Command Code cycle overview", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query cycle overview")
@@ -464,7 +478,7 @@ func (h *Handler) summaryCommandCode(w http.ResponseWriter, _ *http.Request) {
 
 func (h *Handler) insightsCommandCode(w http.ResponseWriter, _ *http.Request, rangeDur time.Duration) {
 	hidden := h.getHiddenInsightKeys()
-	respondJSON(w, http.StatusOK, h.buildCommandCodeInsights(hidden, rangeDur))
+	respondInsights(w, h.buildCommandCodeInsights(hidden, rangeDur))
 }
 
 func (h *Handler) buildCommandCodeSummaryMap() map[string]interface{} {
@@ -508,6 +522,7 @@ func (h *Handler) buildCommandCodeInsights(hidden map[string]bool, _ time.Durati
 	}
 
 	latest, err := h.store.QueryLatestCommandCode()
+	markPartial(&resp.partial, err)
 	if err != nil || latest == nil || len(latest.Quotas) == 0 {
 		return resp
 	}
@@ -574,9 +589,12 @@ func (h *Handler) buildCommandCodeInsights(hidden map[string]bool, _ time.Durati
 		}
 	}
 
+	now := time.Now()
 	for _, quota := range quotas {
-		// A quota with no cap has no meaningful percentage to forecast.
-		if quota.Limit <= 0 {
+		// A dollar balance has no percentage to forecast: the remaining credit
+		// is already a headline stat, so a "Monthly Burn Rate" here would be a
+		// projection of the raw spend, not utilization.
+		if quota.Limit <= 0 || quota.Format == api.CommandCodeQuotaFormatCurrency {
 			continue
 		}
 		rate := h.computeCommandCodeRate(quota.Name, quota.Utilization, summaries[quota.Name])
@@ -584,22 +602,62 @@ func (h *Handler) buildCommandCodeInsights(hidden map[string]bool, _ time.Durati
 		if hidden[insightKey] {
 			continue
 		}
-		value := "Analyzing..."
-		if rate.HasRate {
-			value = fmt.Sprintf("%.1f%%/hr", rate.Rate)
-		}
 		insight := buildCommandCodeBurnRateInsight(quota, rate)
+		if insight.Metric == "" {
+			continue
+		}
 		resp.Stats = append(resp.Stats, commandCodeInsightStat{
 			Key:      insightKey,
 			Label:    fmt.Sprintf("%s Burn Rate", commandCodeDisplayName(quota.Name)),
-			Value:    value,
+			Value:    insight.Metric,
 			Sublabel: insight.Sublabel,
 			Metric:   insight.Metric,
 			Severity: insight.Severity,
 			Desc:     insight.Desc,
 		})
+		if insight.Severity == "negative" || insight.Severity == "warning" {
+			resp.Insights = appendWindowInsight(resp.Insights, insight)
+		}
+		if quota.ResetsAt != nil && !hidden["reset_"+quota.Name] {
+			creditsLeft := quota.Limit - quota.Used
+			resetIn := quota.ResetsAt.Sub(now)
+			if resetIn <= 0 {
+				continue
+			}
+			// rate.Rate is utilization percent per hour while Used is credits;
+			// convert through the cap before comparing against Limit.
+			projected := quota.Used + rate.Rate/100*quota.Limit*resetIn.Hours()
+			desc := fmt.Sprintf("%s resets in %s with %.2f credits left. No measurable burn right now, so the window should finish with credits to spare.", commandCodeDisplayName(quota.Name), formatDuration(resetIn), creditsLeft)
+			switch {
+			case rate.HasRate && projected >= quota.Limit:
+				desc = fmt.Sprintf("%s resets in %s. At the current rate the remaining %.2f credits would run out first.", commandCodeDisplayName(quota.Name), formatDuration(resetIn), creditsLeft)
+			case rate.HasRate && projected >= quota.Limit*0.8:
+				desc = fmt.Sprintf("%s resets in %s and current burn projects %.2f of %.2f credits used, close to the cap.", commandCodeDisplayName(quota.Name), formatDuration(resetIn), projected, quota.Limit)
+			case rate.HasRate:
+				desc = fmt.Sprintf("%s resets in %s. Current burn projects %.2f of %.2f credits used, leaving about %.2f.", commandCodeDisplayName(quota.Name), formatDuration(resetIn), projected, quota.Limit, quota.Limit-projected)
+			}
+			severity := "info"
+			switch {
+			case rate.HasRate && projected >= quota.Limit:
+				severity = "negative"
+			case rate.HasRate && projected >= quota.Limit*0.8:
+				severity = "warning"
+			case rate.HasRate:
+				severity = "positive"
+			}
+			resp.Insights = appendWindowInsight(resp.Insights, insightItem{
+				Key:      "reset_" + quota.Name,
+				Type:     "window",
+				Severity: severity,
+				Title:    commandCodeDisplayName(quota.Name) + " Reset",
+				Metric:   formatDuration(resetIn),
+				Sublabel: fmt.Sprintf("%.2f of %.2f credits left", creditsLeft, quota.Limit),
+				Desc:     desc,
+			})
+		}
 	}
 
+	resp.Stats, resp.Insights = boundWindowInsights(resp.Stats, resp.Insights)
 	return resp
 }
 
@@ -651,11 +709,12 @@ func (h *Handler) loggingHistoryCommandCode(w http.ResponseWriter, r *http.Reque
 		row := make(map[string]loggingHistoryCrossQuota, len(snap.Quotas))
 		for _, q := range snap.Quotas {
 			row[q.Name] = loggingHistoryCrossQuota{
+				Format: string(q.Format), ResetsAt: q.ResetsAt,
 				Name:     q.Name,
 				Value:    q.Used,
 				Limit:    q.Limit,
 				Percent:  q.Utilization,
-				HasValue: q.Used > 0 || q.Limit > 0,
+				HasValue: true,
 				HasLimit: q.Limit > 0,
 			}
 		}

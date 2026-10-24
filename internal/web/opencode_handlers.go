@@ -2,13 +2,26 @@ package web
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/onllm-dev/onwatch/v2/internal/api"
 	"github.com/onllm-dev/onwatch/v2/internal/tracker"
 )
+
+// openCodeQuotaStatus maps the upstream window status (key mode) to the
+// dashboard status vocabulary. A window whose status is not "ok" is critical
+// whatever its percent; an empty or unknown status falls back to the percent
+// bands, so an unrecognised value never silently reads as healthy.
+func openCodeQuotaStatus(utilization float64, status string) string {
+	if s := strings.TrimSpace(status); s != "" && !strings.EqualFold(s, "ok") {
+		return "critical"
+	}
+	return utilStatus(utilization)
+}
 
 // SetOpenCodeTracker sets the OpenCode tracker for usage summary enrichment.
 func (h *Handler) SetOpenCodeTracker(t *tracker.OpenCodeTracker) {
@@ -23,7 +36,12 @@ func (h *Handler) currentOpenCode(w http.ResponseWriter, _ *http.Request) {
 type opencodeInsightsResponse struct {
 	Stats    []opencodeInsightStat `json:"stats"`
 	Insights []insightItem         `json:"insights"`
+	// partial marks an answer built after a swallowed read error; it is
+	// served but never cached.
+	partial bool
 }
+
+func (r opencodeInsightsResponse) isPartial() bool { return r.partial }
 
 // opencodeInsightStat is a stats-row shape that carries linked forecast metadata for the OpenCode dashboard.
 type opencodeInsightStat struct {
@@ -84,14 +102,13 @@ func (h *Handler) computeOpenCodeRate(quotaName string, currentUtil float64, sum
 			first := points[0]
 			last := points[len(points)-1]
 			elapsed := last.CapturedAt.Sub(first.CapturedAt)
-			if elapsed >= 5*time.Minute {
-				delta := last.Utilization - first.Utilization
-				if delta > 0 {
-					result.Rate = delta / elapsed.Hours()
-					result.HasRate = true
-				} else {
-					result.HasRate = true
-				}
+			// A handful of polls over the full window is the only trustworthy
+			// basis for an hourly rate; extrapolating from a short burst
+			// produces the misleading double-digit rates the dashboard used to
+			// show for the monthly window.
+			if elapsed >= 20*time.Minute {
+				result.Rate = math.Max(0, last.Utilization-first.Utilization) / elapsed.Hours()
+				result.HasRate = true
 			}
 		}
 	}
@@ -118,6 +135,8 @@ func (h *Handler) computeOpenCodeRate(quotaName string, currentUtil float64, sum
 	return result
 }
 
+// buildOpenCodeBurnRateInsight returns the card for a measured rate, or an
+// empty Metric until a window long enough to measure exists.
 func buildOpenCodeBurnRateInsight(quota api.OpenCodeQuota, rate opencodeQuotaRate) insightItem {
 	item := insightItem{
 		Key:   fmt.Sprintf("forecast_%s", quota.Name),
@@ -138,20 +157,16 @@ func buildOpenCodeBurnRateInsight(quota api.OpenCodeQuota, rate opencodeQuotaRat
 	}
 
 	if !rate.HasRate {
-		item.Type = "forecast"
-		item.Severity = "info"
-		item.Metric = "Analyzing..."
-		item.Sublabel = sublabel
-		item.Desc = fmt.Sprintf("Currently at %.0f%%. Collecting more snapshots to estimate burn rate and refine reset projection.", quota.Utilization)
 		return item
 	}
 
 	if rate.Rate < 0.01 {
+		// A measured flat window is a real result, not a missing one.
 		item.Type = "forecast"
 		item.Severity = "positive"
-		item.Metric = "Idle"
+		item.Metric = "Flat"
 		item.Sublabel = sublabel
-		item.Desc = fmt.Sprintf("Currently at %.0f%%. No meaningful burn detected recently, so this quota looks stable through the rest of the cycle.", quota.Utilization)
+		item.Desc = fmt.Sprintf("Currently at %.0f%%. No measurable increase in the last 30 minutes, so this window is on pace to finish near %.0f%%.", quota.Utilization, projected)
 		return item
 	}
 
@@ -179,20 +194,33 @@ func buildOpenCodeBurnRateInsight(quota api.OpenCodeQuota, rate opencodeQuotaRat
 }
 
 func (h *Handler) buildOpenCodeCurrent() map[string]interface{} {
+	response, _, _ := h.buildOpenCodeCurrentOK()
+	return response
+}
+
+// buildOpenCodeCurrentOK is buildOpenCodeCurrent with an explicit storage
+// outcome. readOK is false only when the read that supplied the payload failed.
+// The per-quota read is a refinement, so its failure still leaves the latest
+// snapshot payload intact.
+func (h *Handler) buildOpenCodeCurrentOK() (response map[string]interface{}, readOK bool, hasData bool) {
 	now := time.Now().UTC()
-	response := map[string]interface{}{
+	response = map[string]interface{}{
 		"capturedAt": now.Format(time.RFC3339),
 		"quotas":     []interface{}{},
 	}
 
 	if h.store == nil {
-		return response
+		return response, true, false
 	}
 
 	latest, err := h.store.QueryLatestOpenCode()
-	if err != nil || latest == nil {
-		return response
+	if err != nil {
+		return response, false, false
 	}
+	if latest == nil {
+		return response, true, false
+	}
+	hasData = true
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
 	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
@@ -209,7 +237,9 @@ func (h *Handler) buildOpenCodeCurrent() map[string]interface{} {
 				"used":          q.Used,
 				"limit":         q.Limit,
 				"format":        string(q.Format),
-				"status":        utilStatus(q.Utilization),
+				"percentOnly":   q.Format == api.OpenCodeQuotaFormatPercent,
+				"status":        openCodeQuotaStatus(q.Utilization, q.Status),
+				"statusLabel":   q.Status,
 				"lastUpdatedAt": latest.CapturedAt.Format(time.RFC3339),
 				"ageSeconds":    int64(now.Sub(latest.CapturedAt).Seconds()),
 			}
@@ -228,7 +258,7 @@ func (h *Handler) buildOpenCodeCurrent() map[string]interface{} {
 			response["quotas"] = append(response["quotas"].([]interface{}), quotaMap)
 		}
 		applyDisplayModeToResponse(response, h.getDisplayMode("opencode"))
-		return response
+		return response, true, hasData
 	}
 
 	sort.SliceStable(latestPerQuota, func(i, j int) bool {
@@ -250,7 +280,9 @@ func (h *Handler) buildOpenCodeCurrent() map[string]interface{} {
 			"used":          q.Used,
 			"limit":         q.Limit,
 			"format":        q.Format,
-			"status":        utilStatus(q.Utilization),
+			"percentOnly":   q.Format == string(api.OpenCodeQuotaFormatPercent),
+			"status":        openCodeQuotaStatus(q.Utilization, q.Status),
+			"statusLabel":   q.Status,
 			"lastUpdatedAt": q.CapturedAt.Format(time.RFC3339),
 			"ageSeconds":    int64(age.Seconds()),
 			"isStale":       age > 30*time.Minute,
@@ -271,7 +303,7 @@ func (h *Handler) buildOpenCodeCurrent() map[string]interface{} {
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("opencode"))
-	return response
+	return response, true, hasData
 }
 
 func (h *Handler) historyOpenCode(w http.ResponseWriter, r *http.Request) {
@@ -305,7 +337,7 @@ func (h *Handler) historyOpenCode(w http.ResponseWriter, r *http.Request) {
 		start = now.Add(-7 * 24 * time.Hour)
 	}
 
-	snapshots, err := h.store.QueryOpenCodeRange(start, now, 200)
+	snapshots, err := h.store.QueryOpenCodeChartRange(start, now)
 	if err != nil {
 		h.logger.Error("failed to query OpenCode history", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query history")
@@ -404,26 +436,50 @@ func (h *Handler) cyclesOpenCode(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, cycles)
 }
 
+// cycleOverviewProviderLimit caps the per-provider cycle overview at the
+// project's 200-cycle query budget. Each cycle costs an extra quota-values
+// query, so the generic 500-row page limit does not apply here.
+func cycleOverviewProviderLimit(r *http.Request) int {
+	const maxCycles = 200
+	limit := parseCycleOverviewLimit(r)
+	if limit > maxCycles {
+		return maxCycles
+	}
+	return limit
+}
+
 func (h *Handler) cycleOverviewOpenCode(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if h.store == nil {
-		respondJSON(w, http.StatusOK, []interface{}{})
+		respondJSON(w, http.StatusOK, map[string]interface{}{"cycles": []interface{}{}, "quotaNames": []string{}})
 		return
 	}
 
-	groupBy := r.URL.Query().Get("group_by")
+	groupBy := r.URL.Query().Get("groupBy")
+	if groupBy == "" {
+		groupBy = r.URL.Query().Get("group_by")
+	}
 	if groupBy == "" {
 		groupBy = "five_hour"
 	}
 
-	overview, err := h.store.QueryOpenCodeCycleOverview(groupBy, 50)
+	overview, err := h.store.QueryOpenCodeCycleOverview(groupBy, cycleOverviewProviderLimit(r))
 	if err != nil {
 		h.logger.Error("failed to query OpenCode cycle overview", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query cycle overview")
 		return
 	}
 
-	respondJSON(w, http.StatusOK, overview)
+	quotaNames, err := h.store.QueryAllOpenCodeQuotaNames()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to query quota names")
+		return
+	}
+	sort.SliceStable(quotaNames, func(i, j int) bool { return opencodeQuotaOrder(quotaNames[i]) < opencodeQuotaOrder(quotaNames[j]) })
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"provider": "opencode", "groupBy": groupBy, "quotaNames": quotaNames,
+		"cycles": cycleOverviewRowsToJSON(overview),
+	})
 }
 
 func (h *Handler) summaryOpenCode(w http.ResponseWriter, r *http.Request) {
@@ -433,7 +489,7 @@ func (h *Handler) summaryOpenCode(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) insightsOpenCode(w http.ResponseWriter, _ *http.Request, rangeDur time.Duration) {
 	hidden := h.getHiddenInsightKeys()
-	respondJSON(w, http.StatusOK, h.buildOpenCodeInsights(hidden, rangeDur))
+	respondInsights(w, h.buildOpenCodeInsights(hidden, rangeDur))
 }
 
 func (h *Handler) opencodeQuotaNames() []string {
@@ -488,6 +544,7 @@ func (h *Handler) buildOpenCodeInsights(hidden map[string]bool, _ time.Duration)
 	}
 
 	latest, err := h.store.QueryLatestOpenCode()
+	markPartial(&resp.partial, err)
 	if err != nil || latest == nil || len(latest.Quotas) == 0 {
 		return resp
 	}
@@ -533,33 +590,90 @@ func (h *Handler) buildOpenCodeInsights(hidden map[string]bool, _ time.Duration)
 			}
 		}
 	}
-	if len(selected) == 0 {
-		selected = quotas
-	}
-
+	// The three upstream windows are distinct meters; an unrecognised quota has
+	// no display name or documented reset semantics, so it is not charted here.
+	now := time.Now()
 	for _, quota := range selected {
 		rate := h.computeOpenCodeRate(quota.Name, quota.Utilization, summaries[quota.Name])
 		insightKey := fmt.Sprintf("forecast_%s", quota.Name)
-		if hidden[insightKey] {
+		if !hidden[insightKey] {
+			insight := buildOpenCodeBurnRateInsight(quota, rate)
+			if insight.Metric != "" {
+				resp.Stats = append(resp.Stats, opencodeInsightStat{
+					Key:      insightKey,
+					Label:    fmt.Sprintf("%s Burn Rate", opencodeDisplayName(quota.Name)),
+					Value:    insight.Metric,
+					Sublabel: insight.Sublabel,
+					Metric:   insight.Metric,
+					Severity: insight.Severity,
+					Desc:     insight.Desc,
+				})
+				if insight.Severity == "negative" || insight.Severity == "warning" {
+					resp.Insights = appendWindowInsight(resp.Insights, insight)
+				}
+			}
+		}
+		if quota.ResetsAt == nil || hidden["reset_"+quota.Name] {
 			continue
 		}
-		value := "Analyzing..."
-		if rate.HasRate {
-			value = fmt.Sprintf("%.1f%%/hr", rate.Rate)
+		resetIn := quota.ResetsAt.Sub(now)
+		if resetIn <= 0 {
+			continue
 		}
-		insight := buildOpenCodeBurnRateInsight(quota, rate)
-		resp.Stats = append(resp.Stats, opencodeInsightStat{
-			Key:      insightKey,
-			Label:    fmt.Sprintf("%s Burn Rate", opencodeDisplayName(quota.Name)),
-			Value:    value,
-			Sublabel: insight.Sublabel,
-			Metric:   insight.Metric,
-			Severity: insight.Severity,
-			Desc:     insight.Desc,
+		display := opencodeDisplayName(quota.Name)
+		remaining := 100 - quota.Utilization
+		desc := fmt.Sprintf("%s resets in %s with %.0f%% of the window still available.", display, formatDuration(resetIn), remaining)
+		severity := "info"
+		switch {
+		case rate.HasRate && rate.ExhaustsFirst:
+			severity = "negative"
+			desc = fmt.Sprintf("%s resets in %s. At the current burn the remaining %.0f%% would be used in %s, before the window resets.", display, formatDuration(resetIn), remaining, formatDuration(rate.TimeToExhaust))
+		case rate.HasRate && rate.ProjectedPct >= 80:
+			severity = "warning"
+			desc = fmt.Sprintf("%s resets in %s and current burn projects %.0f%% by then, close to the limit.", display, formatDuration(resetIn), rate.ProjectedPct)
+		case rate.HasRate:
+			severity = "positive"
+			desc = fmt.Sprintf("%s resets in %s. Current burn projects %.0f%% by then, leaving about %.0f%%.", display, formatDuration(resetIn), rate.ProjectedPct, 100-rate.ProjectedPct)
+		}
+		resp.Insights = appendWindowInsight(resp.Insights, insightItem{
+			Key:      "reset_" + quota.Name,
+			Type:     "window",
+			Severity: severity,
+			Title:    display + " Reset",
+			Metric:   formatDuration(resetIn),
+			Sublabel: fmt.Sprintf("%.0f%% used", quota.Utilization),
+			Desc:     desc,
 		})
 	}
 
+	resp.Stats, resp.Insights = boundWindowInsights(resp.Stats, resp.Insights)
 	return resp
+}
+
+// maxProviderInsights bounds the dashboard insight payload per CLAUDE.md.
+const maxProviderInsights = 50
+
+// boundWindowInsights caps the payload without dropping stats the page needs.
+func boundWindowInsights[T any](stats []T, insights []insightItem) ([]T, []insightItem) {
+	room := maxProviderInsights - len(stats)
+	if room < 0 {
+		room = 0
+	}
+	if len(insights) > room {
+		insights = insights[:room]
+	}
+	return stats, insights
+}
+
+// appendWindowInsight appends unless the key is already present, keeping the
+// window-provider payloads free of duplicate cards.
+func appendWindowInsight(items []insightItem, item insightItem) []insightItem {
+	for _, existing := range items {
+		if existing.Key == item.Key {
+			return items
+		}
+	}
+	return append(items, item)
 }
 
 func (h *Handler) loggingHistoryOpenCode(w http.ResponseWriter, r *http.Request) {
@@ -610,11 +724,12 @@ func (h *Handler) loggingHistoryOpenCode(w http.ResponseWriter, r *http.Request)
 		row := make(map[string]loggingHistoryCrossQuota, len(snap.Quotas))
 		for _, q := range snap.Quotas {
 			row[q.Name] = loggingHistoryCrossQuota{
+				Format: string(q.Format), ResetsAt: q.ResetsAt,
 				Name:     q.Name,
 				Value:    q.Used,
 				Limit:    q.Limit,
 				Percent:  q.Utilization,
-				HasValue: q.Used > 0 || q.Limit > 0,
+				HasValue: true,
 				HasLimit: q.Limit > 0,
 			}
 		}

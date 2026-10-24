@@ -347,10 +347,7 @@ function groupedAccountEntry(provider, accounts) {
     cardKey: sanitizeProviderCardKey(provider),
     title: bothProviderNames[provider] || toTitleCase(provider),
     badge: `${visible.length} accounts`,
-    // The promo is provider-wide, so any account can carry it.
-    promoHtml: provider === 'anthropic' && visible.some(account => account && account.promo)
-      ? promoTagHTML()
-      : '',
+    peakMeta: peakMetaForProvider(provider),
     snapshotAt: oldestSnapshotAt(visible),
     accountsGroup: visible,
   };

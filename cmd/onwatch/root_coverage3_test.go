@@ -227,7 +227,7 @@ func TestFreshSetup_AllProviders(t *testing.T) {
 	t.Setenv("PATH", "")
 
 	input := strings.Join([]string{
-		"13",           // All providers
+		"14",           // All providers
 		"syn_abc12345", // synthetic key
 		"zai-key",      // zai key
 		"y",            // use default zai URL
@@ -242,6 +242,7 @@ func TestFreshSetup_AllProviders(t *testing.T) {
 		"n",            // muse: do not enable without credentials
 		"",             // commandcode: no key, auto-detect later
 		"n",            // commandcode: do not enable without credentials
+		"",             // opencode go: skip
 		"1",            // antigravity source: both
 		"",             // admin user (default)
 		"",             // auto-generate password
@@ -279,7 +280,7 @@ func TestFreshSetup_MultipleProviders_Choice6(t *testing.T) {
 	t.Setenv("PATH", "")
 
 	input := strings.Join([]string{
-		"12",           // Multiple
+		"13",           // Multiple
 		"y",            // add synthetic
 		"syn_abc12345", // synthetic key
 		"n",            // skip zai
@@ -292,6 +293,7 @@ func TestFreshSetup_MultipleProviders_Choice6(t *testing.T) {
 		"n",            // skip ollama
 		"n",            // skip muse
 		"n",            // skip commandcode
+		"n",            // skip opencode go
 		"1",            // antigravity source: both
 		"",             // admin user (default)
 		"",             // auto-generate password
@@ -1490,6 +1492,10 @@ func runDaemonSubprocess(t *testing.T, env []string, waitMs int) {
 		cmd.Process.Kill()
 		<-done
 	}
+	// The child is gone, but on Windows a terminated process can still have a
+	// write in flight into its sandbox home. Empty that home here with retries
+	// so t.TempDir's cleanup does not fail with "directory is not empty".
+	cleanupDaemonSandbox(t, env)
 }
 
 // TestDaemonChildRun_DebugModeAntigravity starts a real daemon in debug mode
@@ -2144,6 +2150,7 @@ func TestDaemonize_ViaSubprocess(t *testing.T) {
 			}
 		}
 	}
+	cleanupDaemonSandbox(t, cmd.Env)
 }
 
 // TestDaemonChildRun_MigrateDBPath exercises the migrateDBLocation path (no explicit DB).
@@ -3885,14 +3892,14 @@ func TestFixExplicitDBPath_CanonicalHasMoreData(t *testing.T) {
 		t.Fatalf("write canonical: %v", err)
 	}
 
-	// Create explicit path with small data
-	explicitDir := t.TempDir()
-	explicitPath := filepath.Join(explicitDir, "small.db")
-	if err := os.WriteFile(explicitPath, []byte("tiny"), 0o644); err != nil {
+	// The legacy relative default with small data. Run from an empty dir so the
+	// relative path points at the file we create here.
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile("./onwatch.db", []byte("tiny"), 0o644); err != nil {
 		t.Fatalf("write explicit: %v", err)
 	}
 
-	cfg := &config.Config{DBPath: explicitPath}
+	cfg := &config.Config{DBPath: "./onwatch.db"}
 	logger := testLogger()
 	fixExplicitDBPath(cfg, logger)
 
@@ -3928,7 +3935,8 @@ func TestFixExplicitDBPath_CanonicalDoesNotExist(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// fixExplicitDBPath() - explicit path doesn't exist, canonical does
+// fixExplicitDBPath() - absolute explicit path doesn't exist, canonical does:
+// the deliberate absolute path is kept, never redirected to production.
 // ---------------------------------------------------------------------------
 
 func TestFixExplicitDBPath_ExplicitMissingCanonicalExists(t *testing.T) {
@@ -3952,9 +3960,9 @@ func TestFixExplicitDBPath_ExplicitMissingCanonicalExists(t *testing.T) {
 	logger := testLogger()
 	fixExplicitDBPath(cfg, logger)
 
-	// Should redirect to canonical
-	if cfg.DBPath != canonPath {
-		t.Fatalf("expected redirect to canonical, got %q", cfg.DBPath)
+	// Absolute path is deliberate: keep it.
+	if cfg.DBPath != explicitPath {
+		t.Fatalf("expected absolute path kept %q, got %q", explicitPath, cfg.DBPath)
 	}
 }
 

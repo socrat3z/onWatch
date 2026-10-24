@@ -73,23 +73,20 @@ func TestCopilotAgent_SinglePoll(t *testing.T) {
 	t.Parallel()
 	ag, str, _ := setupCopilotTest(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go ag.Run(ctx)
 
-	// Wait for at least one poll
-	time.Sleep(250 * time.Millisecond)
+	// Poll for the stored snapshot rather than sleeping a fixed window: a
+	// loaded CI runner can starve the goroutine past any fixed sleep.
+	var latest *api.CopilotSnapshot
+	waitUntil(t, 10*time.Second, func() bool {
+		var err error
+		latest, err = str.QueryLatestCopilot()
+		return err == nil && latest != nil
+	}, "a stored Copilot snapshot")
 	cancel()
-
-	// Verify a snapshot was stored
-	latest, err := str.QueryLatestCopilot()
-	if err != nil {
-		t.Fatalf("QueryLatestCopilot: %v", err)
-	}
-	if latest == nil {
-		t.Fatal("Expected snapshot after poll")
-	}
 	if latest.CopilotPlan != "individual_pro" {
 		t.Errorf("CopilotPlan = %q, want individual_pro", latest.CopilotPlan)
 	}

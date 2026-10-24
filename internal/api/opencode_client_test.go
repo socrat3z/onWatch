@@ -128,11 +128,17 @@ func TestOpenCodeClient_FetchSnapshot_MissingConfigMakesNoRequest(t *testing.T) 
 }
 
 // The reuse window is per credential: a cookie never serves a cached API-key
-// status (or another workspace's), and vice versa.
+// status (or another workspace's), and vice versa. The key path reads the
+// usage API; the cookie path reads the console status.
 func TestOpenCodeClient_StatusReuseIsPerCredential(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
+	var usageCalls, statusCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == openCodeGoUsagePath {
+			usageCalls.Add(1)
+			_, _ = w.Write([]byte(zenUsageBody))
+			return
+		}
+		statusCalls.Add(1)
 		_, _ = w.Write([]byte(goStatusBody))
 	}))
 	defer srv.Close()
@@ -140,8 +146,9 @@ func TestOpenCodeClient_StatusReuseIsPerCredential(t *testing.T) {
 	ctx := context.Background()
 	steps := []func() error{
 		func() error { _, err := c.FetchUsageSnapshot(ctx, "k"); return err },
+		func() error { _, err := c.FetchUsageSnapshot(ctx, "k"); return err }, // reused
 		func() error { _, err := c.FetchSnapshot(ctx, "ws", "k"); return err },
-		func() error { _, err := c.FetchSnapshot(ctx, "ws", "k"); return err },
+		func() error { _, err := c.FetchSnapshot(ctx, "ws", "k"); return err }, // reused
 		func() error { _, err := c.FetchSnapshot(ctx, "ws2", "k"); return err },
 	}
 	for i, step := range steps {
@@ -149,8 +156,11 @@ func TestOpenCodeClient_StatusReuseIsPerCredential(t *testing.T) {
 			t.Fatalf("step %d: %v", i, err)
 		}
 	}
-	if calls.Load() != 3 {
-		t.Fatalf("status requests = %d, want 3 (key, cookie ws, cookie ws2)", calls.Load())
+	if usageCalls.Load() != 1 {
+		t.Fatalf("usage requests = %d, want 1 (key reused)", usageCalls.Load())
+	}
+	if statusCalls.Load() != 2 {
+		t.Fatalf("status requests = %d, want 2 (cookie ws, cookie ws2)", statusCalls.Load())
 	}
 }
 

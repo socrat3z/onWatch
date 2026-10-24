@@ -455,15 +455,21 @@ func TestCodexAgent_SetCredentialsRefresh(t *testing.T) {
 
 	agent := NewCodexAgent(client, str, tr, 5*time.Second, logger, nil)
 
-	// Set a credentials refresh function that returns non-expiring credentials
+	// Set a credentials refresh function that returns non-expiring credentials.
+	// The access token must be comfortably beyond the 6h refresh threshold, or
+	// the proactive refresh path fires (and must not touch the real endpoint).
 	agent.SetCredentialsRefresh(func() *api.CodexCredentials {
 		return &api.CodexCredentials{
 			AccessToken:  "test-token",
 			RefreshToken: "test-refresh",
-			ExpiresIn:    2 * time.Hour, // Not expiring soon
-			ExpiresAt:    time.Now().Add(2 * time.Hour),
+			ExpiresIn:    48 * time.Hour, // Not expiring soon
+			ExpiresAt:    time.Now().Add(48 * time.Hour),
 		}
 	})
+	// Safety net: a test must never reach the real OAuth endpoint.
+	agent.oauthRefresh = func(ctx context.Context, refreshToken string) (*api.CodexOAuthTokenResponse, error) {
+		return nil, api.ErrCodexOAuthRefreshFailed
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

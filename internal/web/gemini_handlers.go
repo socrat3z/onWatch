@@ -17,22 +17,29 @@ func (h *Handler) currentGemini(w http.ResponseWriter, r *http.Request) {
 
 // buildGeminiCurrent builds current Gemini response.
 func (h *Handler) buildGeminiCurrent() map[string]interface{} {
+	response, _, _ := h.buildGeminiCurrentOK()
+	return response
+}
+
+// buildGeminiCurrentOK is buildGeminiCurrent with an explicit storage outcome.
+// readOK is false only when the store read itself failed.
+func (h *Handler) buildGeminiCurrentOK() (response map[string]interface{}, readOK bool, hasData bool) {
 	now := time.Now().UTC()
-	response := map[string]interface{}{
+	response = map[string]interface{}{
 		"capturedAt": now.Format(time.RFC3339),
 		"quotas":     []interface{}{},
 	}
 	if h.store == nil {
-		return response
+		return response, true, false
 	}
 
 	latest, err := h.store.QueryLatestGemini()
 	if err != nil {
 		h.logger.Error("failed to query latest Gemini snapshot", "error", err)
-		return response
+		return response, false, false
 	}
 	if latest == nil {
-		return response
+		return response, true, false
 	}
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
@@ -72,7 +79,7 @@ func (h *Handler) buildGeminiCurrent() map[string]interface{} {
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("gemini"))
-	return response
+	return response, true, true
 }
 
 // historyGemini returns Gemini usage history as a flat array.
@@ -93,7 +100,7 @@ func (h *Handler) historyGemini(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	start := now.Add(-rangeDur)
 
-	snapshots, err := h.store.QueryGeminiRange(start, now)
+	snapshots, err := h.store.QueryGeminiRangeSampled(start, now)
 	if err != nil {
 		h.logger.Error("failed to query Gemini history", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query history")
@@ -258,7 +265,7 @@ func (h *Handler) summaryGemini(w http.ResponseWriter, r *http.Request) {
 // insightsGemini returns Gemini usage insights matching insightsResponse contract.
 func (h *Handler) insightsGemini(w http.ResponseWriter, _ *http.Request, rangeDur time.Duration) {
 	hidden := h.getHiddenInsightKeys()
-	respondJSON(w, http.StatusOK, h.buildGeminiInsights(hidden, rangeDur))
+	respondInsights(w, h.buildGeminiInsights(hidden, rangeDur))
 }
 
 // buildGeminiInsights builds Gemini insights matching the Anthropic insights pattern:
@@ -272,6 +279,7 @@ func (h *Handler) buildGeminiInsights(hidden map[string]bool, _ time.Duration) i
 
 	now := time.Now().UTC()
 	latest, err := h.store.QueryLatestGemini()
+	markPartial(&resp.partial, err)
 	if err != nil || latest == nil {
 		return resp
 	}
@@ -315,6 +323,7 @@ func (h *Handler) buildGeminiInsights(hidden map[string]bool, _ time.Duration) i
 		seen := map[int64]bool{}
 		for _, mid := range memberIDs {
 			cycles, err := h.store.QueryGeminiCycleHistory(mid, 50)
+			markPartial(&resp.partial, err)
 			if err != nil {
 				continue
 			}

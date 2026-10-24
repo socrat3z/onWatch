@@ -62,20 +62,21 @@ func TestMiniMaxAgent_SinglePoll(t *testing.T) {
 	t.Parallel()
 	ag, s, _ := setupMiniMaxAgentTest(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go ag.Run(ctx)
-	time.Sleep(250 * time.Millisecond)
-	cancel()
 
-	latest, err := s.QueryLatestMiniMax(2)
-	if err != nil {
-		t.Fatalf("QueryLatestMiniMax: %v", err)
-	}
-	if latest == nil {
-		t.Fatal("expected snapshot after polling")
-	}
+	// Poll for the stored snapshot rather than sleeping a fixed window: the
+	// property under test is that the agent polls and persists, and a loaded CI
+	// runner can starve the goroutine past any fixed sleep.
+	var latest *api.MiniMaxSnapshot
+	waitUntil(t, 10*time.Second, func() bool {
+		var err error
+		latest, err = s.QueryLatestMiniMax(2)
+		return err == nil && latest != nil
+	}, "a stored MiniMax snapshot")
+	cancel()
 	if len(latest.Models) == 0 {
 		t.Fatal("expected models in latest snapshot")
 	}

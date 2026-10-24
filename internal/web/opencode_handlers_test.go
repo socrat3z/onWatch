@@ -64,6 +64,98 @@ func TestBuildOpenCodeCurrent_UsesLatestSnapshot(t *testing.T) {
 	}
 }
 
+func TestOpenCodeQuotaStatus_NonOkIsCriticalWhateverPercent(t *testing.T) {
+	cases := []struct {
+		util float64
+		raw  string
+		want string
+	}{
+		{10, "exhausted", "critical"}, // low percent, but blocked
+		{10, "ok", "healthy"},
+		{10, "", "healthy"}, // cookie mode / pre-migration row
+		{10, "rate-limited", "critical"},
+		{10, "weird-unknown-value", "critical"}, // unknown is never silently healthy
+		{85, "ok", "critical"},                  // percent bands still apply
+		{65, "ok", "warning"},
+		{85, "exhausted", "critical"},
+	}
+	for _, tc := range cases {
+		if got := openCodeQuotaStatus(tc.util, tc.raw); got != tc.want {
+			t.Errorf("openCodeQuotaStatus(%v, %q) = %q, want %q", tc.util, tc.raw, got, tc.want)
+		}
+	}
+}
+
+func TestBuildOpenCodeCurrent_PercentOnlyAndStatus(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC()
+	insertTestOpenCodeSnapshot(t, s, now, []api.OpenCodeQuota{
+		{Name: "five_hour", Utilization: 10, Used: 10, Limit: 100, Format: api.OpenCodeQuotaFormatPercent, Status: "exhausted"},
+		{Name: "weekly", Utilization: 4, Used: 4, Limit: 100, Format: api.OpenCodeQuotaFormatPercent, Status: "ok"},
+	})
+
+	h := NewHandler(s, nil, nil, nil, createTestConfigWithOpenCode())
+	current := h.buildOpenCodeCurrent()
+
+	quotas, ok := current["quotas"].([]interface{})
+	if !ok || len(quotas) != 2 {
+		t.Fatalf("quotas = %#v", current["quotas"])
+	}
+	byName := map[string]map[string]interface{}{}
+	for _, raw := range quotas {
+		q, ok := raw.(map[string]interface{})
+		if !ok {
+			t.Fatalf("quota entry not a map: %#v", raw)
+		}
+		byName[q["name"].(string)] = q
+	}
+
+	if got := byName["five_hour"]["percentOnly"]; got != true {
+		t.Errorf("five_hour percentOnly = %v, want true", got)
+	}
+	if got := byName["five_hour"]["status"]; got != "critical" {
+		t.Errorf("five_hour status = %v, want critical", got)
+	}
+	if got := byName["five_hour"]["statusLabel"]; got != "exhausted" {
+		t.Errorf("five_hour statusLabel = %v, want exhausted", got)
+	}
+	if got := byName["weekly"]["status"]; got != "healthy" {
+		t.Errorf("weekly status = %v, want healthy", got)
+	}
+	if got := byName["weekly"]["statusLabel"]; got != "ok" {
+		t.Errorf("weekly statusLabel = %v, want ok", got)
+	}
+}
+
+// Cookie mode reports real dollar amounts: percentOnly must be false so the
+// card keeps showing its real "$used / $limit".
+func TestBuildOpenCodeCurrent_CurrencyIsNotPercentOnly(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC()
+	insertTestOpenCodeSnapshot(t, s, now, []api.OpenCodeQuota{
+		{Name: "weekly", Utilization: 12.8, Used: 0.38, Limit: 3.0, Format: api.OpenCodeQuotaFormatCurrency},
+	})
+
+	h := NewHandler(s, nil, nil, nil, createTestConfigWithOpenCode())
+	current := h.buildOpenCodeCurrent()
+
+	quotas := current["quotas"].([]interface{})
+	q := quotas[0].(map[string]interface{})
+	if got := q["percentOnly"]; got == true {
+		t.Fatalf("currency quota percentOnly = true, want false")
+	}
+}
+
 func TestCyclesOpenCode_DefaultsToFiveHour(t *testing.T) {
 	s, err := store.New(":memory:")
 	if err != nil {
@@ -120,16 +212,97 @@ func TestCycleOverviewOpenCode_DefaultsToFiveHour(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 
-	var overview []map[string]interface{}
-	if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
+	var response struct {
+		Cycles []map[string]interface{} `json:"cycles"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(overview) != 1 {
-		t.Fatalf("overview = %d, want 1", len(overview))
+	if len(response.Cycles) != 1 {
+		t.Fatalf("overview = %d, want 1", len(response.Cycles))
 	}
-	if got := overview[0]["QuotaType"]; got != "five_hour" {
-		t.Fatalf("QuotaType = %v, want five_hour", got)
+	if got := response.Cycles[0]["quotaType"]; got != "five_hour" {
+		t.Fatalf("quotaType = %v, want five_hour", got)
 	}
+}
+
+// TestCycleOverviewProvidersCapAt200 guards the project's bounded-query rule:
+// each overview cycle runs an extra per-cycle query, so a caller asking for the
+// generic 500-row maximum must still get at most 200 cycles.
+func TestCycleOverviewProvidersCapAt200(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+
+	t.Run("opencode", func(t *testing.T) {
+		s, err := store.New(":memory:")
+		if err != nil {
+			t.Fatalf("store.New: %v", err)
+		}
+		defer s.Close()
+		for i := 0; i < 250; i++ {
+			start := now.Add(-time.Duration(i+1) * 6 * time.Hour)
+			end := start.Add(5 * time.Hour)
+			if _, err := s.CreateOpenCodeCycle("five_hour", start, nil); err != nil {
+				t.Fatalf("CreateOpenCodeCycle: %v", err)
+			}
+			if err := s.CloseOpenCodeCycle("five_hour", end, 10, 5); err != nil {
+				t.Fatalf("CloseOpenCodeCycle: %v", err)
+			}
+		}
+
+		h := NewHandler(s, nil, nil, nil, createTestConfigWithOpenCode())
+		req := httptest.NewRequest(http.MethodGet, "/api/opencode/cycle-overview?groupBy=five_hour&limit=500", nil)
+		rec := httptest.NewRecorder()
+		h.cycleOverviewOpenCode(rec, req)
+
+		var response struct {
+			Cycles []map[string]interface{} `json:"cycles"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(response.Cycles) > 200 {
+			t.Fatalf("cycles = %d, want at most 200", len(response.Cycles))
+		}
+		if len(response.Cycles) != 200 {
+			t.Fatalf("cycles = %d, want the 200 newest", len(response.Cycles))
+		}
+	})
+
+	t.Run("commandcode", func(t *testing.T) {
+		s, err := store.New(":memory:")
+		if err != nil {
+			t.Fatalf("store.New: %v", err)
+		}
+		defer s.Close()
+		for i := 0; i < 250; i++ {
+			start := now.Add(-time.Duration(i+1) * 6 * time.Hour)
+			end := start.Add(5 * time.Hour)
+			if _, err := s.CreateCommandCodeCycle(api.CommandCodeQuotaFiveHour, start, nil); err != nil {
+				t.Fatalf("CreateCommandCodeCycle: %v", err)
+			}
+			if err := s.CloseCommandCodeCycle(api.CommandCodeQuotaFiveHour, end, 10, 5); err != nil {
+				t.Fatalf("CloseCommandCodeCycle: %v", err)
+			}
+		}
+
+		h := NewHandler(s, nil, nil, nil, createTestConfigWithCommandCode())
+		req := httptest.NewRequest(http.MethodGet, "/api/commandcode/cycle-overview?groupBy=five_hour&limit=500", nil)
+		rec := httptest.NewRecorder()
+		h.cycleOverviewCommandCode(rec, req)
+
+		var response struct {
+			Cycles []map[string]interface{} `json:"cycles"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(response.Cycles) > 200 {
+			t.Fatalf("cycles = %d, want at most 200", len(response.Cycles))
+		}
+		if len(response.Cycles) != 200 {
+			t.Fatalf("cycles = %d, want the 200 newest", len(response.Cycles))
+		}
+	})
 }
 
 func TestBuildOpenCodeSummary_WithTracker(t *testing.T) {

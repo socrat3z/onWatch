@@ -44,21 +44,32 @@ func TestAgentManagerRetryUsesCurrentInstance(t *testing.T) {
 	if err := m.RequestRetry("mistral"); err != nil {
 		t.Fatal(err)
 	}
-	m.Stop("mistral")
+
+	// Stop drains the old Run before returning, so the replacement never
+	// overlaps it. Release the old run so Stop can complete.
+	stopped := make(chan struct{})
+	go func() { m.Stop("mistral"); close(stopped) }()
+	close(old.release)
+	<-old.exited
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not return after the old Run exited")
+	}
+	if m.IsStopping("mistral") {
+		t.Fatal("stopping entry was not cleared")
+	}
+
 	m.RegisterFactory("mistral", func() (AgentRunner, error) { return current, nil })
 	if err := m.Start("mistral"); err != nil {
 		t.Fatal(err)
 	}
 	<-current.started
 	defer func() { m.StopAll(); close(current.release); <-current.exited }()
-	close(old.release)
-	<-old.exited
-	// Exercise retries throughout the old goroutine's deferred cleanup.
-	for deadline := time.Now().Add(30 * time.Millisecond); time.Now().Before(deadline); {
-		if err := m.RequestRetry("mistral"); err != nil {
-			t.Fatalf("old exit removed replacement: %v", err)
-		}
-		time.Sleep(time.Millisecond)
+
+	// Retries route to the current instance, not the drained one.
+	if err := m.RequestRetry("mistral"); err != nil {
+		t.Fatal(err)
 	}
 	if old.retries.Load() != 1 || current.retries.Load() == 0 {
 		t.Fatal("retry routed to stale instance")

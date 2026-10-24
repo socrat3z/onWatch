@@ -103,31 +103,42 @@ func TestAgent_PollsAtInterval(t *testing.T) {
 	interval := 50 * time.Millisecond
 	agent := New(client, str, tr, interval, logger, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 230*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Run agent - it will poll immediately (1), then every 50ms (4 more in 200ms)
+	// Run agent - it polls immediately, then every interval.
 	errChan := make(chan error, 1)
 	go func() {
 		errChan <- agent.Run(ctx)
 	}()
 
-	<-ctx.Done()
-	time.Sleep(10 * time.Millisecond) // Give time for cleanup
-
-	// Should have at least 4-5 polls (1 immediate + ~4 interval polls)
+	// Wait for the interval-driven polls instead of asserting against a fixed
+	// wall-clock window: the property under test is that polling continues on
+	// the interval, and a loaded CI runner can starve the ticker for seconds
+	// without violating it.
+	start := time.Now()
+	waitUntil(t, 10*time.Second, func() bool { return callCount.Load() >= 4 }, "at least 4 interval polls")
+	// Snapshot the count and elapsed time together, then cancel.
 	count := callCount.Load()
-	if count < 4 {
-		t.Errorf("Expected at least 4 API calls in 230ms with 50ms interval, got %d", count)
+	elapsed := time.Since(start)
+	cancel()
+
+	// Lower bound: four polls cannot arrive faster than three intervals, so a
+	// busy loop that ignores the interval still fails.
+	if elapsed < 2*interval {
+		t.Errorf("4 polls arrived in %v, faster than the %v interval allows (busy loop?)", elapsed, interval)
 	}
-	if count > 6 {
-		t.Errorf("Expected at most 6 API calls, got %d (too many polls)", count)
+	// Upper bound: over the actual elapsed time, the immediate poll plus one per
+	// interval (with slack for scheduling jitter) is the ceiling. This still
+	// catches an over-polling regression without being timing-fragile.
+	if maxPolls := int(elapsed/interval) + 2; int(count) > maxPolls {
+		t.Errorf("got %d polls in %v with %v interval, want at most %d (over-polling?)", count, elapsed, interval, maxPolls)
 	}
 
 	select {
 	case err := <-errChan:
-		if err != nil && err != context.DeadlineExceeded {
-			t.Errorf("Expected nil or DeadlineExceeded error, got: %v", err)
+		if err != nil && err != context.Canceled {
+			t.Errorf("Expected nil or context.Canceled error, got: %v", err)
 		}
 	case <-time.After(1 * time.Second):
 		t.Error("Agent.Run() did not return within 1s")
@@ -195,22 +206,27 @@ func TestAgent_ProcessesWithTracker(t *testing.T) {
 
 	agent := New(client, str, tr, 50*time.Millisecond, logger, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 125*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go agent.Run(ctx)
-	<-ctx.Done()
-	time.Sleep(10 * time.Millisecond)
+
+	// The tracker creates the active cycle on the first processed snapshot.
+	// Poll for it rather than reading once after a fixed sleep: a loaded CI
+	// runner can starve the agent goroutine past a fixed window, and the
+	// property under test is that the tracker ran, not how fast.
+	var activeCycle *store.ResetCycle
+	waitUntil(t, 10*time.Second, func() bool {
+		var err error
+		activeCycle, err = str.QueryActiveCycle("subscription")
+		return err == nil && activeCycle != nil
+	}, "active subscription cycle")
+	cancel()
 
 	// Check that cycles were created (indicates tracker processed snapshots)
 	cycles, _ := str.QueryCycleHistory("subscription")
 	if len(cycles) != 0 {
 		t.Logf("Found %d completed subscription cycles", len(cycles))
-	}
-
-	activeCycle, _ := str.QueryActiveCycle("subscription")
-	if activeCycle == nil {
-		t.Error("Expected active subscription cycle to exist")
 	}
 }
 
@@ -240,17 +256,16 @@ func TestAgent_APIError_Continues(t *testing.T) {
 
 	agent := New(client, str, tr, 50*time.Millisecond, logger, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 130*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go agent.Run(ctx)
-	<-ctx.Done()
-	time.Sleep(10 * time.Millisecond)
 
-	// Should have continued polling despite first error
-	if count := callCount.Load(); count < 2 {
-		t.Errorf("Expected at least 2 API calls (including error), got %d", count)
-	}
+	// Poll for the second call rather than asserting after a fixed window: the
+	// agent must keep polling after the first error, and a loaded runner can
+	// starve the ticker past any fixed sleep.
+	waitUntil(t, 10*time.Second, func() bool { return callCount.Load() >= 2 }, "a second poll after the API error")
+	cancel()
 }
 
 // TestAgent_StoreError_Continues verifies agent logs and continues on store error
@@ -459,28 +474,34 @@ func TestAgent_FirstPollImmediate(t *testing.T) {
 	startTime := time.Now()
 	agent := New(client, str, tr, 500*time.Millisecond, logger, nil) // Long interval
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go agent.Run(ctx)
-	<-ctx.Done()
-	time.Sleep(10 * time.Millisecond)
 
-	// Should have at least 1 call immediately
-	if count := callCount.Load(); count < 1 {
-		t.Fatal("Expected at least 1 immediate API call")
-	}
+	// Poll for the first call rather than sleeping a fixed window. The property
+	// under test is that the first poll is immediate, i.e. not gated on the
+	// interval tick.
+	waitUntil(t, 10*time.Second, func() bool { return callCount.Load() >= 1 }, "immediate first poll")
+	count := callCount.Load()
+	elapsed := time.Since(startTime)
+	cancel()
 
-	// First call should be within 50ms of start (immediate)
 	mu.Lock()
 	times := make([]time.Time, len(callTimes))
 	copy(times, callTimes)
 	mu.Unlock()
 	if len(times) > 0 {
-		timeToFirstCall := times[0].Sub(startTime)
-		if timeToFirstCall > 50*time.Millisecond {
-			t.Errorf("First poll should be immediate (<50ms), took %v", timeToFirstCall)
+		// Immediacy is a property relative to the interval: the first poll must
+		// arrive before the 500ms tick would have fired, not within a hard 50ms.
+		if timeToFirstCall := times[0].Sub(startTime); timeToFirstCall >= 500*time.Millisecond {
+			t.Errorf("First poll should be immediate (before the 500ms interval), took %v", timeToFirstCall)
 		}
+	}
+	// Over-polling ceiling over the actual elapsed time: the immediate poll plus
+	// one per interval (with slack) is the maximum.
+	if maxPolls := int(elapsed/(500*time.Millisecond)) + 2; int(count) > maxPolls {
+		t.Errorf("got %d polls in %v with a 500ms interval, want at most %d (over-polling?)", count, elapsed, maxPolls)
 	}
 }
 

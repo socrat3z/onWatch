@@ -16,6 +16,38 @@ import (
 	"github.com/steipete/sweetcookie"
 )
 
+// A settings save mutates the shared config while Mistral polls. NewMistralAgent
+// must copy the config at build time so a poll never reads the live pointer.
+// Run under -race; a regression would be a data race (and a torn read of the
+// browser/cookie fields the poll depends on).
+func TestMistralAgent_DoesNotReadLiveConfigDuringRun(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	shared := &config.Config{MistralEnabled: true, MistralAuthMode: "manual", MistralAuthCookie: "ory_session_test=one", PollInterval: time.Hour}
+	a := NewMistralAgent(db, shared, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a.read = func(context.Context, sweetcookie.Options) (sweetcookie.Result, error) {
+		return sweetcookie.Result{}, nil
+	}
+	a.client = &fakeMistralFetcher{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = a.Run(ctx) }()
+
+	// Simulate reconcileProviderAgents rewriting the shared config mid-run.
+	for i := 0; i < 500; i++ {
+		shared.MistralAuthCookie = "ory_session_test=rotated"
+		shared.MistralBrowser = "chrome"
+		shared.MistralBrowserProfile = "profile"
+	}
+	cancel()
+	<-done
+}
+
 func TestMistralRetryRecoversWithoutRestart(t *testing.T) {
 	db, err := store.New(":memory:")
 	if err != nil {

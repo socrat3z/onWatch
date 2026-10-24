@@ -87,8 +87,7 @@ func TestZaiAgent_Run_PollsAndStoresSnapshot(t *testing.T) {
 
 	agent := NewZaiAgent(client, str, tr, 50*time.Millisecond, logger, nil)
 
-	// Use generous timeout for race detector
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	errCh := make(chan error, 1)
@@ -96,8 +95,15 @@ func TestZaiAgent_Run_PollsAndStoresSnapshot(t *testing.T) {
 		errCh <- agent.Run(ctx)
 	}()
 
-	// Wait for at least one poll
-	time.Sleep(500 * time.Millisecond)
+	// Poll for the stored snapshot rather than sleeping a fixed window: the
+	// property under test is that the agent polls and persists, and a loaded CI
+	// runner can starve the goroutine past any fixed sleep.
+	var latest *api.ZaiSnapshot
+	waitUntil(t, 10*time.Second, func() bool {
+		var queryErr error
+		latest, queryErr = str.QueryLatestZai()
+		return queryErr == nil && latest != nil
+	}, "a stored Z.ai snapshot")
 	cancel()
 
 	// Wait for agent to fully stop before querying
@@ -110,15 +116,6 @@ func TestZaiAgent_Run_PollsAndStoresSnapshot(t *testing.T) {
 	// Verify at least one poll occurred
 	if count := callCount.Load(); count < 1 {
 		t.Errorf("Expected at least 1 API call, got %d", count)
-	}
-
-	// Verify snapshot was stored
-	latest, err := str.QueryLatestZai()
-	if err != nil {
-		t.Fatalf("QueryLatestZai error: %v", err)
-	}
-	if latest == nil {
-		t.Fatal("Expected at least one Z.ai snapshot to be stored")
 	}
 
 	// Verify the snapshot has expected values
@@ -164,7 +161,7 @@ func TestZaiAgent_Run_AuthError_ContinuesPolling(t *testing.T) {
 
 	agent := NewZaiAgent(client, str, tr, 50*time.Millisecond, logger, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	errCh := make(chan error, 1)
@@ -172,7 +169,11 @@ func TestZaiAgent_Run_AuthError_ContinuesPolling(t *testing.T) {
 		errCh <- agent.Run(ctx)
 	}()
 
-	<-ctx.Done()
+	// The first (401) poll fails; the agent must continue and poll again. Poll
+	// for the second call instead of asserting after a fixed window, since a
+	// loaded CI runner can starve the ticker.
+	waitUntil(t, 10*time.Second, func() bool { return callCount.Load() >= 2 }, "a second poll after the 401")
+	cancel()
 
 	// Wait for agent goroutine to fully stop before reading shared logBuf
 	select {
@@ -182,11 +183,6 @@ func TestZaiAgent_Run_AuthError_ContinuesPolling(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Agent.Run() did not return within 2s")
-	}
-
-	// Agent should have continued polling after 401
-	if count := callCount.Load(); count < 2 {
-		t.Errorf("Expected at least 2 API calls (continuing after auth error), got %d", count)
 	}
 
 	// Logs should contain error about Z.ai
@@ -285,8 +281,9 @@ func TestZaiAgent_Run_SessionManagerReportsPoll(t *testing.T) {
 	sm := NewSessionManager(str, "zai", 10*time.Second, logger)
 	agent := NewZaiAgent(client, str, tr, 50*time.Millisecond, logger, sm)
 
-	// Run long enough for multiple polls (values change each time -> session created)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Run until the session manager has detected a session (values change each
+	// poll, so a session is created after the 2nd poll).
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	errCh := make(chan error, 1)
@@ -294,24 +291,18 @@ func TestZaiAgent_Run_SessionManagerReportsPoll(t *testing.T) {
 		errCh <- agent.Run(ctx)
 	}()
 
-	time.Sleep(500 * time.Millisecond)
+	var sessions []*store.Session
+	waitUntil(t, 10*time.Second, func() bool {
+		var queryErr error
+		sessions, queryErr = str.QuerySessionHistory("zai")
+		return queryErr == nil && len(sessions) > 0
+	}, "a Z.ai session from the session manager")
 	cancel()
 
 	select {
 	case <-errCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Agent.Run() did not return within 2s")
-	}
-
-	// The session manager should have received poll values and created a session
-	// (since values change each poll, session should be detected after 2nd poll)
-	sessions, err := str.QuerySessionHistory("zai")
-	if err != nil {
-		t.Fatalf("QuerySessionHistory error: %v", err)
-	}
-
-	if len(sessions) == 0 {
-		t.Error("Expected at least 1 Z.ai session (usage changed between polls)")
 	}
 
 	// Session should have been closed by agent shutdown (SessionManager.Close)

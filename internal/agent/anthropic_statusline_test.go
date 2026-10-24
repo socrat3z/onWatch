@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onllm-dev/onwatch/v2/internal/store"
 	"github.com/onllm-dev/onwatch/v2/internal/testutil/testhome"
 )
 
@@ -584,5 +586,165 @@ func TestEnsureStatuslineBridge_DetectsUserChange(t *testing.T) {
 	}
 	if !strings.HasSuffix(cmd, "/usr/local/bin/new-statusline.sh") {
 		t.Errorf("expected user's new command preserved, got: %s", cmd)
+	}
+}
+
+// --- captured-at tests ---
+
+// The statusline payload has no timestamp, so the snapshot must be stamped
+// with the file's mtime. Re-stamping it with the poll time makes data up to
+// the staleness window old display as "now" (stale-data audit).
+func TestStatuslineCapturedAtUsesFileMtime(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "anthropic-statusline.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mtime := time.Now().Add(-3 * time.Minute).Truncate(time.Second)
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	now := time.Now().UTC()
+	got := readStatuslineCapturedAt(path, now)
+	if !got.Equal(mtime.UTC()) {
+		t.Fatalf("capturedAt = %v, want file mtime %v", got, mtime.UTC())
+	}
+
+	snap := statuslineToSnapshot(&StatuslineRateLimits{
+		FiveHour: &StatuslineWindow{UsedPercentage: 10},
+	}, got)
+	if !snap.CapturedAt.Equal(mtime.UTC()) {
+		t.Fatalf("snapshot CapturedAt = %v, want %v", snap.CapturedAt, mtime.UTC())
+	}
+}
+
+func TestStatuslineCapturedAtFallsBackToNow(t *testing.T) {
+	now := time.Now().UTC()
+	if got := readStatuslineCapturedAt("/nonexistent/statusline.json", now); !got.Equal(now) {
+		t.Fatalf("missing file capturedAt = %v, want %v", got, now)
+	}
+}
+
+// A file whose mtime is in the future (clock skew) must not produce a card
+// that is "fresh" for hours. Clamp it to now.
+func TestStatuslineCapturedAtClampsFutureMtime(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "anthropic-statusline.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	future := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	now := time.Now().UTC()
+	if got := readStatuslineCapturedAt(path, now); !got.Equal(now) {
+		t.Fatalf("future mtime capturedAt = %v, want clamped %v", got, now)
+	}
+}
+
+// Review item 5: an unchanged statusline file must not insert another row on
+// every poll. The bridge rewrites the file only when Claude Code refreshes, so
+// the same mtime is the same data.
+func TestStatuslinePollSkipsUnchangedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "anthropic-statusline.json")
+	payload := `{"rate_limits":{"five_hour":{"used_percentage":42},"seven_day":{"used_percentage":15}}}`
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mtime := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	defer st.Close()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	a := NewAnthropicAgent(nil, st, nil, 120*time.Second, logger, nil)
+	a.statuslinePath = path
+	a.statuslineStaleness = time.Hour
+	a.apiPollingDisabled = true
+
+	if !a.pollStatuslineOnly() {
+		t.Fatal("first poll must insert the statusline snapshot")
+	}
+	if a.pollStatuslineOnly() {
+		t.Fatal("an unchanged statusline file must be skipped")
+	}
+	before, err := st.QueryAnthropicRange(mtime.Add(-time.Hour).UTC(), time.Now().Add(time.Hour).UTC())
+	if err != nil {
+		t.Fatalf("range: %v", err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("stored rows = %d, want exactly one after two polls", len(before))
+	}
+
+	// A new mtime is new data and must insert.
+	later := mtime.Add(5 * time.Minute)
+	if err := os.Chtimes(path, later, later); err != nil {
+		t.Fatalf("chtimes again: %v", err)
+	}
+	if !a.pollStatuslineOnly() {
+		t.Fatal("a rewritten statusline file must insert")
+	}
+	after, err := st.QueryAnthropicRange(mtime.Add(-time.Hour).UTC(), time.Now().Add(time.Hour).UTC())
+	if err != nil {
+		t.Fatalf("range: %v", err)
+	}
+	if len(after) != 2 {
+		t.Fatalf("stored rows = %d, want two after the file changed", len(after))
+	}
+}
+
+// A future mtime (clock skew, or a file synced from another host) is clamped
+// for display, but dedupe must use the raw mtime. Otherwise the clamped value
+// changes every poll, so an unchanged file inserts a row per poll and is
+// labelled fresh forever.
+func TestStatuslinePoll_FutureMtimeStillDedupes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "anthropic-statusline.json")
+	payload := `{"rate_limits":{"five_hour":{"used_percentage":42}}}`
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	future := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	defer st.Close()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	a := NewAnthropicAgent(nil, st, nil, 120*time.Second, logger, nil)
+	a.statuslinePath = path
+	a.statuslineStaleness = time.Hour
+	a.apiPollingDisabled = true
+
+	if !a.pollStatuslineOnly() {
+		t.Fatal("first poll must insert the statusline snapshot")
+	}
+	for i := 0; i < 3; i++ {
+		if a.pollStatuslineOnly() {
+			t.Fatalf("poll %d inserted a duplicate: the raw mtime never changed", i+2)
+		}
+	}
+
+	rows, err := st.QueryAnthropicRange(
+		time.Now().Add(-24*time.Hour).Truncate(time.Second),
+		time.Now().Add(24*time.Hour).Truncate(time.Second),
+	)
+	if err != nil {
+		t.Fatalf("range: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("stored rows = %d, want exactly one for an unchanged file", len(rows))
 	}
 }

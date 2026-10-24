@@ -50,6 +50,7 @@ type ResetCycle struct {
 
 // CycleOverviewRow represents a single cycle with cross-quota data at peak time.
 type CycleOverviewRow struct {
+	ResetsAt    *time.Time
 	CycleID     int64
 	QuotaType   string
 	CycleStart  time.Time
@@ -485,8 +486,44 @@ func (s *Store) createTables() error {
 			account_id INTEGER NOT NULL DEFAULT 1,
 			plan_type TEXT,
 			credits_balance REAL,
+			reset_credits_count INTEGER,
 			raw_json TEXT,
 			quota_count INTEGER DEFAULT 0
+		);
+
+		-- Banked Codex reset credits per account (issue #152). A credit that
+		-- disappears from the detail response is marked gone, never deleted.
+		-- notified_at is the expiry-warning dedupe marker: one notification per
+		-- credit, persisted across restarts.
+		CREATE TABLE IF NOT EXISTS codex_reset_credits (
+			account_id INTEGER NOT NULL DEFAULT 1,
+			credit_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			reset_type TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			granted_at TEXT,
+			expires_at TEXT,
+			unsupported_by_plan INTEGER NOT NULL DEFAULT 0,
+			expiry_unknown INTEGER NOT NULL DEFAULT 0,
+			first_seen TEXT NOT NULL,
+			last_seen TEXT NOT NULL,
+			gone_at TEXT,
+			notified_at TEXT,
+			PRIMARY KEY (account_id, credit_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_codex_reset_credits_expiry ON codex_reset_credits(expires_at);
+		CREATE INDEX IF NOT EXISTS idx_codex_reset_credits_account ON codex_reset_credits(account_id, status);
+
+		-- Last outcome of the reset-credits detail fetch per account. Kept
+		-- separate from the credits themselves so "unavailable" is visible even
+		-- when the account has no tracked rows.
+		CREATE TABLE IF NOT EXISTS codex_reset_credit_checks (
+			account_id INTEGER PRIMARY KEY,
+			status TEXT NOT NULL,
+			available_count INTEGER,
+			applicable_count INTEGER,
+			last_checked_at TEXT NOT NULL
 		);
 
 		CREATE TABLE IF NOT EXISTS codex_quota_values (
@@ -513,6 +550,7 @@ func (s *Store) createTables() error {
 		-- Codex indexes
 		CREATE INDEX IF NOT EXISTS idx_codex_snapshots_captured ON codex_snapshots(captured_at);
 		CREATE INDEX IF NOT EXISTS idx_codex_quota_values_snapshot ON codex_quota_values(snapshot_id);
+		CREATE INDEX IF NOT EXISTS idx_codex_quota_values_name ON codex_quota_values(quota_name);
 		CREATE INDEX IF NOT EXISTS idx_codex_cycles_name_start ON codex_reset_cycles(quota_name, cycle_start);
 		CREATE INDEX IF NOT EXISTS idx_codex_cycles_name_active ON codex_reset_cycles(quota_name) WHERE cycle_end IS NULL;
 		-- Note: idx_codex_snapshots_account and idx_codex_cycles_account are created in migrateSchema()
@@ -833,6 +871,7 @@ func (s *Store) createTables() error {
 			limit_value REAL NOT NULL DEFAULT 0,
 			utilization REAL NOT NULL DEFAULT 0,
 			format TEXT NOT NULL DEFAULT 'percent',
+			status TEXT NOT NULL DEFAULT '',
 			resets_at TEXT,
 			FOREIGN KEY (snapshot_id) REFERENCES opencode_snapshots(id)
 		);
@@ -1220,6 +1259,40 @@ func (s *Store) migrateSchema() error {
 		return fmt.Errorf("failed to insert default codex account: %w", err)
 	}
 
+	// Additive reset-credit columns for databases created before they existed
+	// (issue #152 follow-up). Missing optional tables are tolerated like the
+	// rest of this migration.
+	for _, stmt := range []string{
+		`ALTER TABLE codex_snapshots ADD COLUMN applicable_credits_count INTEGER`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column name") && !strings.Contains(err.Error(), "no such table") {
+				return fmt.Errorf("reset-credit migration failed: %w", err)
+			}
+		}
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE codex_reset_credits ADD COLUMN unsupported_by_plan INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE codex_reset_credits ADD COLUMN expiry_unknown INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE codex_reset_credit_checks ADD COLUMN applicable_count INTEGER`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column name") && !strings.Contains(err.Error(), "no such table") {
+				return fmt.Errorf("reset-credit migration failed: %w", err)
+			}
+		}
+	}
+
+	// Add reset_credits_count to codex_snapshots (issue #152). NULL means the
+	// usage response did not report a count - unknown, not zero.
+	if _, err := s.db.Exec(`
+		ALTER TABLE codex_snapshots ADD COLUMN reset_credits_count INTEGER
+	`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") && !strings.Contains(err.Error(), "no such table") {
+			return fmt.Errorf("failed to add reset_credits_count to codex_snapshots: %w", err)
+		}
+	}
+
 	// Add account_id column to codex_snapshots for multi-account support
 	// Using INTEGER DEFAULT 1 (references provider_accounts.id)
 	if _, err := s.db.Exec(`
@@ -1259,6 +1332,9 @@ func (s *Store) migrateSchema() error {
 	for _, stmt := range []string{
 		`CREATE INDEX IF NOT EXISTS idx_codex_snapshots_account ON codex_snapshots(account_id, captured_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_codex_cycles_account ON codex_reset_cycles(account_id, quota_name)`,
+		// Lets QueryAllCodexQuotaNames seek between names instead of scanning
+		// every quota value row.
+		`CREATE INDEX IF NOT EXISTS idx_codex_quota_values_name ON codex_quota_values(quota_name)`,
 		`CREATE INDEX IF NOT EXISTS idx_provider_accounts_provider ON provider_accounts(provider)`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -1375,6 +1451,24 @@ func (s *Store) migrateSchema() error {
 				return fmt.Errorf("failed to add weekly column to minimax_model_values: %w", err)
 			}
 		}
+	}
+
+	// Record the upstream window status (key-mode usage API) so a blocked
+	// window can render critical whatever its percent. Existing rows default
+	// to '' and are treated as status-unknown.
+	if _, err := s.db.Exec(`
+		ALTER TABLE opencode_quota_values ADD COLUMN status TEXT NOT NULL DEFAULT ''
+	`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") &&
+			!strings.Contains(err.Error(), "no such table") {
+			return fmt.Errorf("failed to add status to opencode_quota_values: %w", err)
+		}
+	}
+
+	// One-off repair of derived Command Code / OpenCode reset cycles written
+	// before the reset-boundary fix. Raw snapshots are never touched.
+	if err := s.RepairWindowResetCyclesIfNeeded(nil); err != nil {
+		return fmt.Errorf("window cycle repair: %w", err)
 	}
 
 	// Drop raw_line column from api_integration_usage_events - no longer stored.
@@ -1563,6 +1657,26 @@ func (s *Store) QueryRange(start, end time.Time, limit ...int) ([]*api.Snapshot,
 	if err != nil {
 		return nil, fmt.Errorf("failed to query range: %w", err)
 	}
+	return scanSyntheticSnapshotRows(rows)
+}
+
+// QueryRangeSampled returns at most about 200 snapshots spread evenly across
+// the range (first and last always kept). Chart callers downsample anyway;
+// sampling in SQL avoids loading every poll of a 30-day range.
+func (s *Store) QueryRangeSampled(start, end time.Time) ([]*api.Snapshot, error) {
+	rows, err := s.db.Query(
+		windowChartQuery("quota_snapshots", `id, captured_at, sub_limit, sub_requests, sub_renews_at,
+		 search_limit, search_requests, search_renews_at,
+		 tool_limit, tool_requests, tool_renews_at`),
+		start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query sampled range: %w", err)
+	}
+	return scanSyntheticSnapshotRows(rows)
+}
+
+func scanSyntheticSnapshotRows(rows *sql.Rows) ([]*api.Snapshot, error) {
 	defer rows.Close()
 
 	var snapshots []*api.Snapshot
@@ -2278,27 +2392,22 @@ func (s *Store) migrateAnthropicSessions(idleTimeout time.Duration) error {
 		return err
 	}
 
-	for _, snap := range snapshots {
-		// Load quota values for this snapshot
-		qRows, err := s.db.Query(
-			`SELECT quota_name, utilization FROM anthropic_quota_values WHERE snapshot_id = ? ORDER BY quota_name`,
-			snap.id,
-		)
-		if err != nil {
-			return err
-		}
+	// Load every snapshot's quota values in batches instead of one query per
+	// snapshot; this migration walks the whole table.
+	ids := make([]int64, len(snapshots))
+	for i, snap := range snapshots {
+		ids[i] = snap.id
+	}
+	valuesBySnapshot, err := loadQuotaUtilization(s, ids, "anthropic_quota_values")
+	if err != nil {
+		return fmt.Errorf("migrateAnthropicSessions: %w", err)
+	}
 
-		currentValues := make(map[string]float64)
-		for qRows.Next() {
-			var name string
-			var util float64
-			if err := qRows.Scan(&name, &util); err != nil {
-				qRows.Close()
-				return err
-			}
-			currentValues[name] = util
+	for _, snap := range snapshots {
+		currentValues := valuesBySnapshot[snap.id]
+		if currentValues == nil {
+			currentValues = make(map[string]float64)
 		}
-		qRows.Close()
 
 		// Determine if values changed
 		changed := false

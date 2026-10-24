@@ -113,8 +113,9 @@ func TestCodexAgent_ContextCancellation(t *testing.T) {
 }
 
 // TestCodexAgent_ProactiveRefreshFailures_PausesAfterMax verifies that consecutive
-// proactive OAuth refresh failures (non-reused-token, e.g. HTTP 401) pause the agent
-// after maxCodexAuthFailures attempts, preventing infinite retry storms.
+// transient proactive OAuth refresh failures pause the agent after
+// maxCodexAuthFailures attempts, preventing infinite retry storms. The OAuth
+// endpoint is stubbed via the seam so no real refresh is attempted.
 func TestCodexAgent_ProactiveRefreshFailures_PausesAfterMax(t *testing.T) {
 	t.Parallel()
 	// API server: succeeds normally (the issue is the proactive refresh, not FetchUsage)
@@ -152,9 +153,13 @@ func TestCodexAgent_ProactiveRefreshFailures_PausesAfterMax(t *testing.T) {
 	})
 	ag.lastToken = "oauth_token"
 	ag.SetTokenRefresh(func() string { return "oauth_token" })
+	// A transient failure (503) counts toward the pause budget.
+	ag.oauthRefresh = func(ctx context.Context, refreshToken string) (*api.CodexOAuthTokenResponse, error) {
+		return nil, fmt.Errorf("%w: HTTP 503", api.ErrCodexOAuthRefreshFailed)
+	}
 
-	// Run one poll - the proactive refresh will fail (can't reach real OpenAI endpoint)
-	// and increment proactiveRefreshFailures to maxCodexAuthFailures
+	// Run one poll - the proactive refresh fails and increments
+	// proactiveRefreshFailures to maxCodexAuthFailures.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ag.poll(ctx)
@@ -162,13 +167,13 @@ func TestCodexAgent_ProactiveRefreshFailures_PausesAfterMax(t *testing.T) {
 	if ag.proactiveRefreshFailures < maxCodexAuthFailures {
 		t.Fatalf("proactiveRefreshFailures = %d, want >= %d", ag.proactiveRefreshFailures, maxCodexAuthFailures)
 	}
-	if !ag.authPaused {
+	if !ag.AuthPaused() {
 		t.Fatal("expected authPaused=true after max proactive refresh failures")
 	}
 }
 
 // TestCodexAgent_ProactiveRefreshFailures_NotPausedBeforeMax verifies that a single
-// proactive refresh failure does not immediately pause the agent.
+// transient proactive refresh failure does not immediately pause the agent.
 func TestCodexAgent_ProactiveRefreshFailures_NotPausedBeforeMax(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -198,6 +203,9 @@ func TestCodexAgent_ProactiveRefreshFailures_NotPausedBeforeMax(t *testing.T) {
 	})
 	ag.lastToken = "oauth_token"
 	ag.SetTokenRefresh(func() string { return "oauth_token" })
+	ag.oauthRefresh = func(ctx context.Context, refreshToken string) (*api.CodexOAuthTokenResponse, error) {
+		return nil, fmt.Errorf("%w: HTTP 503", api.ErrCodexOAuthRefreshFailed)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -207,8 +215,56 @@ func TestCodexAgent_ProactiveRefreshFailures_NotPausedBeforeMax(t *testing.T) {
 	if ag.proactiveRefreshFailures != 1 {
 		t.Fatalf("proactiveRefreshFailures = %d, want 1", ag.proactiveRefreshFailures)
 	}
-	if ag.authPaused {
+	if ag.AuthPaused() {
 		t.Fatal("expected authPaused=false after single proactive refresh failure")
+	}
+}
+
+// TestCodexAgent_ProactiveRefreshTerminalError_PausesImmediately verifies that a
+// terminal refresh failure (a 401 rejection) pauses at once, without counting
+// toward the transient budget, so the dead token is not replayed.
+func TestCodexAgent_ProactiveRefreshTerminalError_PausesImmediately(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":25,"reset_at":1766000000,"limit_window_seconds":18000}}}`)
+	}))
+	defer server.Close()
+
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer st.Close()
+
+	logger := slog.Default()
+	client := api.NewCodexClient("oauth_token", logger, api.WithCodexBaseURL(server.URL))
+	tr := tracker.NewCodexTracker(st, logger)
+	ag := NewCodexAgent(client, st, tr, time.Hour, logger, nil)
+
+	ag.SetCredentialsRefresh(func() *api.CodexCredentials {
+		return &api.CodexCredentials{
+			AccessToken:  "oauth_token",
+			RefreshToken: "dead-refresh-token",
+			ExpiresIn:    -1 * time.Hour,
+			ExpiresAt:    time.Now().Add(-1 * time.Hour),
+		}
+	})
+	ag.lastToken = "oauth_token"
+	ag.SetTokenRefresh(func() string { return "oauth_token" })
+	ag.oauthRefresh = func(ctx context.Context, refreshToken string) (*api.CodexOAuthTokenResponse, error) {
+		return nil, api.ErrCodexRefreshTokenInvalid
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ag.poll(ctx)
+
+	if ag.proactiveRefreshFailures != 0 {
+		t.Fatalf("proactiveRefreshFailures = %d, want 0 (terminal error is not transient)", ag.proactiveRefreshFailures)
+	}
+	if !ag.AuthPaused() {
+		t.Fatal("expected authPaused=true immediately after a terminal refresh error")
 	}
 }
 

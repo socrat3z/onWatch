@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -22,7 +23,19 @@ const (
 )
 
 // Config holds all application configuration.
+//
+// Runtime code (web handlers, agent factories) shares one Config that the
+// settings-save path mutates. The write paths take Lock; code that copies or
+// reads provider credentials for a new agent should use Snapshot (or RLock) so
+// it cannot race a concurrent save. Configuration built once at startup and
+// never mutated (tests, loadFromEnvAndFlags) needs no locking.
+//
+// mu is a pointer so a struct copy (`*cfg`, Snapshot) shares the original's
+// lock instead of copying a fresh, useless one. It is allocated lazily and
+// safely by ensureMu.
 type Config struct {
+	mu *sync.RWMutex
+
 	MistralEnabled        bool
 	MistralDisabled       bool
 	MistralAuthCookie     string
@@ -151,6 +164,58 @@ type Config struct {
 	DebugMode          bool          // --debug flag (foreground mode)
 	DebugStdout        bool          // --debugstdout flag (foreground + all logs to stdout)
 	TestMode           bool          // --test flag (test mode isolation)
+}
+
+// ensureMu lazily allocates the lock. Config values are routinely built as
+// `&config.Config{...}` with no constructor, so the lock cannot be created
+// eagerly; a data race on a *sync.RWMutex field is itself a race, so the
+// allocation is guarded by the package-level muInit.
+var muInit sync.Mutex
+
+func (c *Config) ensureMu() *sync.RWMutex {
+	muInit.Lock()
+	defer muInit.Unlock()
+	if c.mu == nil {
+		c.mu = &sync.RWMutex{}
+	}
+	return c.mu
+}
+
+// WriteLock and WriteUnlock guard a batch of writes to the shared runtime
+// config. They are deliberately not named Lock/Unlock: a type with those exact
+// methods is treated as a lock by go vet's copylocks check, which would flag
+// every legitimate Config copy (Snapshot, `*cfg`).
+func (c *Config) WriteLock() { c.ensureMu().Lock() }
+
+// WriteUnlock releases the write lock taken by WriteLock.
+func (c *Config) WriteUnlock() { c.ensureMu().Unlock() }
+
+// ReadLock and ReadUnlock guard a batch of reads of the shared runtime config.
+func (c *Config) ReadLock() { c.ensureMu().RLock() }
+
+// ReadUnlock releases the read lock taken by ReadLock.
+func (c *Config) ReadUnlock() { c.ensureMu().RUnlock() }
+
+// WithWrite runs fn while holding the config write lock, so a batch of field
+// writes cannot interleave with a concurrent read or another write.
+func (c *Config) WithWrite(fn func()) {
+	mu := c.ensureMu()
+	mu.Lock()
+	defer mu.Unlock()
+	fn()
+}
+
+// Snapshot returns a copy of the config taken under the read lock, sharing the
+// original's lock so a later write to the copy also serializes. Agent factories
+// use it to capture credentials for a fresh agent without racing a concurrent
+// settings save.
+func (c *Config) Snapshot() Config {
+	mu := c.ensureMu()
+	mu.RLock()
+	defer mu.RUnlock()
+	cp := *c
+	cp.mu = mu
+	return cp
 }
 
 // envWithFallback reads the primary env var, falling back to the legacy name.
@@ -791,8 +856,15 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// AvailableProviders returns which providers are configured.
+// AvailableProviders returns which providers are configured. It takes the read
+// lock; callers already holding it must use availableProvidersLocked.
 func (c *Config) AvailableProviders() []string {
+	c.ReadLock()
+	defer c.ReadUnlock()
+	return c.availableProvidersLocked()
+}
+
+func (c *Config) availableProvidersLocked() []string {
 	var providers []string
 	if c.AnthropicToken != "" {
 		providers = append(providers, "anthropic")
@@ -836,7 +908,7 @@ func (c *Config) AvailableProviders() []string {
 	if c.KimiToken != "" || c.KimiEnabled {
 		providers = append(providers, "kimi")
 	}
-	if c.OpenCodeGoConfigured() {
+	if c.openCodeGoConfiguredLocked() {
 		providers = append(providers, "opencode")
 	}
 	if c.OllamaAPIKey != "" {
@@ -848,14 +920,30 @@ func (c *Config) AvailableProviders() []string {
 	if c.CommandCodeAPIKey != "" || c.CommandCodeEnabled {
 		providers = append(providers, "commandcode")
 	}
-	if c.HasProvider("mistral") {
+	if c.hasProviderLocked("mistral") {
 		providers = append(providers, "mistral")
 	}
 	return providers
 }
 
-// HasProvider returns true if the given provider is configured.
+// HasProvider returns true if the given provider is configured. It takes the
+// read lock; callers already holding it must use hasProviderLocked. A recursive
+// RLock starves once a writer is queued, so the split matters.
 func (c *Config) HasProvider(name string) bool {
+	c.ReadLock()
+	defer c.ReadUnlock()
+	return c.hasProviderLocked(name)
+}
+
+// HasProviderLocked is hasProviderLocked for callers outside this package that
+// already hold the read lock (for example a Handler's isProviderConfiguredLocked).
+func (c *Config) HasProviderLocked(name string) bool { return c.hasProviderLocked(name) }
+
+// OpenCodeGoConfiguredLocked is openCodeGoConfiguredLocked for callers outside
+// this package that already hold the read lock.
+func (c *Config) OpenCodeGoConfiguredLocked() bool { return c.openCodeGoConfiguredLocked() }
+
+func (c *Config) hasProviderLocked(name string) bool {
 	switch name {
 	case "synthetic":
 		return c.SyntheticAPIKey != ""
@@ -888,7 +976,7 @@ func (c *Config) HasProvider(name string) bool {
 	case "mistral":
 		return !c.MistralDisabled && (c.MistralEnabled || c.MistralAuthCookie != "")
 	case "opencode":
-		return c.OpenCodeGoConfigured()
+		return c.openCodeGoConfiguredLocked()
 	case "ollama":
 		return c.OllamaAPIKey != ""
 	case "muse":
@@ -905,8 +993,15 @@ func (c *Config) HasProvider(name string) bool {
 	return false
 }
 
-// HasMultipleProviders returns true if more than one provider is configured.
+// HasMultipleProviders returns true if more than one provider is configured. It
+// takes the read lock; callers already holding it must use the locked variant.
 func (c *Config) HasMultipleProviders() bool {
+	c.ReadLock()
+	defer c.ReadUnlock()
+	return c.hasMultipleProvidersLocked()
+}
+
+func (c *Config) hasMultipleProvidersLocked() bool {
 	count := 0
 	if c.SyntheticAPIKey != "" {
 		count++
@@ -950,7 +1045,7 @@ func (c *Config) HasMultipleProviders() bool {
 	if c.KimiToken != "" || c.KimiEnabled {
 		count++
 	}
-	if c.OpenCodeGoConfigured() {
+	if c.openCodeGoConfiguredLocked() {
 		count++
 	}
 	if c.OllamaAPIKey != "" {
@@ -962,7 +1057,7 @@ func (c *Config) HasMultipleProviders() bool {
 	if c.CommandCodeAPIKey != "" || c.CommandCodeEnabled {
 		count++
 	}
-	if c.HasProvider("mistral") {
+	if c.hasProviderLocked("mistral") {
 		count++
 	}
 	return count > 1
@@ -1227,6 +1322,13 @@ func (c *Config) IsDefaultPassword() bool {
 
 // OpenCodeGoConfigured reports whether OpenCode Go tracking has credentials:
 // a usage-API key (preferred) or the workspace ID + console session cookie pair.
+// It takes the read lock; callers already holding it must use the locked form.
 func (c *Config) OpenCodeGoConfigured() bool {
+	c.ReadLock()
+	defer c.ReadUnlock()
+	return c.openCodeGoConfiguredLocked()
+}
+
+func (c *Config) openCodeGoConfiguredLocked() bool {
 	return c.OpenCodeGoAPIKey != "" || (c.OpenCodeGoWorkspaceID != "" && c.OpenCodeGoAuthCookie != "")
 }

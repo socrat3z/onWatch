@@ -3,6 +3,7 @@ package tracker
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/onllm-dev/onwatch/v2/internal/api"
@@ -11,9 +12,20 @@ import (
 
 const openCodeResetDriftTolerance = 90 * time.Minute
 
+// windowRolloverGrace bounds how long a time-only rollover may wait for the
+// API to publish its new window. At the default 120s poll it covers seven
+// polls of API lag; after it, samples are real usage that must keep counting
+// (for example a monthly reset that the subscription lookup stopped returning).
+const windowRolloverGrace = 15 * time.Minute
+
 type OpenCodeTracker struct {
-	store      *store.Store
-	logger     *slog.Logger
+	store  *store.Store
+	logger *slog.Logger
+	// mu guards the in-memory cycle state below. One tracker is shared by every
+	// OpenCode agent - each runtime restart builds a fresh agent over the same
+	// tracker - so concurrent Process calls are possible and the maps would
+	// otherwise be a "concurrent map writes" panic.
+	mu         sync.Mutex
 	lastValues map[string]float64
 	lastResets map[string]string
 	hasLast    bool
@@ -21,7 +33,9 @@ type OpenCodeTracker struct {
 }
 
 func (t *OpenCodeTracker) SetOnReset(fn func(string)) {
+	t.mu.Lock()
 	t.onReset = fn
+	t.mu.Unlock()
 }
 
 type OpenCodeSummary struct {
@@ -51,6 +65,8 @@ func NewOpenCodeTracker(store *store.Store, logger *slog.Logger) *OpenCodeTracke
 }
 
 func (t *OpenCodeTracker) Process(snapshot *api.OpenCodeSnapshot) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	for _, quota := range snapshot.Quotas {
 		if err := t.processQuota(quota, snapshot.CapturedAt); err != nil {
 			return fmt.Errorf("opencode tracker: %s: %w", quota.Name, err)
@@ -64,6 +80,11 @@ func (t *OpenCodeTracker) Process(snapshot *api.OpenCodeSnapshot) error {
 func (t *OpenCodeTracker) processQuota(quota api.OpenCodeQuota, capturedAt time.Time) error {
 	quotaName := quota.Name
 	currentUtil := quota.Utilization
+
+	// A reset that is not after the sample was already passed when the sample
+	// was taken. Storing it would give the new cycle a reset in the past, and
+	// the next poll would mistake that stale value for a fresh window.
+	quota.ResetsAt = futureResetsAt(quota.ResetsAt, capturedAt)
 
 	cycle, err := t.store.QueryActiveOpenCodeCycle(quotaName)
 	if err != nil {
@@ -89,6 +110,39 @@ func (t *OpenCodeTracker) processQuota(quota api.OpenCodeQuota, capturedAt time.
 		)
 		return nil
 	}
+	if cycle.ResetsAt != nil && !cycle.ResetsAt.After(cycle.CycleStart) {
+		cycle.ResetsAt = nil
+	}
+
+	// A time-only rollover opens at the old boundary with no reset or
+	// statistics. The matching predecessor makes this state restart-safe
+	// without a column, and values pending acknowledgment are held for at most
+	// windowRolloverGrace.
+	if predecessor := t.awaitingRolloverPredecessor(quotaName, cycle); predecessor != nil {
+		if capturedAt.Sub(cycle.CycleStart) < windowRolloverGrace {
+			// A low previous peak cannot prove a drop: seed the first sample
+			// anyway so usage in this window is not lost.
+			dropped := currentUtil+2 < predecessor.PeakUtilization || predecessor.PeakUtilization <= 2
+			if quota.ResetsAt != nil {
+				if err := t.store.UpdateOpenCodeCycleResetsAt(quotaName, quota.ResetsAt); err != nil {
+					return fmt.Errorf("failed to attach acknowledged reset: %w", err)
+				}
+				t.lastResets[quotaName] = quota.ResetsAt.Format(time.RFC3339Nano)
+			}
+			if !dropped {
+				t.lastValues[quotaName] = currentUtil
+				return nil
+			}
+			// The first sample below the old window's peak starts the new
+			// window; earlier samples after the boundary cannot prove which
+			// side of the reset they belong to.
+			if err := t.store.UpdateOpenCodeCycle(quotaName, currentUtil, currentUtil); err != nil {
+				return fmt.Errorf("failed to seed acknowledged rollover: %w", err)
+			}
+			t.lastValues[quotaName] = currentUtil
+			return nil
+		}
+	}
 
 	resetDetected := false
 	resetReason := ""
@@ -110,7 +164,11 @@ func (t *OpenCodeTracker) processQuota(quota api.OpenCodeQuota, capturedAt time.
 				resetReason = "api-based (ResetsAt changed)"
 			}
 		} else if quota.ResetsAt != nil && cycle.ResetsAt == nil {
-			if cycle.PeakUtilization == 0 && cycle.TotalDelta == 0 {
+			lastUtil, hasLast := t.lastValues[quotaName]
+			if t.hasLast && hasLast && currentUtil+2 < lastUtil {
+				resetDetected = true
+				resetReason = "api-based (new ResetsAt appeared with a usage drop)"
+			} else if cycle.PeakUtilization == 0 && cycle.TotalDelta == 0 {
 				// An idle cycle (e.g. no open 5-hour session) just learned its
 				// reset time: restart it now instead of closing an empty cycle.
 				if err := t.store.RestartOpenCodeCycle(quotaName, capturedAt, *quota.ResetsAt); err != nil {
@@ -119,8 +177,13 @@ func (t *OpenCodeTracker) processQuota(quota api.OpenCodeQuota, capturedAt time.
 				cycle.CycleStart, cycle.ResetsAt = capturedAt, quota.ResetsAt
 				t.lastResets[quotaName] = quota.ResetsAt.Format(time.RFC3339Nano)
 			} else {
-				resetDetected = true
-				resetReason = "api-based (new ResetsAt appeared)"
+				// A reset published mid-window belongs to the window already
+				// open; only a usage drop proves a new window started.
+				if err := t.store.UpdateOpenCodeCycleResetsAt(quotaName, quota.ResetsAt); err != nil {
+					return fmt.Errorf("failed to attach reset to cycle: %w", err)
+				}
+				cycle.ResetsAt = quota.ResetsAt
+				t.lastResets[quotaName] = quota.ResetsAt.Format(time.RFC3339Nano)
 			}
 		}
 	}
@@ -130,27 +193,24 @@ func (t *OpenCodeTracker) processQuota(quota api.OpenCodeQuota, capturedAt time.
 		if cycle.ResetsAt != nil && capturedAt.After(*cycle.ResetsAt) {
 			cycleEndTime = *cycle.ResetsAt
 		}
-
-		if t.hasLast {
-			if lastUtil, ok := t.lastValues[quotaName]; ok {
-				delta := currentUtil - lastUtil
-				if delta > 0 {
-					cycle.TotalDelta += delta
-				}
-				if currentUtil > cycle.PeakUtilization {
-					cycle.PeakUtilization = currentUtil
-				}
-			}
+		if cycleEndTime.Before(cycle.CycleStart) {
+			cycleEndTime = cycle.CycleStart
 		}
 
+		// The sample that revealed the reset belongs to the new cycle.
 		if err := t.store.CloseOpenCodeCycle(quotaName, cycleEndTime, cycle.PeakUtilization, cycle.TotalDelta); err != nil {
 			return fmt.Errorf("failed to close cycle: %w", err)
 		}
 
-		if _, err := t.store.CreateOpenCodeCycle(quotaName, capturedAt, quota.ResetsAt); err != nil {
+		newStart, initialUtil := capturedAt, currentUtil
+		if storedResetPassed && !currentResetIsFuture {
+			// Do not assign a possibly pre-reset sample to the new window.
+			newStart, initialUtil = cycleEndTime, 0
+		}
+		if _, err := t.store.CreateOpenCodeCycle(quotaName, newStart, nextWindowReset(quota.ResetsAt, capturedAt)); err != nil {
 			return fmt.Errorf("failed to create new cycle: %w", err)
 		}
-		if err := t.store.UpdateOpenCodeCycle(quotaName, currentUtil, 0); err != nil {
+		if err := t.store.UpdateOpenCodeCycle(quotaName, initialUtil, 0); err != nil {
 			return fmt.Errorf("failed to set initial peak: %w", err)
 		}
 
@@ -206,6 +266,27 @@ func (t *OpenCodeTracker) processQuota(quota api.OpenCodeQuota, capturedAt time.
 		t.lastResets[quotaName] = quota.ResetsAt.Format(time.RFC3339Nano)
 	}
 	return nil
+}
+
+// awaitingRolloverPredecessor returns the closed cycle whose boundary opened
+// an empty active cycle. Matching boundaries identify the state across
+// restarts without persisting a separate flag. It ends once the first
+// post-boundary sample has seeded the cycle, not when a reset is attached:
+// the API can publish the new reset several polls before utilization drops.
+func (t *OpenCodeTracker) awaitingRolloverPredecessor(quotaName string, cycle *store.OpenCodeResetCycle) *store.OpenCodeResetCycle {
+	if cycle.PeakUtilization != 0 || cycle.TotalDelta != 0 {
+		return nil
+	}
+	history, err := t.store.QueryOpenCodeCycleHistory(quotaName, 1)
+	if err != nil || len(history) != 1 {
+		return nil
+	}
+	prev := history[0]
+	if prev.CycleEnd == nil || prev.ResetsAt == nil ||
+		!prev.CycleEnd.Equal(cycle.CycleStart) || !prev.ResetsAt.Equal(cycle.CycleStart) {
+		return nil
+	}
+	return prev
 }
 
 func (t *OpenCodeTracker) UsageSummary(quotaName string) (*OpenCodeSummary, error) {
@@ -283,4 +364,21 @@ func (t *OpenCodeTracker) UsageSummary(quotaName string) (*OpenCodeSummary, erro
 	}
 
 	return summary, nil
+}
+
+// futureResetsAt drops a reset timestamp that is not after the sample it came
+// with. Such a value was already passed when the sample was captured, so it
+// describes the window that just ended, not the open one.
+func futureResetsAt(resetsAt *time.Time, capturedAt time.Time) *time.Time {
+	if resetsAt == nil || !resetsAt.After(capturedAt) {
+		return nil
+	}
+	return resetsAt
+}
+
+// nextWindowReset drops a reset timestamp the API has not advanced past the
+// sample that revealed the reset. Storing it would give the new cycle a reset
+// in the past and can produce an inverted cycle window.
+func nextWindowReset(resetsAt *time.Time, capturedAt time.Time) *time.Time {
+	return futureResetsAt(resetsAt, capturedAt)
 }

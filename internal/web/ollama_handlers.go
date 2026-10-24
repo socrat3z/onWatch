@@ -23,7 +23,12 @@ func (h *Handler) currentOllama(w http.ResponseWriter, _ *http.Request) {
 type ollamaInsightsResponse struct {
 	Stats    []ollamaInsightStat `json:"stats"`
 	Insights []insightItem       `json:"insights"`
+	// partial marks an answer built after a swallowed read error; it is
+	// served but never cached.
+	partial bool
 }
+
+func (r ollamaInsightsResponse) isPartial() bool { return r.partial }
 
 // ollamaInsightStat is a stats-row shape that carries linked forecast metadata for the Ollama dashboard.
 type ollamaInsightStat struct {
@@ -175,20 +180,33 @@ func buildOllamaBurnRateInsight(quota api.OllamaQuota, rate ollamaQuotaRate) ins
 }
 
 func (h *Handler) buildOllamaCurrent() map[string]interface{} {
+	response, _, _ := h.buildOllamaCurrentOK()
+	return response
+}
+
+// buildOllamaCurrentOK is buildOllamaCurrent with an explicit storage outcome.
+// readOK is false only when the read that supplied the payload failed. The
+// per-quota read is a refinement, so its failure still leaves the latest
+// snapshot payload intact.
+func (h *Handler) buildOllamaCurrentOK() (response map[string]interface{}, readOK bool, hasData bool) {
 	now := time.Now().UTC()
-	response := map[string]interface{}{
+	response = map[string]interface{}{
 		"capturedAt": now.Format(time.RFC3339),
 		"quotas":     []interface{}{},
 	}
 
 	if h.store == nil {
-		return response
+		return response, true, false
 	}
 
 	latest, err := h.store.QueryLatestOllama()
-	if err != nil || latest == nil {
-		return response
+	if err != nil {
+		return response, false, false
 	}
+	if latest == nil {
+		return response, true, false
+	}
+	hasData = true
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
 	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
@@ -246,7 +264,7 @@ func (h *Handler) buildOllamaCurrent() map[string]interface{} {
 			response["quotas"] = append(response["quotas"].([]interface{}), quotaFromLatest(q, latest.CapturedAt))
 		}
 		applyDisplayModeToResponse(response, h.getDisplayMode("ollama"))
-		return response
+		return response, true, hasData
 	}
 
 	sort.SliceStable(latestPerQuota, func(i, j int) bool {
@@ -271,7 +289,7 @@ func (h *Handler) buildOllamaCurrent() map[string]interface{} {
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("ollama"))
-	return response
+	return response, true, hasData
 }
 
 func (h *Handler) historyOllama(w http.ResponseWriter, r *http.Request) {
@@ -433,7 +451,7 @@ func (h *Handler) summaryOllama(w http.ResponseWriter, _ *http.Request) {
 
 func (h *Handler) insightsOllama(w http.ResponseWriter, _ *http.Request, rangeDur time.Duration) {
 	hidden := h.getHiddenInsightKeys()
-	respondJSON(w, http.StatusOK, h.buildOllamaInsights(hidden, rangeDur))
+	respondInsights(w, h.buildOllamaInsights(hidden, rangeDur))
 }
 
 func (h *Handler) ollamaQuotaNames() []string {
@@ -488,6 +506,7 @@ func (h *Handler) buildOllamaInsights(hidden map[string]bool, _ time.Duration) o
 	}
 
 	latest, err := h.store.QueryLatestOllama()
+	markPartial(&resp.partial, err)
 	if err != nil || latest == nil || len(latest.Quotas) == 0 {
 		return resp
 	}

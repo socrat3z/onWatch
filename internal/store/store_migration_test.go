@@ -154,6 +154,59 @@ func TestStore_MigrateSchema_IdempotentOnCurrentSchema(t *testing.T) {
 	}
 }
 
+// A pre-status opencode_quota_values table must gain the column additively,
+// with existing rows defaulting to an empty (status-unknown) value.
+func TestStore_MigrateSchema_AddsOpenCodeStatusColumn(t *testing.T) {
+	t.Parallel()
+	s := newRawStoreForMigrationTests(t,
+		`CREATE TABLE quota_snapshots (id INTEGER PRIMARY KEY, provider TEXT NOT NULL DEFAULT 'synthetic')`,
+		`CREATE TABLE reset_cycles (id INTEGER PRIMARY KEY, provider TEXT NOT NULL DEFAULT 'synthetic')`,
+		`CREATE TABLE sessions (
+			id TEXT PRIMARY KEY,
+			provider TEXT NOT NULL DEFAULT 'synthetic',
+			start_sub_requests REAL NOT NULL DEFAULT 0,
+			start_search_requests REAL NOT NULL DEFAULT 0,
+			start_tool_requests REAL NOT NULL DEFAULT 0
+		)`,
+		`CREATE TABLE opencode_quota_values (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			snapshot_id INTEGER NOT NULL,
+			quota_name TEXT NOT NULL,
+			used REAL NOT NULL DEFAULT 0,
+			limit_value REAL NOT NULL DEFAULT 0,
+			utilization REAL NOT NULL DEFAULT 0,
+			format TEXT NOT NULL DEFAULT 'percent',
+			resets_at TEXT
+		)`,
+		`INSERT INTO opencode_quota_values (snapshot_id, quota_name, used, limit_value, utilization) VALUES (1, 'five_hour', 10, 100, 10)`,
+		`CREATE TABLE notification_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			provider TEXT NOT NULL DEFAULT 'legacy',
+			quota_key TEXT NOT NULL,
+			notification_type TEXT NOT NULL,
+			sent_at TEXT NOT NULL,
+			utilization REAL,
+			UNIQUE(provider, quota_key, notification_type)
+		)`,
+	)
+
+	if err := s.migrateSchema(); err != nil {
+		t.Fatalf("migrateSchema: %v", err)
+	}
+	// The migration is idempotent: a second run must not error.
+	if err := s.migrateSchema(); err != nil {
+		t.Fatalf("migrateSchema(idempotent): %v", err)
+	}
+
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM opencode_quota_values WHERE quota_name = 'five_hour'`).Scan(&status); err != nil {
+		t.Fatalf("select status: %v", err)
+	}
+	if status != "" {
+		t.Fatalf("legacy row status = %q, want empty", status)
+	}
+}
+
 func TestStore_MigrateSchema_ToleratesMissingOptionalTables(t *testing.T) {
 	t.Parallel()
 	s := newRawStoreForMigrationTests(t,

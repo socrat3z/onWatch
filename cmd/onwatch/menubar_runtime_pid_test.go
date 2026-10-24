@@ -1,0 +1,169 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"runtime"
+	"testing"
+	"time"
+)
+
+// Review item 1: the companion pid file must name the SPAWNED CHILD, never the
+// daemon. The daemon used to write its own pid there and the companion only
+// overwrote it after its lock wait of up to 10s. A shutdown inside that window
+// read the daemon's pid back, SIGTERMed it, and (10s later, still alive) would
+// have SIGKILLed it - skipping the database close.
+func TestWriteRuntimePIDValueRecordsChildPID(t *testing.T) {
+	prevPIDDir := pidDir
+	pidDir = t.TempDir()
+	defer func() { pidDir = prevPIDDir }()
+
+	cmd := startSleepSubprocess(t)
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+
+	path := menubarPIDPath(false)
+	if err := writeRuntimePIDValue(path, cmd.Process.Pid); err != nil {
+		t.Fatalf("writeRuntimePIDValue: %v", err)
+	}
+	if got := readRuntimePID(path); got != cmd.Process.Pid {
+		t.Fatalf("pid file = %d, want the child pid %d", got, cmd.Process.Pid)
+	}
+	if got := readRuntimePID(path); got == os.Getpid() {
+		t.Fatal("pid file must never contain the daemon's own pid")
+	}
+}
+
+// Review item 1: stopMenubarProcess must refuse its own pid, and on unix its
+// parent. A companion pid file briefly holding the daemon's pid would otherwise
+// make an orderly shutdown signal the daemon itself and skip the DB close.
+// Windows skips the parent check because pids are reused quickly there.
+func TestStopMenubarProcessNeverSignalsSelfOrParent(t *testing.T) {
+	prevPIDDir := pidDir
+	pidDir = t.TempDir()
+	defer func() { pidDir = prevPIDDir }()
+
+	pids := []int{os.Getpid()}
+	if runtime.GOOS != "windows" {
+		pids = append(pids, os.Getppid())
+	}
+	for _, pid := range pids {
+		path := menubarPIDPath(false)
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("%d", pid)), 0o644); err != nil {
+			t.Fatalf("write pid %d: %v", pid, err)
+		}
+
+		done := make(chan error, 1)
+		go func() { done <- stopMenubarProcess(false) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("stopMenubarProcess(%d): %v", pid, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("stopMenubarProcess(%d) did not return", pid)
+		}
+
+		if !processAlive(os.Getpid()) {
+			t.Fatal("the test process must survive a stop that named its own pid")
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("a corrupt pid file naming %d must be removed", pid)
+		}
+	}
+}
+
+// Finding 2: a replacement that loses the lock to the incumbent must not erase
+// the incumbent's pid record. Sequence: the old companion holds the lock, its
+// pid file is gone, a replacement is launched, the replacement exits without a
+// tray, and then its waiter cleans up.
+func TestLosingReplacementKeepsIncumbentPID(t *testing.T) {
+	prevPIDDir := pidDir
+	pidDir = t.TempDir()
+	defer func() { pidDir = prevPIDDir }()
+
+	incumbent := startLockHolderSubprocess(t, false)
+	t.Cleanup(func() { _ = incumbent.Process.Kill(); _, _ = incumbent.Process.Wait() })
+
+	path := menubarPIDPath(false)
+	_ = os.Remove(path)
+
+	// The replacement cannot take the lock; it must hand pid ownership to the
+	// incumbent instead of leaving the file absent or naming itself.
+	if _, err := acquireMenubarLockWait(false, 250*time.Millisecond, 50*time.Millisecond); !errors.Is(err, errMenubarCompanionRunning) {
+		t.Fatalf("replacement acquire err = %v, want errMenubarCompanionRunning", err)
+	}
+	publishIncumbentMenubarPID(false, menubarLockOwnerProbe)
+	if got := readRuntimePID(path); got != incumbent.Process.Pid {
+		t.Fatalf("pid file = %d, want the incumbent %d", got, incumbent.Process.Pid)
+	}
+
+	// The replacement child exits and its waiter runs cleanup. It must not
+	// erase a record that names the incumbent.
+	lostChild := incumbent.Process.Pid + 1
+	removeRuntimePIDIfOwner(path, lostChild)
+	if got := readRuntimePID(path); got != incumbent.Process.Pid {
+		t.Fatalf("a losing replacement's cleanup erased the incumbent's pid (got %d)", got)
+	}
+}
+
+// Finding 3: a stale pid file whose pid now belongs to an unrelated live
+// process must not suppress companion startup, and must not leave the startup
+// loop thinking a companion is running. The lock is free in this scenario.
+func TestStartupIgnoresReusedLivePID(t *testing.T) {
+	prevPIDDir := pidDir
+	pidDir = t.TempDir()
+	defer func() { pidDir = prevPIDDir }()
+
+	prevProbe := menubarLockStartupProbe
+	menubarLockStartupProbe = func(bool) (int, bool) { return 0, false }
+	defer func() { menubarLockStartupProbe = prevProbe }()
+
+	prevIdentity := menubarPIDIdentity
+	menubarPIDIdentity = func(int) bool { return false }
+	defer func() { menubarPIDIdentity = prevIdentity }()
+
+	path := menubarPIDPath(false)
+	// This test process is a live, unrelated (per the injected identity) process.
+	if err := writeRuntimePIDValue(path, os.Getpid()); err != nil {
+		t.Fatalf("writeRuntimePIDValue: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if menubarCompanionStartupBlocked(path, false, logger) {
+		t.Fatal("a reused live pid must not suppress companion startup")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("the stale pid file must be cleared so startup can record the new companion")
+	}
+}
+
+// Finding 3, identity positive case: the pid really is an onWatch process, so
+// startup is suppressed and no second tray is launched.
+func TestStartupRespectsOnwatchIdentity(t *testing.T) {
+	prevPIDDir := pidDir
+	pidDir = t.TempDir()
+	defer func() { pidDir = prevPIDDir }()
+
+	prevProbe := menubarLockStartupProbe
+	menubarLockStartupProbe = func(bool) (int, bool) { return 0, false }
+	defer func() { menubarLockStartupProbe = prevProbe }()
+
+	prevIdentity := menubarPIDIdentity
+	menubarPIDIdentity = func(int) bool { return true }
+	defer func() { menubarPIDIdentity = prevIdentity }()
+
+	path := menubarPIDPath(false)
+	if err := writeRuntimePIDValue(path, os.Getpid()); err != nil {
+		t.Fatalf("writeRuntimePIDValue: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if !menubarCompanionStartupBlocked(path, false, logger) {
+		t.Fatal("a live onWatch process named by the pid file must suppress a second companion")
+	}
+	if got := readRuntimePID(path); got != os.Getpid() {
+		t.Fatal("a live companion's pid file must be left alone")
+	}
+}

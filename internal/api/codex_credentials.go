@@ -34,6 +34,23 @@ type CodexCredentials struct {
 	SourcePath   string           // Absolute path to the auth file (for write-back)
 }
 
+// CodexTokenExpiry derives the effective expiry of a Codex OAuth credential
+// pair from the access token, falling back to the id token only when the access
+// token cannot be parsed.
+//
+// The access token governs API access, so it is the source of truth. The
+// id_token typically expires several days sooner; using it would mark valid
+// credentials as expiring, triggering a spurious proactive refresh that fails
+// with 401 and pauses polling (issue #147). This is shared by the global
+// auth.json loader and the named-profile loader so both agree.
+func CodexTokenExpiry(accessToken, idToken string) time.Time {
+	expiresAt := ParseIDTokenExpiry(strings.TrimSpace(accessToken))
+	if expiresAt.IsZero() {
+		expiresAt = ParseIDTokenExpiry(strings.TrimSpace(idToken))
+	}
+	return expiresAt
+}
+
 // IsExpiringSoon returns true if the token expires within the given duration.
 func (c *CodexCredentials) IsExpiringSoon(threshold time.Duration) bool {
 	if c.ExpiresAt.IsZero() {
@@ -108,15 +125,8 @@ func DetectCodexCredentials(logger *slog.Logger) *CodexCredentials {
 			} else {
 				idToken := strings.TrimSpace(auth.Tokens.IDToken)
 				accessToken := strings.TrimSpace(auth.Tokens.AccessToken)
-				// Use access_token expiry as the source of truth - it controls
-				// API access. id_token expires several days sooner, which would
-				// trigger spurious refreshes (and pause polling on refresh failure)
-				// even when the access_token is still valid for days.
-				expiresAt := ParseIDTokenExpiry(accessToken)
-				if expiresAt.IsZero() {
-					// Fall back to id_token if access_token can't be parsed.
-					expiresAt = ParseIDTokenExpiry(idToken)
-				}
+				// Access token expiry is the source of truth (see CodexTokenExpiry).
+				expiresAt := CodexTokenExpiry(accessToken, idToken)
 				var expiresIn time.Duration
 				if !expiresAt.IsZero() {
 					expiresIn = time.Until(expiresAt)
@@ -453,6 +463,48 @@ func WriteOpenCodeCredentials(accessToken, refreshToken string, expiresAt time.T
 	}
 
 	return os.Rename(tempPath, authPath)
+}
+
+// ReadRefreshTokenBySource re-reads the credential file for source and returns
+// the refresh token it currently holds. The bool is false when the source has
+// no file on disk or the file is unreadable or unparseable.
+//
+// It exists for compare-and-swap write-back: after onWatch rotates a refresh
+// token it borrowed from a system auth file, it must only write the result back
+// when the file still holds the token it consumed. If the CLI logged in again
+// in the meantime, the file has a newer token and must not be overwritten.
+func ReadRefreshTokenBySource(source CredentialSource) (string, bool) {
+	var path string
+	switch source {
+	case CredentialSourceCodex:
+		path = codexAuthPath()
+	case CredentialSourceOpenCode:
+		path = OpenCodeAuthPath()
+	default:
+		return "", false
+	}
+	if path == "" {
+		return "", false
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+
+	if source == CredentialSourceOpenCode {
+		var auth openCodeAuthFile
+		if err := json.Unmarshal(data, &auth); err != nil {
+			return "", false
+		}
+		return strings.TrimSpace(auth.OpenAI.Refresh), true
+	}
+
+	var auth codexAuthFile
+	if err := json.Unmarshal(data, &auth); err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(auth.Tokens.RefreshToken), true
 }
 
 // WriteCredentialsBySource writes refreshed tokens back to the correct file in

@@ -32,7 +32,10 @@ jobs:
           go-version-file: go.mod
 
       - name: Test with race detection
-        run: go test -race ./...
+        # Same 15m limit as ci.yml. The internal/web race suite alone takes
+        # about 8.5 minutes on the Linux runner, so Go's default 10m panics
+        # when packages run in parallel.
+        run: go test -race -timeout 15m ./...
 
   build-standard:
     needs: test

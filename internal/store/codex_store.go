@@ -43,6 +43,13 @@ func (s *Store) InsertCodexSnapshot(snapshot *api.CodexSnapshot) (int64, error) 
 	if snapshot.CreditsBalance != nil {
 		creditsBalance = *snapshot.CreditsBalance
 	}
+	var resetCreditsCount, applicableCreditsCount interface{}
+	if snapshot.ResetCreditsAvailableCount.Valid {
+		resetCreditsCount = snapshot.ResetCreditsAvailableCount.Value
+	}
+	if snapshot.ResetCreditsApplicableCount.Valid {
+		applicableCreditsCount = snapshot.ResetCreditsApplicableCount.Value
+	}
 
 	accountID := snapshot.AccountID
 	if accountID == 0 {
@@ -50,11 +57,13 @@ func (s *Store) InsertCodexSnapshot(snapshot *api.CodexSnapshot) (int64, error) 
 	}
 
 	result, err := tx.Exec(
-		`INSERT INTO codex_snapshots (captured_at, account_id, plan_type, credits_balance, raw_json, quota_count) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO codex_snapshots (captured_at, account_id, plan_type, credits_balance, reset_credits_count, applicable_credits_count, raw_json, quota_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		snapshot.CapturedAt.Format(time.RFC3339Nano),
 		accountID,
 		snapshot.PlanType,
 		creditsBalance,
+		resetCreditsCount,
+		applicableCreditsCount,
 		snapshot.RawJSON,
 		len(snapshot.Quotas),
 	)
@@ -101,11 +110,12 @@ func (s *Store) QueryLatestCodex(accountID int64) (*api.CodexSnapshot, error) {
 	var capturedAt string
 	var planType sql.NullString
 	var creditsBalance sql.NullFloat64
+	var resetCreditsCount, applicableCreditsCount sql.NullInt64
 
 	err := s.db.QueryRow(
-		`SELECT id, captured_at, plan_type, credits_balance, quota_count, account_id FROM codex_snapshots WHERE account_id = ? ORDER BY captured_at DESC LIMIT 1`,
+		`SELECT id, captured_at, plan_type, credits_balance, reset_credits_count, applicable_credits_count, quota_count, account_id FROM codex_snapshots WHERE account_id = ? ORDER BY captured_at DESC LIMIT 1`,
 		accountID,
-	).Scan(&snapshot.ID, &capturedAt, &planType, &creditsBalance, new(int), &snapshot.AccountID)
+	).Scan(&snapshot.ID, &capturedAt, &planType, &creditsBalance, &resetCreditsCount, &applicableCreditsCount, new(int), &snapshot.AccountID)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -124,6 +134,12 @@ func (s *Store) QueryLatestCodex(accountID int64) (*api.CodexSnapshot, error) {
 	}
 	if creditsBalance.Valid {
 		snapshot.CreditsBalance = &creditsBalance.Float64
+	}
+	if resetCreditsCount.Valid {
+		snapshot.ResetCreditsAvailableCount = api.CodexOptionalInt64{Value: resetCreditsCount.Int64, Valid: true}
+	}
+	if applicableCreditsCount.Valid {
+		snapshot.ResetCreditsApplicableCount = api.CodexOptionalInt64{Value: applicableCreditsCount.Int64, Valid: true}
 	}
 
 	rows, err := s.db.Query(
@@ -163,13 +179,13 @@ func (s *Store) QueryCodexRange(accountID int64, start, end time.Time, limit ...
 	if accountID == 0 {
 		accountID = DefaultCodexAccountID
 	}
-	query := `SELECT id, captured_at, plan_type, credits_balance, quota_count, account_id FROM codex_snapshots
+	query := `SELECT id, captured_at, plan_type, credits_balance, reset_credits_count, applicable_credits_count, quota_count, account_id FROM codex_snapshots
 		WHERE account_id = ? AND captured_at BETWEEN ? AND ? ORDER BY captured_at ASC`
 	args := []interface{}{accountID, start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano)}
 	if len(limit) > 0 && limit[0] > 0 {
-		query = `SELECT id, captured_at, plan_type, credits_balance, quota_count, account_id
+		query = `SELECT id, captured_at, plan_type, credits_balance, reset_credits_count, applicable_credits_count, quota_count, account_id
 			FROM (
-				SELECT id, captured_at, plan_type, credits_balance, quota_count, account_id
+				SELECT id, captured_at, plan_type, credits_balance, reset_credits_count, applicable_credits_count, quota_count, account_id
 				FROM codex_snapshots
 				WHERE account_id = ? AND captured_at BETWEEN ? AND ?
 				ORDER BY captured_at DESC
@@ -183,15 +199,49 @@ func (s *Store) QueryCodexRange(accountID int64, start, end time.Time, limit ...
 	if err != nil {
 		return nil, fmt.Errorf("failed to query codex range: %w", err)
 	}
-	defer rows.Close()
+	snapshots, err := scanCodexSnapshotRows(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.attachCodexQuotas(snapshots); err != nil {
+		return nil, err
+	}
+	return snapshots, nil
+}
 
+// QueryCodexRangeSampled returns at most about 200 snapshots spread evenly
+// across the range (first and last always kept), with their quota values.
+func (s *Store) QueryCodexRangeSampled(accountID int64, start, end time.Time) ([]*api.CodexSnapshot, error) {
+	if accountID == 0 {
+		accountID = DefaultCodexAccountID
+	}
+	// Filter and sample the account's rows in one query.
+	query := windowChartQueryWhere("codex_snapshots", "id, captured_at, plan_type, credits_balance, reset_credits_count, applicable_credits_count, quota_count, account_id", "account_id = ?")
+	rows, err := s.db.Query(query,
+		start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano), accountID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query sampled codex range: %w", err)
+	}
+	snapshots, err := scanCodexSnapshotRows(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.attachCodexQuotas(snapshots); err != nil {
+		return nil, err
+	}
+	return snapshots, nil
+}
+
+func scanCodexSnapshotRows(rows *sql.Rows) ([]*api.CodexSnapshot, error) {
+	defer rows.Close()
 	var snapshots []*api.CodexSnapshot
 	for rows.Next() {
 		var snap api.CodexSnapshot
 		var capturedAt string
 		var planType sql.NullString
 		var creditsBalance sql.NullFloat64
-		if err := rows.Scan(&snap.ID, &capturedAt, &planType, &creditsBalance, new(int), &snap.AccountID); err != nil {
+		var resetCreditsCount, applicableCreditsCount sql.NullInt64
+		if err := rows.Scan(&snap.ID, &capturedAt, &planType, &creditsBalance, &resetCreditsCount, &applicableCreditsCount, new(int), &snap.AccountID); err != nil {
 			return nil, fmt.Errorf("failed to scan codex snapshot: %w", err)
 		}
 		parsedCapturedAt, err := parseCodexTime(capturedAt, "codex snapshot captured_at")
@@ -205,46 +255,56 @@ func (s *Store) QueryCodexRange(accountID int64, start, end time.Time, limit ...
 		if creditsBalance.Valid {
 			snap.CreditsBalance = &creditsBalance.Float64
 		}
+		if resetCreditsCount.Valid {
+			snap.ResetCreditsAvailableCount = api.CodexOptionalInt64{Value: resetCreditsCount.Int64, Valid: true}
+		}
+		if applicableCreditsCount.Valid {
+			snap.ResetCreditsApplicableCount = api.CodexOptionalInt64{Value: applicableCreditsCount.Int64, Valid: true}
+		}
 		snapshots = append(snapshots, &snap)
 	}
+	return snapshots, rows.Err()
+}
 
-	if err := rows.Err(); err != nil {
-		return nil, err
+// attachCodexQuotas loads quota values for the snapshots in batches of
+// IN-list queries instead of one query per snapshot.
+func (s *Store) attachCodexQuotas(snapshots []*api.CodexSnapshot) error {
+	if len(snapshots) == 0 {
+		return nil
 	}
-
-	for _, snap := range snapshots {
-		qRows, err := s.db.Query(
-			`SELECT quota_name, utilization, resets_at, status FROM codex_quota_values WHERE snapshot_id = ? ORDER BY quota_name`,
-			snap.ID,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to query codex quota values for snapshot %d: %w", snap.ID, err)
-		}
-		for qRows.Next() {
+	ids := make([]int64, len(snapshots))
+	for i, snap := range snapshots {
+		ids[i] = snap.ID
+	}
+	bySnapshot, err := loadSnapshotValuesBatched(s, ids,
+		"codex_quota_values", "quota_name, utilization, resets_at, status", "quota_name",
+		func(rows *sql.Rows) (int64, api.CodexQuota, error) {
+			var snapshotID int64
 			var q api.CodexQuota
 			var resetsAt sql.NullString
 			var status sql.NullString
-			if err := qRows.Scan(&q.Name, &q.Utilization, &resetsAt, &status); err != nil {
-				qRows.Close()
-				return nil, fmt.Errorf("failed to scan codex quota value: %w", err)
+			if err := rows.Scan(&snapshotID, &q.Name, &q.Utilization, &resetsAt, &status); err != nil {
+				return 0, q, err
 			}
 			if resetsAt.Valid && resetsAt.String != "" {
 				parsedResetsAt, err := parseCodexTime(resetsAt.String, "codex quota resets_at")
 				if err != nil {
-					qRows.Close()
-					return nil, err
+					return 0, q, err
 				}
 				q.ResetsAt = &parsedResetsAt
 			}
 			if status.Valid {
 				q.Status = status.String
 			}
-			snap.Quotas = append(snap.Quotas, q)
-		}
-		qRows.Close()
+			return snapshotID, q, nil
+		})
+	if err != nil {
+		return fmt.Errorf("failed to query codex quota values: %w", err)
 	}
-
-	return snapshots, nil
+	for _, snap := range snapshots {
+		snap.Quotas = bySnapshot[snap.ID]
+	}
+	return nil
 }
 
 // CreateCodexCycle creates a new Codex reset cycle.
@@ -581,7 +641,13 @@ func (s *Store) QueryCodexCycleOverview(accountID int64, groupBy string, limit i
 	}
 	cycles = append(cycles, completedCycles...)
 
+	// Collect peak and first snapshot ids first, then load their quota values
+	// in batches instead of two queries per cycle.
 	var overviewRows []CycleOverviewRow
+	peakIDs := make([]int64, 0, len(cycles))
+	firstIDs := make([]int64, 0, len(cycles))
+	peakIDByRow := make(map[int]int64, len(cycles))
+	firstIDByRow := make(map[int]int64, len(cycles))
 	for _, c := range cycles {
 		row := CycleOverviewRow{
 			CycleID:    c.ID,
@@ -591,6 +657,7 @@ func (s *Store) QueryCodexCycleOverview(accountID int64, groupBy string, limit i
 			PeakValue:  c.PeakUtilization,
 			TotalDelta: c.TotalDelta,
 		}
+		rowIndex := len(overviewRows)
 
 		var endBoundary time.Time
 		if c.CycleEnd != nil {
@@ -625,8 +692,10 @@ func (s *Store) QueryCodexCycleOverview(accountID int64, groupBy string, limit i
 			return nil, fmt.Errorf("store.QueryCodexCycleOverview: peak time: %w", err)
 		}
 		row.PeakTime = parsedPeakTime
+		overviewRows = append(overviewRows, row)
+		peakIDs = append(peakIDs, snapshotID)
+		peakIDByRow[rowIndex] = snapshotID
 
-		startValues := make(map[string]float64)
 		var firstSnapshotID int64
 		err = s.db.QueryRow(
 			`SELECT id FROM codex_snapshots
@@ -637,43 +706,31 @@ func (s *Store) QueryCodexCycleOverview(accountID int64, groupBy string, limit i
 			endBoundary.Format(time.RFC3339Nano),
 		).Scan(&firstSnapshotID)
 		if err == nil {
-			startRows, err := s.db.Query(
-				`SELECT quota_name, utilization FROM codex_quota_values WHERE snapshot_id = ?`,
-				firstSnapshotID,
-			)
-			if err == nil {
-				for startRows.Next() {
-					var name string
-					var util float64
-					if startRows.Scan(&name, &util) == nil {
-						startValues[name] = util
-					}
-				}
-				startRows.Close()
-			}
+			firstIDs = append(firstIDs, firstSnapshotID)
+			firstIDByRow[rowIndex] = firstSnapshotID
 		}
+	}
 
-		qRows, err := s.db.Query(
-			`SELECT quota_name, utilization FROM codex_quota_values WHERE snapshot_id = ? ORDER BY quota_name`,
-			snapshotID,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("store.QueryCodexCycleOverview: quota values: %w", err)
-		}
-		for qRows.Next() {
-			var entry CrossQuotaEntry
-			if err := qRows.Scan(&entry.Name, &entry.Percent); err != nil {
-				qRows.Close()
-				return nil, fmt.Errorf("store.QueryCodexCycleOverview: scan quota: %w", err)
-			}
+	peakValues, err := loadQuotaUtilization(s, peakIDs, "codex_quota_values")
+	if err != nil {
+		return nil, fmt.Errorf("store.QueryCodexCycleOverview: quota values: %w", err)
+	}
+	startValuesBySnapshot, err := loadQuotaUtilization(s, firstIDs, "codex_quota_values")
+	if err != nil {
+		return nil, fmt.Errorf("store.QueryCodexCycleOverview: start values: %w", err)
+	}
+
+	for rowIndex, snapshotID := range peakIDByRow {
+		startValues := startValuesBySnapshot[firstIDByRow[rowIndex]]
+		values := peakValues[snapshotID]
+		for _, name := range sortedUtilizationNames(values) {
+			percent := values[name]
+			entry := CrossQuotaEntry{Name: name, Percent: percent}
 			entry.Value = entry.Percent
 			entry.StartPercent = startValues[entry.Name]
 			entry.Delta = entry.Percent - entry.StartPercent
-			row.CrossQuotas = append(row.CrossQuotas, entry)
+			overviewRows[rowIndex].CrossQuotas = append(overviewRows[rowIndex].CrossQuotas, entry)
 		}
-		qRows.Close()
-
-		overviewRows = append(overviewRows, row)
 	}
 
 	return overviewRows, nil
@@ -682,7 +739,7 @@ func (s *Store) QueryCodexCycleOverview(accountID int64, groupBy string, limit i
 // QueryAllCodexQuotaNames returns all distinct quota names from Codex quota values.
 func (s *Store) QueryAllCodexQuotaNames() ([]string, error) {
 	rows, err := s.db.Query(
-		`SELECT DISTINCT quota_name FROM codex_quota_values ORDER BY quota_name`,
+		skipScanDistinctSQL("codex_quota_values", "quota_name"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query codex quota names: %w", err)
@@ -704,7 +761,7 @@ func (s *Store) QueryAllCodexQuotaNames() ([]string, error) {
 // QueryCodexAccounts returns all distinct account IDs from Codex snapshots.
 func (s *Store) QueryCodexAccounts() ([]int64, error) {
 	rows, err := s.db.Query(
-		`SELECT DISTINCT account_id FROM codex_snapshots ORDER BY account_id`,
+		skipScanDistinctSQL("codex_snapshots", "account_id"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query codex accounts: %w", err)
@@ -1034,6 +1091,59 @@ func (s *Store) MergeCodexAccountData(targetID, sourceID int64) error {
 		targetID, sourceID,
 	); err != nil {
 		return fmt.Errorf("failed to merge reset cycles: %w", err)
+	}
+
+	// Move tracked reset credits. UPDATE OR REPLACE resolves a credit ID that
+	// exists on both rows by deleting the target row and inserting the source
+	// one. The target's notification marker and earliest first_seen must survive
+	// that, the merged row must stay live if either side was live - a stale
+	// gone_at on the source must not hide a live target credit - and status and
+	// last_seen must come from the newer row. Copy those values onto the source
+	// rows first, with parameterized SQL.
+	if _, err := tx.Exec(
+		`UPDATE codex_reset_credits AS src SET
+			notified_at = COALESCE(src.notified_at, (
+				SELECT tgt.notified_at FROM codex_reset_credits AS tgt
+				WHERE tgt.account_id = ? AND tgt.credit_id = src.credit_id
+			)),
+			first_seen = MIN(src.first_seen, COALESCE((
+				SELECT tgt.first_seen FROM codex_reset_credits AS tgt
+				WHERE tgt.account_id = ? AND tgt.credit_id = src.credit_id
+			), src.first_seen)),
+			status = COALESCE((
+				SELECT tgt.status FROM codex_reset_credits AS tgt
+				WHERE tgt.account_id = ? AND tgt.credit_id = src.credit_id
+					AND julianday(tgt.last_seen) > julianday(src.last_seen)
+			), src.status),
+			last_seen = COALESCE((
+				SELECT tgt.last_seen FROM codex_reset_credits AS tgt
+				WHERE tgt.account_id = ? AND tgt.credit_id = src.credit_id
+					AND julianday(tgt.last_seen) > julianday(src.last_seen)
+			), src.last_seen),
+			gone_at = CASE
+				WHEN src.gone_at IS NULL OR EXISTS (
+					SELECT 1 FROM codex_reset_credits AS tgt
+					WHERE tgt.account_id = ? AND tgt.credit_id = src.credit_id AND tgt.gone_at IS NULL
+				) THEN NULL
+				ELSE src.gone_at
+			END
+		WHERE src.account_id = ?`,
+		targetID, targetID, targetID, targetID, targetID, sourceID,
+	); err != nil {
+		return fmt.Errorf("failed to merge reset-credit metadata: %w", err)
+	}
+	if _, err := tx.Exec(
+		`UPDATE OR REPLACE codex_reset_credits SET account_id = ? WHERE account_id = ?`,
+		targetID, sourceID,
+	); err != nil {
+		return fmt.Errorf("failed to merge reset credits: %w", err)
+	}
+	// The target's last-check row stands; both accounts polled the same identity.
+	if _, err := tx.Exec(
+		`DELETE FROM codex_reset_credit_checks WHERE account_id = ?`,
+		sourceID,
+	); err != nil {
+		return fmt.Errorf("failed to merge reset-credit checks: %w", err)
 	}
 
 	// Mark source account as deleted

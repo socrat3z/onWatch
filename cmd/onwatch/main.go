@@ -149,6 +149,7 @@ func menubarHelpText() string {
 func stopPreviousInstance(port int, testMode bool) {
 	myPID := os.Getpid()
 	stopped := false
+	var stoppedPIDs []int
 
 	if productionPIDFileOffLimits() {
 		return
@@ -174,6 +175,7 @@ func stopPreviousInstance(port int, testMode bool) {
 			if stopProcess(pid) {
 				fmt.Printf("Stopped previous instance (PID %d) via PID file\n", pid)
 				stopped = true
+				stoppedPIDs = append(stoppedPIDs, pid)
 			}
 		}
 		os.Remove(pidFile)
@@ -194,6 +196,7 @@ func stopPreviousInstance(port int, testMode bool) {
 						if stopProcess(foundPID) {
 							fmt.Printf("Stopped previous instance (PID %d) on port %d\n", foundPID, filePort)
 							stopped = true
+							stoppedPIDs = append(stoppedPIDs, foundPID)
 						}
 					}
 				}
@@ -216,6 +219,7 @@ func stopPreviousInstance(port int, testMode bool) {
 					if stopProcess(pid) {
 						fmt.Printf("Stopped previous instance (PID %d) on port %d\n", pid, port)
 						stopped = true
+						stoppedPIDs = append(stoppedPIDs, pid)
 					}
 				}
 			}
@@ -223,6 +227,12 @@ func stopPreviousInstance(port int, testMode bool) {
 	}
 
 	if stopped {
+		// Termination is asynchronous: on Windows the port stays bound until
+		// the process is really gone, and binding it any earlier fails the
+		// new daemon's startup.
+		for _, pid := range stoppedPIDs {
+			waitForExit(pid, 5*time.Second)
+		}
 		time.Sleep(500 * time.Millisecond)
 	}
 }
@@ -255,6 +265,26 @@ func findOnwatchOnPort(port int) []int {
 	return pids
 }
 
+// executableBaseName returns this binary's normalized base name. It is a
+// variable so tests can simulate a renamed build.
+var executableBaseName = func() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return normalizeExecutableName(filepath.Base(exe))
+}
+
+// normalizeExecutableName lowercases a binary base name and drops the .exe
+// suffix on Windows, so comparisons are case-insensitive and extension-free.
+func normalizeExecutableName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if runtime.GOOS == "windows" {
+		name = strings.TrimSuffix(name, ".exe")
+	}
+	return name
+}
+
 // isOnwatchProcess checks if a PID belongs to an onwatch (or legacy syntrack)
 // binary. processCommandName is per-platform: ps on Unix, the process image
 // path on Windows, which has no ps.
@@ -262,8 +292,16 @@ func isOnwatchProcess(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	cmd := strings.ToLower(processCommandName(pid))
-	return strings.Contains(cmd, "onwatch") || strings.Contains(cmd, "syntrack")
+	name := normalizeExecutableName(processCommandName(pid))
+	if name == "" {
+		return false
+	}
+	// A renamed build (for example a user-built binary) must still be
+	// recognised, or stop and the menubar sweep never touch it.
+	if own := executableBaseName(); own != "" && name == own {
+		return true
+	}
+	return strings.Contains(name, "onwatch") || strings.Contains(name, "syntrack")
 }
 
 func ensurePIDDir() error {
@@ -427,24 +465,41 @@ func migrateDBLocation(newPath string, logger *slog.Logger) {
 	}
 }
 
-// fixExplicitDBPath detects when a user's .env has a misconfigured DB_PATH
-// (e.g., ./onwatch.db or ./syntrack.db) while the canonical data/ path holds
-// the actual historical data. It redirects to the canonical path so the
-// dashboard shows existing data instead of appearing empty.
+// fixExplicitDBPath migrates a legacy relative DB_PATH default left in a user's
+// .env (e.g., ./onwatch.db or ./syntrack.db) to the canonical data/ path when
+// that path holds the real historical data, so the dashboard shows existing
+// data instead of appearing empty.
+//
+// It must never redirect a path the user chose deliberately. A --db flag is
+// always honoured, and any absolute ONWATCH_DB_PATH is kept as-is. Redirecting
+// an isolated instance to the production database makes two daemons poll and
+// refresh the same one-time OAuth tokens, logging the user out of Claude Code.
 func fixExplicitDBPath(cfg *config.Config, logger *slog.Logger) {
+	// A --db flag is an explicit operator choice - never redirect it.
+	for _, arg := range os.Args[1:] {
+		if arg == "--db" || strings.HasPrefix(arg, "--db=") {
+			return
+		}
+	}
+
+	// Only the legacy relative defaults are candidates for migration. An
+	// absolute path (e.g. from ONWATCH_DB_PATH) is deliberate and is kept.
+	if filepath.IsAbs(cfg.DBPath) {
+		return
+	}
+	switch filepath.Clean(cfg.DBPath) {
+	case "onwatch.db", "syntrack.db":
+		// legacy relative default - may be migrated below
+	default:
+		return
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return
 	}
 
 	canonicalPath := filepath.Join(home, ".onwatch", "data", "onwatch.db")
-
-	// Already using the canonical path - nothing to fix
-	absExplicit, _ := filepath.Abs(cfg.DBPath)
-	absCan, _ := filepath.Abs(canonicalPath)
-	if absExplicit == absCan {
-		return
-	}
 
 	// Check if canonical path exists and has data
 	canInfo, err := os.Stat(canonicalPath)
@@ -759,9 +814,10 @@ func run() error {
 	}
 
 	isDaemonChild := os.Getenv("_ONWATCH_DAEMON") == "1"
-	// launchd supervises the process itself: forking into the background would
-	// make launchd think the job died and relaunch it in a loop.
-	underLaunchd := service.UnderLaunchd()
+	// launchd (or the Windows auto-start supervisor) owns the process: forking
+	// into the background would make it think the job died and relaunch it in
+	// a loop.
+	underLaunchd := service.UnderSupervisor()
 
 	// Write early diagnostic to stderr (inherited log file fd) BEFORE slog is configured.
 	// If the daemon child crashes during init, this ensures the log file isn't empty.
@@ -1416,10 +1472,10 @@ func run() error {
 	if cfg.HasProvider("kimi") {
 		kimiTr = tracker.NewKimiTracker(db, logger)
 	}
-	var opencodeTr *tracker.OpenCodeTracker
-	if cfg.HasProvider("opencode") {
-		opencodeTr = tracker.NewOpenCodeTracker(db, logger)
-	}
+	// Always constructed: OpenCode can be enabled at runtime from Settings, so
+	// the tracker and its agent factory must exist even when no key is set at
+	// startup.
+	opencodeTr := tracker.NewOpenCodeTracker(db, logger)
 	var ollamaTr *tracker.OllamaTracker
 	if cfg.HasProvider("ollama") {
 		ollamaTr = tracker.NewOllamaTracker(db, logger)
@@ -1514,16 +1570,6 @@ func run() error {
 		kimiSm := agent.NewSessionManager(db, "kimi", idleTimeout, logger)
 		kimiAg = agent.NewKimiAgent(kimiClient, db, kimiTr, cfg.PollInterval, logger, kimiSm)
 	}
-	var opencodeAg *agent.OpenCodeAgent
-	if cfg.HasProvider("opencode") {
-		var opencodeOpts []api.OpenCodeClientOption
-		if cfg.OpenCodeGoBaseURL != "" {
-			opencodeOpts = append(opencodeOpts, api.WithOpenCodeBaseURL(cfg.OpenCodeGoBaseURL))
-		}
-		opencodeClient := api.NewOpenCodeClient(logger, opencodeOpts...)
-		opencodeSm := agent.NewSessionManager(db, "opencode", idleTimeout, logger)
-		opencodeAg = agent.NewOpenCodeAgent(opencodeClient, db, opencodeTr, cfg, cfg.PollInterval, logger, opencodeSm)
-	}
 	var ollamaAg *agent.OllamaAgent
 	if cfg.HasProvider("ollama") {
 		ollamaClient := api.NewOllamaClient(cfg.OllamaAPIKey, logger, api.WithOllamaMonthlyLimit(cfg.OllamaMonthlyLimit), api.WithOllamaResetDay(cfg.OllamaResetDay))
@@ -1599,9 +1645,6 @@ func run() error {
 	}
 	if kimiAg != nil {
 		kimiAg.SetNotifier(notifier)
-	}
-	if opencodeAg != nil {
-		opencodeAg.SetNotifier(notifier)
 	}
 	if ollamaAg != nil {
 		ollamaAg.SetNotifier(notifier)
@@ -1772,9 +1815,6 @@ func run() error {
 	if kimiAg != nil {
 		kimiAg.SetPollingCheck(func() bool { return isPollingEnabled("kimi") })
 	}
-	if opencodeAg != nil {
-		opencodeAg.SetPollingCheck(func() bool { return isPollingEnabled("opencode") })
-	}
 	if ollamaAg != nil {
 		ollamaAg.SetPollingCheck(func() bool { return isPollingEnabled("ollama") })
 	}
@@ -1875,7 +1915,14 @@ func run() error {
 		})
 	}
 
+	// One in-memory registry of last-poll outcome classes (network, auth,
+	// rate_limit, ...) so a stale menubar card can say why. Agents publish to
+	// the process-wide instance; the handler reads the same one.
+	pollStatus := agent.NewPollStatusRegistry()
+	agent.SetPollStatusRegistry(pollStatus)
+
 	handler := web.NewHandler(db, tr, logger, nil, cfg, zaiTr)
+	handler.SetPollStatusRegistry(pollStatus)
 	handler.SetVersion(version)
 	handler.SetNotifier(notifier)
 	if anthropicTr != nil {
@@ -1970,17 +2017,48 @@ func run() error {
 	if kimiAg != nil {
 		agentMgr.RegisterFactory("kimi", func() (agent.AgentRunner, error) { return kimiAg, nil })
 	}
-	if cfg.HasProvider("mistral") {
-		agentMgr.RegisterFactory("mistral", func() (agent.AgentRunner, error) {
-			mistralAg := agent.NewMistralAgent(db, cfg, logger)
-			mistralAg.SetNotifier(notifier)
-			mistralAg.SetPollingCheck(func() bool { return isPollingEnabled("mistral") })
-			return mistralAg, nil
-		})
-	}
-	if opencodeAg != nil {
-		agentMgr.RegisterFactory("opencode", func() (agent.AgentRunner, error) { return opencodeAg, nil })
-	}
+	// Mistral and OpenCode are the only providers whose factory builds a FRESH
+	// agent and client on every start, so they can be restarted at runtime
+	// (a saved key or enable flag takes effect without a daemon restart) and
+	// never read the mutable shared config. They are registered unconditionally
+	// so a provider first enabled from Settings can be started; every other
+	// provider shares one instance built at startup and keeps the old behaviour
+	// (changes apply on daemon restart). Mistral's config is copied by value at
+	// build time (NewMistralAgent already copies), OpenCode's credentials are
+	// snapshotted by NewOpenCodeAgent.
+	agentMgr.RegisterFactory("mistral", func() (agent.AgentRunner, error) {
+		// Snapshot the shared config under its read lock, so a concurrent
+		// settings save cannot mutate it mid-copy (the factory reads several
+		// fields, and NewMistralAgent copies the whole struct).
+		snapshot := cfg.Snapshot()
+		if !snapshot.HasProvider("mistral") {
+			return nil, fmt.Errorf("mistral: enable it and set credentials in Settings -> Providers")
+		}
+		mistralAg := agent.NewMistralAgent(db, &snapshot, logger)
+		mistralAg.SetNotifier(notifier)
+		mistralAg.SetPollingCheck(func() bool { return isPollingEnabled("mistral") })
+		return mistralAg, nil
+	})
+	agentMgr.RegisterFactory("opencode", func() (agent.AgentRunner, error) {
+		snapshot := cfg.Snapshot()
+		if !snapshot.OpenCodeGoConfigured() {
+			// The settings reconcile path logs this as a warning when the user
+			// enables the provider without a credential; keep the startup pass
+			// quiet for users who never touch OpenCode.
+			logger.Debug("OpenCode Go not configured; skipping polling")
+			return nil, fmt.Errorf("opencode: set the Usage API Key (or workspace ID + session cookie) in Settings -> Providers -> OpenCode Go")
+		}
+		var opencodeOpts []api.OpenCodeClientOption
+		if snapshot.OpenCodeGoBaseURL != "" {
+			opencodeOpts = append(opencodeOpts, api.WithOpenCodeBaseURL(snapshot.OpenCodeGoBaseURL))
+		}
+		opencodeClient := api.NewOpenCodeClient(logger, opencodeOpts...)
+		opencodeSm := agent.NewSessionManager(db, "opencode", idleTimeout, logger)
+		ag := agent.NewOpenCodeAgent(opencodeClient, db, opencodeTr, &snapshot, snapshot.PollInterval, logger, opencodeSm)
+		ag.SetNotifier(notifier)
+		ag.SetPollingCheck(func() bool { return isPollingEnabled("opencode") })
+		return ag, nil
+	})
 	if ollamaAg != nil {
 		agentMgr.RegisterFactory("ollama", func() (agent.AgentRunner, error) { return ollamaAg, nil })
 	}
@@ -1997,6 +2075,9 @@ func run() error {
 	handler.SetAgentManager(agentMgr)
 	if minimaxMgr != nil {
 		handler.SetMiniMaxAgentManager(minimaxMgr)
+	}
+	if codexMgr != nil {
+		handler.SetCodexPauseReporter(codexMgr)
 	}
 	updater := update.NewUpdater(version, logger)
 	handler.SetUpdater(updater)
@@ -2149,6 +2230,14 @@ func runStop(testMode bool) error {
 	if productionPIDFileOffLimits() {
 		fmt.Printf("No running %s instance found\n", label)
 		return nil
+	}
+
+	// End the Windows auto-start supervisor first: a stop that lands while it
+	// waits to restart a crashed daemon would otherwise be undone.
+	if !testMode {
+		if err := autostartStopSupervisor(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not end the auto-start task: %v\n", err)
+		}
 	}
 
 	// Method 1: PID file (handles both "PID" and "PID:PORT" formats)

@@ -31,25 +31,29 @@ const (
 )
 
 type setupConfig struct {
-	syntheticKey       string
-	zaiKey             string
-	zaiBaseURL         string
-	anthropicToken     string
-	codexToken         string
-	openCodeEnabled    bool
-	antigravityEnabled bool
-	antigravitySource  string
-	geminiEnabled      bool
-	grokEnabled        bool
-	ollamaKey          string
-	museEnabled        bool
-	museKey            string
-	commandCodeEnabled bool
-	commandCodeKey     string
-	adminUser          string
-	adminPass          string
-	port               int
-	pollInterval       int
+	syntheticKey          string
+	zaiKey                string
+	zaiBaseURL            string
+	anthropicToken        string
+	codexToken            string
+	openCodeEnabled       bool
+	antigravityEnabled    bool
+	antigravitySource     string
+	geminiEnabled         bool
+	grokEnabled           bool
+	ollamaKey             string
+	museEnabled           bool
+	museKey               string
+	commandCodeEnabled    bool
+	commandCodeKey        string
+	openCodeGoConfigured  bool
+	openCodeGoKey         string
+	openCodeGoWorkspaceID string
+	openCodeGoAuthCookie  string
+	adminUser             string
+	adminPass             string
+	port                  int
+	pollInterval          int
 }
 
 func runSetup() error {
@@ -128,6 +132,7 @@ func freshSetup(reader *bufio.Reader) (*setupConfig, error) {
 		"Ollama Cloud only",
 		"Muse (Meta) only",
 		"Command Code only",
+		"OpenCode Go only",
 		"Multiple (choose one at a time)",
 		"All available",
 	}
@@ -162,9 +167,12 @@ func freshSetup(reader *bufio.Reader) (*setupConfig, error) {
 		cfg.museEnabled, cfg.museKey = collectMuse(reader, logger)
 	case 11: // Command Code only
 		cfg.commandCodeEnabled, cfg.commandCodeKey = collectCommandCode(reader, logger)
-	case 12: // Multiple
+	case 12: // OpenCode Go only
+		applyOpenCodeGoConfig(cfg, collectOpenCodeGo(reader, logger))
+	case 13: // Multiple
 		cfg.syntheticKey, cfg.zaiKey, cfg.zaiBaseURL, cfg.anthropicToken, cfg.codexToken, cfg.openCodeEnabled, cfg.antigravityEnabled, cfg.geminiEnabled, cfg.grokEnabled, cfg.ollamaKey, cfg.museEnabled, cfg.museKey, cfg.commandCodeEnabled, cfg.commandCodeKey = collectMultipleProviders(reader, logger)
-	case 13: // All
+		applyOpenCodeGoConfig(cfg, collectMultipleOpenCodeGo(reader, logger))
+	case 14: // All
 		cfg.syntheticKey = collectSyntheticKey(reader)
 		cfg.zaiKey, cfg.zaiBaseURL = collectZaiConfig(reader)
 		cfg.anthropicToken = collectAnthropicToken(reader, logger)
@@ -178,10 +186,11 @@ func freshSetup(reader *bufio.Reader) (*setupConfig, error) {
 		cfg.ollamaKey = collectOllamaKey(reader)
 		cfg.museEnabled, cfg.museKey = collectMuse(reader, logger)
 		cfg.commandCodeEnabled, cfg.commandCodeKey = collectCommandCode(reader, logger)
+		applyOpenCodeGoConfig(cfg, collectOpenCodeGo(reader, logger))
 	}
 
 	// Validate at least one provider
-	if cfg.syntheticKey == "" && cfg.zaiKey == "" && cfg.anthropicToken == "" && cfg.codexToken == "" && !cfg.openCodeEnabled && !cfg.antigravityEnabled && !cfg.geminiEnabled && !cfg.grokEnabled && cfg.ollamaKey == "" && !cfg.museEnabled && cfg.museKey == "" && !cfg.commandCodeEnabled && cfg.commandCodeKey == "" {
+	if cfg.syntheticKey == "" && cfg.zaiKey == "" && cfg.anthropicToken == "" && cfg.codexToken == "" && !cfg.openCodeEnabled && !cfg.antigravityEnabled && !cfg.geminiEnabled && !cfg.grokEnabled && cfg.ollamaKey == "" && !cfg.museEnabled && cfg.museKey == "" && !cfg.commandCodeEnabled && cfg.commandCodeKey == "" && !cfg.openCodeGoConfigured {
 		return nil, fmt.Errorf("at least one provider is required")
 	}
 
@@ -269,6 +278,15 @@ func collectMultipleProviders(reader *bufio.Reader, logger *slog.Logger) (synKey
 		commandCodeEnabled, commandCodeKey = collectCommandCode(reader, logger)
 	}
 	return
+}
+
+// collectMultipleOpenCodeGo is a thin wrapper so collectMultipleProviders can
+// offer OpenCode Go alongside the other providers.
+func collectMultipleOpenCodeGo(reader *bufio.Reader, logger *slog.Logger) openCodeGoConfig {
+	if promptYesNo(reader, "Add OpenCode Go provider?", false) {
+		return collectOpenCodeGo(reader, logger)
+	}
+	return openCodeGoConfig{}
 }
 
 // collectAntigravitySource asks which Antigravity data source to use. All
@@ -508,6 +526,95 @@ func collectCommandCode(reader *bufio.Reader, logger *slog.Logger) (bool, string
 	}
 }
 
+// openCodeGoConfig is the result of the OpenCode Go prompt: either a Usage API
+// key, or a workspace ID plus session cookie.
+type openCodeGoConfig struct {
+	key         string
+	workspaceID string
+	cookie      string
+}
+
+// verifyOpenCodeGoKey checks a key against the Go usage API with one read-only
+// GET and returns a short window summary. A package variable so tests can stub
+// it and never touch the network.
+var verifyOpenCodeGoKey = func(key string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	snap, err := api.NewOpenCodeClient(slog.New(slog.NewTextHandler(io.Discard, nil)), api.WithOpenCodeTimeout(15*time.Second)).FetchUsageSnapshot(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	parts := make([]string, 0, len(snap.Quotas))
+	for _, q := range snap.Quotas {
+		parts = append(parts, fmt.Sprintf("%s %.1f%%", q.Name, q.Utilization))
+	}
+	return strings.Join(parts, " / ") + " used", nil
+}
+
+// collectOpenCodeGo prompts for OpenCode Go credentials. A Go Usage API key
+// (oc_sk_...) is preferred; a workspace ID (wrk_...) switches to session-cookie
+// mode, which needs the __Host-console_session cookie as well. Returns an empty
+// config when the user skips, so the provider stays off.
+func collectOpenCodeGo(reader *bufio.Reader, logger *slog.Logger) openCodeGoConfig {
+	_ = logger
+	fmt.Printf("\n  %sOpenCode Go Setup%s\n", colorBold, colorReset)
+	fmt.Printf("  %sonWatch reads your Go plan's 5-hour, weekly and monthly meters.%s\n", colorDim, colorReset)
+	fmt.Printf("  %sCreate a key in the OpenCode console: Keys -> Add Service Account (usage read).%s\n", colorDim, colorReset)
+
+	for {
+		fmt.Print("  OpenCode Go Usage API key (oc_sk_...), or workspace ID (wrk_...) for cookie mode [Enter = skip]: ")
+		value := readLine(reader)
+		if value == "" {
+			fmt.Printf("  %sSkipped OpenCode Go (enable it later in Settings -> Providers)%s\n", colorDim, colorReset)
+			return openCodeGoConfig{}
+		}
+		if strings.HasPrefix(value, "wrk_") {
+			return collectOpenCodeGoCookieMode(reader, value)
+		}
+		if !strings.HasPrefix(value, "oc_sk_") {
+			fmt.Printf("  %sKey must start with 'oc_sk_' (or a 'wrk_' workspace ID for cookie mode)%s\n", colorRed, colorReset)
+			continue
+		}
+		summary, err := verifyOpenCodeGoKey(value)
+		switch {
+		case err == nil:
+			fmt.Printf("  %s ok %s  Key verified (%s)  %s%s%s\n", colorGreen, colorReset, summary, colorDim, maskValue(value), colorReset)
+			return openCodeGoConfig{key: value}
+		case api.IsOpenCodeAuthError(err):
+			fmt.Printf("  %sOpenCode rejected this key. Check it has usage read access in the console.%s\n", colorRed, colorReset)
+			continue
+		default:
+			fmt.Printf("  %s!%s Could not reach opencode.ai to verify the key (%v) - saving it anyway\n", colorYellow, colorReset, err)
+			fmt.Printf("  %s ok %s  %s%s%s\n", colorGreen, colorReset, colorDim, maskValue(value), colorReset)
+			return openCodeGoConfig{key: value}
+		}
+	}
+}
+
+// collectOpenCodeGoCookieMode asks for the session cookie when the user gave a
+// workspace ID. Both values are required together.
+func collectOpenCodeGoCookieMode(reader *bufio.Reader, workspaceID string) openCodeGoConfig {
+	for {
+		fmt.Print("  __Host-console_session cookie value (from opencode.ai/console) [Enter = skip]: ")
+		cookie := readLine(reader)
+		if cookie == "" {
+			fmt.Printf("  %sCookie mode needs the session cookie; skipping OpenCode Go%s\n", colorDim, colorReset)
+			return openCodeGoConfig{}
+		}
+		fmt.Printf("  %s ok %s  Workspace %s%s%s with a session cookie\n", colorGreen, colorReset, colorDim, workspaceID, colorReset)
+		return openCodeGoConfig{workspaceID: workspaceID, cookie: cookie}
+	}
+}
+
+// applyOpenCodeGoConfig copies a collected OpenCode Go config into the setup
+// config, keeping the configured flag in step with the credential.
+func applyOpenCodeGoConfig(cfg *setupConfig, oc openCodeGoConfig) {
+	cfg.openCodeGoKey = oc.key
+	cfg.openCodeGoWorkspaceID = oc.workspaceID
+	cfg.openCodeGoAuthCookie = oc.cookie
+	cfg.openCodeGoConfigured = oc.key != "" || (oc.workspaceID != "" && oc.cookie != "")
+}
+
 func collectZaiConfig(reader *bufio.Reader) (string, string) {
 	fmt.Printf("\n  %sGet your key: https://www.z.ai/api-keys%s\n", colorDim, colorReset)
 
@@ -663,6 +770,16 @@ func writeEnvFile(path string, cfg *setupConfig) error {
 		b.WriteString("# COMMANDCODE_BASE_URL=\n\n")
 	}
 
+	if cfg.openCodeGoConfigured || cfg.openCodeGoKey != "" || cfg.openCodeGoWorkspaceID != "" {
+		b.WriteString("# OpenCode Go - reads your Go plan's 5-hour/weekly/monthly meters\n")
+		if cfg.openCodeGoKey != "" {
+			b.WriteString(fmt.Sprintf("OPENCODE_GO_API_KEY=%s\n\n", cfg.openCodeGoKey))
+		} else {
+			b.WriteString(fmt.Sprintf("OPENCODE_GO_WORKSPACE_ID=%s\n", cfg.openCodeGoWorkspaceID))
+			b.WriteString(fmt.Sprintf("OPENCODE_GO_AUTH_COOKIE=%s\n\n", cfg.openCodeGoAuthCookie))
+		}
+	}
+
 	b.WriteString("# Dashboard credentials\n")
 	b.WriteString(fmt.Sprintf("ONWATCH_ADMIN_USER=%s\n", cfg.adminUser))
 	b.WriteString(fmt.Sprintf("ONWATCH_ADMIN_PASS=%s\n\n", cfg.adminPass))
@@ -716,6 +833,9 @@ func printSummary(cfg *setupConfig) {
 	if cfg.commandCodeEnabled || cfg.commandCodeKey != "" {
 		providers = append(providers, "Command Code")
 	}
+	if cfg.openCodeGoConfigured || cfg.openCodeGoKey != "" || cfg.openCodeGoWorkspaceID != "" {
+		providers = append(providers, "OpenCode Go")
+	}
 	providerLabel := strings.Join(providers, ", ")
 
 	maskedPass := strings.Repeat("*", len(cfg.adminPass))
@@ -746,15 +866,20 @@ func printNextSteps() {
 // --- Existing .env handling ---
 
 type existingEnv struct {
-	syntheticKey       string
-	zaiKey             string
-	anthropicToken     string
-	codexToken         string
-	openCodeEnabled    bool
-	antigravityEnabled bool
-	geminiEnabled      bool
-	grokEnabled        bool
-	ollamaKey          string
+	syntheticKey          string
+	zaiKey                string
+	anthropicToken        string
+	codexToken            string
+	openCodeEnabled       bool
+	antigravityEnabled    bool
+	geminiEnabled         bool
+	grokEnabled           bool
+	ollamaKey             string
+	commandCodeKey        string
+	commandCodeEnabled    bool
+	openCodeGoConfigured  bool
+	openCodeGoWorkspaceID string
+	openCodeGoAuthCookie  string
 }
 
 func loadExistingEnv(path string) *existingEnv {
@@ -796,7 +921,31 @@ func loadExistingEnv(path string) *existingEnv {
 			}
 		case "OLLAMA_API_KEY":
 			env.ollamaKey = val
+		case "COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY":
+			if val != "" {
+				env.commandCodeKey = val
+			}
+		case "COMMANDCODE_ENABLED":
+			if val == "true" {
+				env.commandCodeEnabled = true
+			}
+		case "OPENCODE_GO_API_KEY":
+			if val != "" {
+				env.openCodeGoConfigured = true
+			}
+		case "OPENCODE_GO_WORKSPACE_ID":
+			if val != "" {
+				env.openCodeGoWorkspaceID = val
+			}
+		case "OPENCODE_GO_AUTH_COOKIE":
+			if val != "" {
+				env.openCodeGoAuthCookie = val
+			}
 		}
+	}
+	// Session mode needs both the workspace ID and the cookie.
+	if env.openCodeGoWorkspaceID != "" && env.openCodeGoAuthCookie != "" {
+		env.openCodeGoConfigured = true
 	}
 	if !env.geminiEnabled {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -818,7 +967,7 @@ func allProvidersConfigured(env *existingEnv) bool {
 }
 
 func anyProviderConfigured(env *existingEnv) bool {
-	return env.syntheticKey != "" || env.zaiKey != "" || env.anthropicToken != "" || env.codexToken != "" || env.openCodeEnabled || env.antigravityEnabled || env.geminiEnabled || env.grokEnabled || env.ollamaKey != ""
+	return env.syntheticKey != "" || env.zaiKey != "" || env.anthropicToken != "" || env.codexToken != "" || env.openCodeEnabled || env.antigravityEnabled || env.geminiEnabled || env.grokEnabled || env.ollamaKey != "" || env.commandCodeKey != "" || env.commandCodeEnabled || env.openCodeGoConfigured
 }
 
 func addMissingProviders(reader *bufio.Reader, envFile string, existing *existingEnv) error {
@@ -851,6 +1000,12 @@ func addMissingProviders(reader *bufio.Reader, envFile string, existing *existin
 	}
 	if existing.ollamaKey != "" {
 		configured = append(configured, "Ollama Cloud")
+	}
+	if existing.commandCodeEnabled || existing.commandCodeKey != "" {
+		configured = append(configured, "Command Code")
+	}
+	if existing.openCodeGoConfigured {
+		configured = append(configured, "OpenCode Go")
 	}
 	fmt.Printf("  %sinfo%s  Existing .env found -- configured: %s\n\n", colorBlue, colorReset, strings.Join(configured, ", "))
 
@@ -974,6 +1129,32 @@ func addMissingProviders(reader *bufio.Reader, envFile string, existing *existin
 			key := collectOllamaKey(reader)
 			fmt.Fprintf(f, "\n# Ollama Cloud API key (https://ollama.com/settings/keys)\nOLLAMA_API_KEY=%s\n", key)
 			fmt.Printf("  %s ok %s  Added Ollama Cloud provider to .env\n", colorGreen, colorReset)
+		}
+	}
+
+	if !existing.commandCodeEnabled && existing.commandCodeKey == "" {
+		if promptYesNo(reader, "Add Command Code provider?", false) {
+			enabled, key := collectCommandCode(reader, logger)
+			if key != "" {
+				fmt.Fprintf(f, "\n# Command Code\nCOMMAND_CODE_API_KEY=%s\n", key)
+			} else if enabled {
+				fmt.Fprintf(f, "\n# Command Code - auto-detected from the `cmd` CLI login\nCOMMANDCODE_ENABLED=true\n")
+			}
+			fmt.Printf("  %s ok %s  Added Command Code provider to .env\n", colorGreen, colorReset)
+		}
+	}
+
+	if !existing.openCodeGoConfigured {
+		if promptYesNo(reader, "Add OpenCode Go provider?", false) {
+			oc := collectOpenCodeGo(reader, logger)
+			if oc.key != "" {
+				fmt.Fprintf(f, "\n# OpenCode Go - reads your Go plan's 5-hour/weekly/monthly meters\nOPENCODE_GO_API_KEY=%s\n", oc.key)
+			} else if oc.workspaceID != "" && oc.cookie != "" {
+				fmt.Fprintf(f, "\n# OpenCode Go - browser session mode\nOPENCODE_GO_WORKSPACE_ID=%s\nOPENCODE_GO_AUTH_COOKIE=%s\n", oc.workspaceID, oc.cookie)
+			}
+			if oc.key != "" || oc.workspaceID != "" {
+				fmt.Printf("  %s ok %s  Added OpenCode Go provider to .env\n", colorGreen, colorReset)
+			}
 		}
 	}
 

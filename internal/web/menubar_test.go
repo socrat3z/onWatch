@@ -530,6 +530,14 @@ func TestMenubarPageRendersLoopbackBootstrap(t *testing.T) {
 	if !strings.Contains(body, `if (sendNativeAction("open_dashboard"))`) {
 		t.Fatalf("expected native dashboard action bridge usage, got body: %s", body)
 	}
+	// The Windows (WebView2) host has one string channel; messages carry their
+	// channel name so internal/menubar/popover_bridge.go can route them.
+	if !strings.Contains(body, `webview2.postMessage(JSON.stringify({ channel: name, body }))`) {
+		t.Fatalf("expected WebView2 bridge wrapping messages with their channel, got body: %s", body)
+	}
+	if !strings.Contains(body, `const resizeHandler = nativeHandler("onwatchResize");`) {
+		t.Fatalf("expected resize reports to use the shared native bridge, got body: %s", body)
+	}
 	// Regression: close must not navigate to "/" (loads dashboard/login in tray WebView).
 	if strings.Contains(body, `function closeMenubar()`) {
 		// Extract a coarse slice of closeMenubar for the dangerous redirect.
@@ -984,6 +992,147 @@ func TestBuildMenubarSnapshotKimiResetFields(t *testing.T) {
 	}
 }
 
+// The per-card age label must count from the provider's own last stored
+// snapshot time, not the summary build time. Otherwise a provider whose polls
+// have stopped would keep reading "now" as long as the daemon serves snapshots
+// for other providers.
+func TestBuildMenubarSnapshotProviderAgeUsesStoredCapturedAt(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	capturedAt := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	reset := time.Now().UTC().Add(3 * time.Hour)
+	if _, err := s.InsertGrokSnapshot(&api.GrokSnapshot{
+		CapturedAt: capturedAt,
+		AccountID:  1,
+		Quotas:     []api.GrokQuota{{Name: "credits", Utilization: 10, ResetsAt: &reset, Status: "healthy"}},
+	}); err != nil {
+		t.Fatalf("InsertGrokSnapshot: %v", err)
+	}
+
+	cfg := &config.Config{
+		GrokEnabled:  true,
+		GrokToken:    "g",
+		PollInterval: 60 * time.Second,
+		Port:         9211,
+		AdminUser:    "admin",
+		AdminPass:    "test",
+	}
+	h := NewHandler(s, nil, nil, nil, cfg)
+	snapshot, err := h.BuildMenubarSnapshot()
+	if err != nil {
+		t.Fatalf("BuildMenubarSnapshot: %v", err)
+	}
+	grok := findMenubarProviderCard(t, snapshot, "grok")
+	if grok.UpdatedAt != "2h ago" {
+		t.Fatalf("grok UpdatedAt = %q, want %q (from capturedAt, not build time)", grok.UpdatedAt, "2h ago")
+	}
+	// The raw timestamp rides along so clients can compute the age themselves.
+	wantTime := capturedAt.UTC().Format(time.RFC3339)
+	if grok.UpdatedAtTime != wantTime {
+		t.Fatalf("grok UpdatedAtTime = %q, want %q (stored capturedAt)", grok.UpdatedAtTime, wantTime)
+	}
+	// The header age must track the newest provider data, not the build time.
+	if snapshot.LatestAt.IsZero() {
+		t.Fatal("snapshot LatestAt is zero; the header age would read the build time")
+	}
+	if !snapshot.LatestAt.Equal(capturedAt) {
+		t.Fatalf("snapshot LatestAt = %s, want %s (newest capturedAt)", snapshot.LatestAt, capturedAt)
+	}
+	if snapshot.GeneratedAt.Before(snapshot.LatestAt) {
+		t.Fatalf("GeneratedAt %s is before LatestAt %s", snapshot.GeneratedAt, snapshot.LatestAt)
+	}
+}
+
+// With no provider data, latest_at must be omitted entirely, not serialized as
+// the zero time ("0001-01-01T00:00:00Z"), which a client would render as
+// hundreds of thousands of days.
+func TestBuildMenubarSnapshotOmitsZeroLatestAt(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	// No snapshots inserted and no provider enabled: nothing to report.
+	h := NewHandler(s, nil, nil, nil, &config.Config{
+		PollInterval: 60 * time.Second,
+		Port:         9211,
+		AdminUser:    "admin",
+		AdminPass:    "test",
+	})
+	snapshot, err := h.BuildMenubarSnapshot()
+	if err != nil {
+		t.Fatalf("BuildMenubarSnapshot: %v", err)
+	}
+	if !snapshot.LatestAt.IsZero() {
+		t.Fatalf("LatestAt = %s, want zero", snapshot.LatestAt)
+	}
+
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "latest_at") {
+		t.Fatalf("zero latest_at must be omitted, got %s", raw)
+	}
+	if strings.Contains(string(raw), "0001-01-01") {
+		t.Fatalf("zero time leaked into JSON: %s", raw)
+	}
+}
+
+// Kimi's capturedAt must be the stored snapshot time, not the build time, so
+// the menubar age for a stalled Kimi poll keeps growing.
+func TestBuildMenubarSnapshotKimiCapturedAtIsStoredTime(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	capturedAt := time.Now().UTC().Add(-90 * time.Minute).Truncate(time.Second)
+	reset := time.Now().UTC().Add(3 * time.Hour)
+	if _, err := s.InsertKimiSnapshot(&api.KimiSnapshot{
+		CapturedAt: capturedAt,
+		AccountID:  1,
+		UserID:     "u1",
+		Quotas:     []api.KimiQuota{{Name: api.KimiQuotaSevenDay, Utilization: 40, ResetsAt: &reset, Status: "healthy"}},
+	}); err != nil {
+		t.Fatalf("InsertKimiSnapshot: %v", err)
+	}
+
+	cfg := &config.Config{
+		KimiEnabled:  true,
+		KimiToken:    "kimi-test",
+		PollInterval: 60 * time.Second,
+		Port:         9211,
+		AdminUser:    "admin",
+		AdminPass:    "test",
+	}
+	h := NewHandler(s, nil, nil, nil, cfg)
+
+	// The menubar builder (buildKimiCurrentOK) carries the stored time. The
+	// dashboard builder restamps capturedAt with the build time, as main did,
+	// so check the age-label work on the menubar payload.
+	payload, _, _ := h.buildKimiCurrentOK()
+	got, _ := payload["capturedAt"].(string)
+	if got != capturedAt.Format(time.RFC3339) {
+		t.Fatalf("kimi capturedAt = %q, want %q (stored snapshot time)", got, capturedAt.Format(time.RFC3339))
+	}
+
+	snapshot, err := h.BuildMenubarSnapshot()
+	if err != nil {
+		t.Fatalf("BuildMenubarSnapshot: %v", err)
+	}
+	kimi := findMenubarProviderCard(t, snapshot, "kimi")
+	if kimi.UpdatedAt != "1h ago" {
+		t.Fatalf("kimi UpdatedAt = %q, want %q", kimi.UpdatedAt, "1h ago")
+	}
+}
+
 func TestMenubarPageAllowsEditorFrames(t *testing.T) {
 	h, s := newMenubarTestHandler(t)
 	defer s.Close()
@@ -1028,6 +1177,67 @@ func TestSecurityHeadersFrameDenyExemptsQuickViewOnly(t *testing.T) {
 		if rr.Header().Get("X-Content-Type-Options") != "nosniff" {
 			t.Errorf("%s: other security headers must stay", tc.path)
 		}
+	}
+}
+
+// A non-ok upstream window status is authoritative in the menubar: the meter
+// is critical whatever its percent, and the raw label rides along for the
+// tooltip. Percent-only quotas carry percent_only so the UI drops the fake
+// "8/100 used" line.
+func TestNormalizeQuotas_PercentOnlyAndStatus(t *testing.T) {
+	t.Parallel()
+	payload := map[string]interface{}{
+		"quotas": []interface{}{
+			map[string]interface{}{
+				"name": "five_hour", "displayName": "5-Hour",
+				"utilization": 10.0, "used": 10.0, "limit": 100.0,
+				"format": "percent", "percentOnly": true,
+				"status": "critical", "statusLabel": "exhausted",
+			},
+			map[string]interface{}{
+				"name": "weekly", "displayName": "Weekly",
+				"utilization": 4.0, "used": 4.0, "limit": 100.0,
+				"format": "percent", "percentOnly": true,
+				"status": "healthy", "statusLabel": "ok",
+			},
+			map[string]interface{}{
+				"name": "monthly", "displayName": "Monthly",
+				"utilization": 12.8, "used": 0.38, "limit": 3.0,
+				"format": "currency",
+			},
+		},
+	}
+	quotas := normalizeQuotas(payload, 70, 90)
+	if len(quotas) != 3 {
+		t.Fatalf("quotas = %d, want 3", len(quotas))
+	}
+	byKey := map[string]menubar.QuotaMeter{}
+	for _, q := range quotas {
+		byKey[q.Label] = q
+	}
+	if q := byKey["5-Hour"]; q.Status != "critical" || q.StatusLabel != "exhausted" || !q.PercentOnly {
+		t.Errorf("5-Hour = %+v, want critical/exhausted/percentOnly", q)
+	}
+	if q := byKey["Weekly"]; q.Status != "healthy" || q.StatusLabel != "ok" || !q.PercentOnly {
+		t.Errorf("Weekly = %+v, want healthy/ok/percentOnly", q)
+	}
+	if q := byKey["Monthly"]; q.PercentOnly || q.StatusLabel != "" {
+		t.Errorf("Monthly = %+v, want real currency, no status label", q)
+	}
+}
+
+func TestQuotaStatus_UnknownStatusLabelIsCritical(t *testing.T) {
+	t.Parallel()
+	item := map[string]interface{}{"statusLabel": "some-new-value", "utilization": 1.0}
+	if got := quotaStatus(item, 1, 70, 90); got != "critical" {
+		t.Fatalf("quotaStatus = %q, want critical for an unknown status label", got)
+	}
+	// Empty label falls back to the percent bands.
+	if got := quotaStatus(map[string]interface{}{"utilization": 95.0}, 95, 70, 90); got != "critical" {
+		t.Fatalf("quotaStatus = %q, want critical from percent", got)
+	}
+	if got := quotaStatus(map[string]interface{}{"statusLabel": "ok", "utilization": 5.0}, 5, 70, 90); got != "healthy" {
+		t.Fatalf("quotaStatus = %q, want healthy for ok", got)
 	}
 }
 

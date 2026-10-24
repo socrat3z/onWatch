@@ -27,7 +27,9 @@ func readStaticFile(t *testing.T, name string) string {
 	if err != nil {
 		t.Fatalf("read %s: %v", name, err)
 	}
-	return string(data)
+	// Normalize CRLF so multi-line needles match on a Windows checkout, where
+	// the working tree (and thus the embedded asset) has CRLF line endings.
+	return strings.ReplaceAll(string(data), "\r\n", "\n")
 }
 
 func createTestConfigWithCommandCode() *config.Config {
@@ -262,6 +264,68 @@ func TestHistoryCommandCodeHandler(t *testing.T) {
 	}
 }
 
+// TestHistoryCommandCodeQuotaShape locks the per-quota shape the Usage Graphs
+// chart reads: a `name` keyed window and a `utilization` percentage. A rename
+// or a nested shape here silently blanks the Command Code chart, which is what
+// happened before the app.js commandcode branch existed.
+func TestHistoryCommandCodeQuotaShape(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC()
+	insertTestCommandCodeSnapshot(t, s, now)
+
+	h := NewHandler(s, nil, nil, nil, createTestConfigWithCommandCode())
+	rec := httptest.NewRecorder()
+	h.historyCommandCode(rec, httptest.NewRequest(http.MethodGet, "/api/history?provider=commandcode&range=24h", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if _, ok := rows[0]["capturedAt"].(string); !ok {
+		t.Fatalf("row has no capturedAt: %v", rows[0])
+	}
+	rawQuotas, ok := rows[0]["quotas"].([]interface{})
+	if !ok {
+		t.Fatalf("quotas = %T, want a slice", rows[0]["quotas"])
+	}
+	seen := map[string]float64{}
+	for _, item := range rawQuotas {
+		q, ok := item.(map[string]interface{})
+		if !ok {
+			t.Fatalf("quota = %T, want a map", item)
+		}
+		name, _ := q["name"].(string)
+		if name == "" {
+			t.Fatalf("quota has no name: %v", q)
+		}
+		util, ok := q["utilization"].(float64)
+		if !ok {
+			t.Fatalf("quota %s has no numeric utilization: %v", name, q)
+		}
+		seen[name] = util
+	}
+	for _, want := range []string{
+		api.CommandCodeQuotaFiveHour,
+		api.CommandCodeQuotaWeekly,
+		api.CommandCodeQuotaMonthly,
+	} {
+		if _, ok := seen[want]; !ok {
+			t.Errorf("history is missing the %s window: %v", want, seen)
+		}
+	}
+}
+
 func TestHistoryCommandCodeNilStore(t *testing.T) {
 	h := NewHandler(nil, nil, nil, nil, createTestConfigWithCommandCode())
 	rec := httptest.NewRecorder()
@@ -479,6 +543,59 @@ func TestBuildCommandCodeInsightsEmptyStore(t *testing.T) {
 	}
 }
 
+// TestCommandCodeResetPacingProjectsCredits guards the card that mixed units:
+// the measured rate is utilization percent per hour, but Used and Limit are
+// credits. A 14-credit window at 2.8 used and 10%/hr with 4h to reset must
+// project 8.4 credits, not 42.8.
+func TestCommandCodeResetPacingProjectsCredits(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC()
+	reset := now.Add(4 * time.Hour)
+	insert := func(at time.Time, used float64) {
+		t.Helper()
+		snap := &api.CommandCodeSnapshot{
+			CapturedAt: at,
+			Quotas: []api.CommandCodeQuota{{
+				Name: api.CommandCodeQuotaFiveHour, Used: used, Limit: 14,
+				Utilization: used / 14 * 100, Format: api.CommandCodeQuotaFormatCredits,
+				ResetsAt: &reset,
+			}},
+		}
+		if _, err := s.InsertCommandCodeSnapshot(snap); err != nil {
+			t.Fatalf("insert snapshot: %v", err)
+		}
+	}
+	insert(now.Add(-25*time.Minute), 2.2167) // 15.83%, a 10 percentage point per hour rate
+	insert(now, 2.8)                         // 20%
+
+	h := NewHandler(s, nil, nil, nil, createTestConfigWithCommandCode())
+	resp := h.buildCommandCodeInsights(map[string]bool{}, time.Hour)
+
+	var card *insightItem
+	for i := range resp.Insights {
+		if resp.Insights[i].Key == "reset_"+api.CommandCodeQuotaFiveHour {
+			card = &resp.Insights[i]
+		}
+	}
+	if card == nil {
+		t.Fatalf("no reset card in %+v", resp.Insights)
+	}
+	if card.Severity == "negative" {
+		t.Fatalf("card claims the credits run out first: %q", card.Desc)
+	}
+	if !strings.Contains(card.Desc, "8.40 of 14.00 credits used") {
+		t.Fatalf("desc = %q, want a projection of 8.40 of 14.00 credits", card.Desc)
+	}
+	if !strings.Contains(card.Desc, "leaving about 5.60") {
+		t.Fatalf("desc = %q, want about 5.60 credits left", card.Desc)
+	}
+}
+
 func TestLoggingHistoryCommandCodeHandler(t *testing.T) {
 	s, err := store.New(":memory:")
 	if err != nil {
@@ -514,6 +631,73 @@ func TestLoggingHistoryCommandCodeHandler(t *testing.T) {
 	}
 	if len(body.Logs) != 2 {
 		t.Errorf("logs = %d, want 2", len(body.Logs))
+	}
+}
+
+// TestCommandCodeHistoryChartBranchWired guards the app.js history loader: the
+// main chart must build Command Code datasets from the three credit windows
+// rather than falling through to the legacy synthetic Subscription/Search/Tool
+// Calls config, which rendered a flat 0-10% axis with no lines.
+func TestCommandCodeHistoryChartBranchWired(t *testing.T) {
+	appJS := readStaticAppJS(t)
+	idx := strings.Index(appJS, "if (provider === 'commandcode') {\n      // Command Code history:")
+	if idx == -1 {
+		t.Fatal("app.js is missing the commandcode branch in the history loader")
+	}
+	// The branch runs before the ollama branch; anything past that is a
+	// different provider and would not be reached for commandcode.
+	end := strings.Index(appJS[idx:], "if (provider === 'ollama') {")
+	if end == -1 {
+		t.Fatal("commandcode branch is not followed by the ollama branch; loader order changed")
+	}
+	body := appJS[idx : idx+end]
+	for _, needle := range []string{
+		"commandCodeQuotaOrder.map",
+		"commandCodeDisplayNames",
+		"commandCodeChartColorMap",
+		"q.utilization || 0",
+		"State.hiddenQuotas.has(cfg.hiddenKey)",
+	} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("commandcode chart branch is missing %q", needle)
+		}
+	}
+	// The legacy fallback labels must not appear in the branch.
+	for _, banned := range []string{"subscriptionPercent", "searchPercent", "toolCallsPercent"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("commandcode chart branch still references the legacy %q dataset", banned)
+		}
+	}
+}
+
+// TestInsightStatValueTruncationWired guards the shared stat renderer: long
+// values (for example a provider account name) must render through the helper
+// that adds the is-long class and a title tooltip so they ellipsize inside the
+// card instead of overlapping the neighbouring stat.
+func TestInsightStatValueTruncationWired(t *testing.T) {
+	appJS := readStaticAppJS(t)
+	if !strings.Contains(appJS, "function insightStatValueHTML(value)") {
+		t.Fatal("app.js is missing insightStatValueHTML")
+	}
+	if !strings.Contains(appJS, "class=\"insight-stat-value${isLong ? ' is-long' : ''}\"") {
+		t.Error("insightStatValueHTML must toggle the is-long class")
+	}
+	if !strings.Contains(appJS, "title=\"${escapeHTML(text)}\"") {
+		t.Error("insightStatValueHTML must expose the full value via a title tooltip")
+	}
+	// The raw un-truncated interpolation must be gone from every stat renderer.
+	if strings.Contains(appJS, "<div class=\"insight-stat-value\">") {
+		t.Error("a stat renderer still writes insight-stat-value directly instead of via the helper")
+	}
+	css := readStaticFile(t, "static/style.css")
+	for _, needle := range []string{
+		".insight-stat-value.is-long",
+		"text-overflow: ellipsis",
+		"white-space: nowrap",
+	} {
+		if !strings.Contains(css, needle) {
+			t.Errorf("style.css is missing %q for stat value truncation", needle)
+		}
 	}
 }
 

@@ -85,10 +85,15 @@ const (
 // Snapshot is the normalized UI contract shared by the desktop app and the
 // browser-testable menubar page.
 type Snapshot struct {
-	GeneratedAt time.Time      `json:"generated_at"`
-	UpdatedAgo  string         `json:"updated_ago"`
-	Aggregate   Aggregate      `json:"aggregate"`
-	Providers   []ProviderCard `json:"providers"`
+	GeneratedAt time.Time `json:"generated_at"`
+	UpdatedAgo  string    `json:"updated_ago"`
+	// LatestAt is the newest provider capturedAt behind UpdatedAgo. Clients use
+	// it for the header age so it reflects data freshness, not build time.
+	// omitzero (not omitempty) drops the zero time.Time; omitempty would emit
+	// "0001-01-01T00:00:00Z", which a client renders as about 739000 days.
+	LatestAt  time.Time      `json:"latest_at,omitzero"`
+	Aggregate Aggregate      `json:"aggregate"`
+	Providers []ProviderCard `json:"providers"`
 	// MistralEnabled reflects config, not poll state: a provider card only
 	// appears in Providers once it has quota data, which would hide anything
 	// gated on it until after the first successful poll.
@@ -118,18 +123,34 @@ type ProviderCard struct {
 	UpdatedAt        string                  `json:"updated_at,omitempty"`
 	Quotas           []QuotaMeter            `json:"quotas"`
 	Trends           []TrendSeries           `json:"trends,omitempty"`
-	Promo            *ProviderPromo          `json:"promo,omitempty"`
+	Peak             *ProviderPeak           `json:"peak,omitempty"`
+	// ResetCredits is the Codex banked reset count shown as a header chip.
+	// Nil when the account has none or the count is unknown.
+	ResetCredits *ProviderResetCredits `json:"reset_credits,omitempty"`
+	// UpdatedAtTime is the provider's last successful data time as RFC3339.
+	// Clients compute the age label from it against their own wall clock, so
+	// the label keeps counting up even when the daemon cannot be reached.
+	UpdatedAtTime string `json:"updated_at_time,omitempty"`
+	// Stale marks data older than the provider's expected refresh cadence.
+	// It is a freshness flag only: Status still describes usage severity.
+	Stale bool `json:"stale,omitempty"`
+	// StaleReason is a short user-facing phrase ("network error") or empty for
+	// the generic age text. It never contains raw provider error text.
+	StaleReason string `json:"stale_reason,omitempty"`
+	// StaleAfterSeconds lets the client re-evaluate staleness locally on its
+	// age ticker, so a card turns stale even when the daemon is unreachable.
+	StaleAfterSeconds int64 `json:"stale_after_seconds,omitempty"`
+	// StaleCheckedAt is the timestamp staleness is judged from when it differs
+	// from the age label source. Anthropic hybrid cards show the honest oldest
+	// quota age, but their staleness follows the primary windows only, so an
+	// API-only quota refreshed every tenth poll cannot mark the card stale.
+	StaleCheckedAt string `json:"stale_checked_at,omitempty"`
 }
 
-// ProviderPromo carries promo metadata for a provider card.
-type ProviderPromo struct {
-	ID               string `json:"id"`
-	Title            string `json:"title"`
-	CompactText      string `json:"compact_text"`
-	PeakStartHourET  int    `json:"peak_start_hour_et"`
-	PeakEndHourET    int    `json:"peak_end_hour_et"`
-	PeakWeekdaysOnly bool   `json:"peak_weekdays_only"`
-	EndsAt           string `json:"ends_at,omitempty"`
+// ProviderResetCredits is the banked reset summary for one Codex account.
+type ProviderResetCredits struct {
+	Count         int64  `json:"count"`
+	NextExpiresAt string `json:"next_expires_at,omitempty"`
 }
 
 // QuotaMeter represents one circular quota meter inside a provider card.
@@ -151,6 +172,15 @@ type QuotaMeter struct {
 	Source          string    `json:"source,omitempty"` // "statusline" or "api"
 	AgeSeconds      int64     `json:"age_seconds,omitempty"`
 	IsStale         bool      `json:"is_stale,omitempty"`
+
+	// StatusLabel is the provider's raw window status (OpenCode key mode, e.g.
+	// "exhausted"). Non-empty means Status is authoritative and is surfaced in
+	// the quota's tooltip.
+	StatusLabel string `json:"status_label,omitempty"`
+	// PercentOnly marks a quota whose used/limit are synthetic (OpenCode key
+	// mode reports a bare percent). The UI shows the percent alone, the same
+	// as a quota with no used/limit at all.
+	PercentOnly bool `json:"percent_only,omitempty"`
 }
 
 // TrendSeries groups sparkline points for a provider-level detailed view.

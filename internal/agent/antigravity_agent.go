@@ -84,6 +84,7 @@ func (a *AntigravityAgent) SetSourceCheck(fn func() string) {
 func (a *AntigravityAgent) SetAccountContext(accountID int64, accountName, accountHome string) {
 	a.accountID, a.accountName, a.accountHome = accountID, accountName, accountHome
 }
+
 // NewAntigravityAgent creates a new AntigravityAgent with the given dependencies.
 // For Docker environments, use WithAntigravityManualConfig to set connection details.
 func NewAntigravityAgent(
@@ -191,10 +192,12 @@ func (a *AntigravityAgent) poll(ctx context.Context) {
 			return
 		}
 		a.logger.Error("Failed to fetch Antigravity quotas", "source", source, "error", err)
+		pollFailed("antigravity", "", err)
 		return
 	}
 
 	// Store snapshot
+	pollSucceeded("antigravity", "")
 	snapshot.AccountID = a.accountID
 	if _, err := a.store.InsertAntigravitySnapshot(snapshot); err != nil {
 		a.logger.Error("Failed to insert Antigravity snapshot", "error", err)

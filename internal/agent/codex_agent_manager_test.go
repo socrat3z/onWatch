@@ -410,7 +410,7 @@ func TestCodexAgentManager_DefaultProfileRejectsChangedIdentity(t *testing.T) {
 			if instance.Agent.credsRefresh() != nil {
 				t.Error("default agent accepted another identity's refresh credentials")
 			}
-			if err := instance.Agent.tokenSave("refreshed-token", "refreshed-refresh", originalIDToken, 604800); err == nil {
+			if err := instance.Agent.tokenSave("refreshed-token", "refreshed-refresh", originalIDToken, 604800, "original-refresh"); err == nil {
 				t.Error("default agent saved refreshed credentials over another identity")
 			}
 			data, err := os.ReadFile(authPath)
@@ -465,7 +465,7 @@ func TestCodexAgentManager_DefaultProfileAcceptsOwnTokenRotation(t *testing.T) {
 			if creds == nil || creds.AccessToken != "rotated-token" || creds.RefreshToken != "rotated-refresh" {
 				t.Error("default agent rejected its own rotated refresh credentials")
 			}
-			if err := instance.Agent.tokenSave("refreshed-token", "refreshed-refresh", idToken, 604800); err != nil {
+			if err := instance.Agent.tokenSave("refreshed-token", "refreshed-refresh", idToken, 604800, ""); err != nil {
 				t.Fatalf("tokenSave: %v", err)
 			}
 			updated := api.DetectCodexCredentials(fx.logger)
@@ -765,7 +765,7 @@ func TestCodexAgentManager_StartAgentForProfile_TokenSaveScopedToProfile(t *test
 	instance := fx.instance("work")
 
 	// Simulate proactive refresh saving new tokens via tokenSave
-	err := instance.Agent.tokenSave("refreshed-token", "refreshed-refresh", idToken, 604800)
+	err := instance.Agent.tokenSave("refreshed-token", "refreshed-refresh", idToken, 604800, "")
 	if err != nil {
 		t.Fatalf("tokenSave: %v", err)
 	}

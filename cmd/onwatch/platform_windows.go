@@ -45,10 +45,25 @@ func companionSysProcAttr() *syscall.SysProcAttr {
 	}
 }
 
-// terminateProcess kills the child: Windows has no SIGTERM equivalent for
-// console-less processes.
+// terminateProcess ends the child: Windows has no SIGTERM equivalent for
+// console-less processes. It exits with code 0, the code a SIGTERM'd daemon
+// exits with on Unix, because the Windows auto-start supervisor restarts any
+// other exit code as a crash - `onwatch stop` must stay stopped.
 func terminateProcess(proc *os.Process) error {
-	return proc.Kill()
+	handle, err := syscall.OpenProcess(syscall.PROCESS_TERMINATE, false, uint32(proc.Pid))
+	if err != nil {
+		return err
+	}
+	defer syscall.CloseHandle(handle)
+	return syscall.TerminateProcess(handle, 0)
+}
+
+// protectedSignalPID reports whether pid must never be signalled from the
+// menubar pid file. Only this process qualifies: unlike unix, a parent pid is
+// not stable evidence, because Windows reuses pids quickly and the parent at
+// daemon start can belong to a dead launcher by the time shutdown runs.
+func protectedSignalPID(pid int) bool {
+	return pid == os.Getpid()
 }
 
 // processAlive reports whether pid names a running process. Opening a handle

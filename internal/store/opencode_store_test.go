@@ -42,6 +42,52 @@ func TestOpenCodeStore_InsertAndQueryLatest(t *testing.T) {
 	}
 }
 
+func TestOpenCodeStore_StatusRoundTrips(t *testing.T) {
+	s, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC()
+	snap := &api.OpenCodeSnapshot{
+		CapturedAt:  now,
+		AccountType: api.OpenCodeAccountTypePro,
+		PlanName:    "OpenCode Go",
+		Quotas: []api.OpenCodeQuota{
+			{Name: "five_hour", Used: 10, Limit: 100, Utilization: 10, Format: api.OpenCodeQuotaFormatPercent, Status: "exhausted"},
+			{Name: "weekly", Used: 4, Limit: 100, Utilization: 4, Format: api.OpenCodeQuotaFormatPercent, Status: "ok"},
+			{Name: "monthly", Used: 2, Limit: 100, Utilization: 2, Format: api.OpenCodeQuotaFormatPercent},
+		},
+	}
+	if _, err := s.InsertOpenCodeSnapshot(snap); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	latest, err := s.QueryLatestOpenCode()
+	if err != nil {
+		t.Fatalf("query latest: %v", err)
+	}
+	want := map[string]string{"five_hour": "exhausted", "weekly": "ok", "monthly": ""}
+	for _, q := range latest.Quotas {
+		if got := want[q.Name]; q.Status != got {
+			t.Errorf("%s status = %q, want %q", q.Name, q.Status, got)
+		}
+	}
+
+	perQuota, err := s.QueryOpenCodeLatestPerQuota()
+	if err != nil {
+		t.Fatalf("query latest per quota: %v", err)
+	}
+	byName := map[string]OpenCodeLatestQuota{}
+	for _, q := range perQuota {
+		byName[q.Name] = q
+	}
+	if byName["five_hour"].Status != "exhausted" || byName["monthly"].Status != "" {
+		t.Errorf("latest per quota statuses = %+v", byName)
+	}
+}
+
 func TestOpenCodeStore_QueryRangeLoadsQuotas(t *testing.T) {
 	s, err := New(":memory:")
 	if err != nil {

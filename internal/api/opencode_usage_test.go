@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -13,7 +14,8 @@ import (
 	"time"
 )
 
-// goStatusBody is the live go/status shape (2026-09-25), IDs replaced.
+// goStatusBody is the retired console go/status shape, still used by the
+// browser-session mode. IDs replaced.
 const goStatusBody = `{"subscriberUserId":"user_TESTSUBSCRIBER","product":"go","renewalProduct":"go",
 "paymentMethodId":"payment_method_TESTPM","renewalCurrency":"usd","useBalance":false,
 "cancelAtPeriodEnd":false,"renewalPending":false,"upgradePrice":1000,
@@ -22,6 +24,10 @@ const goStatusBody = `{"subscriberUserId":"user_TESTSUBSCRIBER","product":"go","
 "fiveHour":{"startsAt":null,"resetsAt":null,"limitMicroCents":"1200000000","usedMicroCents":"0"},
 "week":{"startsAt":"2026-09-21T00:00:00.000Z","resetsAt":"2026-09-28T00:00:00.000Z","limitMicroCents":"3000000000","usedMicroCents":"384204992"},
 "month":{"limitMicroCents":"6000000000","usedMicroCents":"384204992"}}}}`
+
+// zenUsageBody is the live /zen/go/v1/usage shape (2026-10-17). Each window is
+// an integer percentage with a reset time.
+const zenUsageBody = `{"usage":{"rolling":{"status":"ok","percent":5,"resetsAt":"2026-10-16T23:13:00.000Z"},"weekly":{"status":"ok","percent":2,"resetsAt":"2026-10-19T00:00:00.000Z"},"monthly":{"status":"ok","percent":1,"resetsAt":"2026-11-16T18:01:43.000Z"}}}`
 
 func quotaByName(t *testing.T, quotas []OpenCodeQuota, name string) OpenCodeQuota {
 	t.Helper()
@@ -44,7 +50,7 @@ func goStatusServer(t *testing.T, body string) *httptest.Server {
 	return srv
 }
 
-func fetchGoStatusBody(t *testing.T, body string) (*OpenCodeSnapshot, error) {
+func fetchZenUsageBody(t *testing.T, body string) (*OpenCodeSnapshot, error) {
 	t.Helper()
 	srv := goStatusServer(t, body)
 	return NewOpenCodeClient(nil, WithOpenCodeBaseURL(srv.URL)).FetchUsageSnapshot(context.Background(), "k")
@@ -64,12 +70,12 @@ func wantReset(t *testing.T, q OpenCodeQuota, want string) {
 	}
 }
 
-func TestFetchUsageSnapshot_SendsHeadersAndMapsMeters(t *testing.T) {
+func TestFetchUsageSnapshot_SendsHeadersAndMapsWindows(t *testing.T) {
 	var gotMethod, gotPath, gotUA, gotAccept, gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod, gotPath = r.Method, r.URL.Path
 		gotUA, gotAccept, gotAuth = r.Header.Get("User-Agent"), r.Header.Get("Accept"), r.Header.Get("Authorization")
-		_, _ = w.Write([]byte(goStatusBody))
+		_, _ = w.Write([]byte(zenUsageBody))
 	}))
 	defer srv.Close()
 
@@ -77,8 +83,8 @@ func TestFetchUsageSnapshot_SendsHeadersAndMapsMeters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchUsageSnapshot: %v", err)
 	}
-	if gotMethod != http.MethodGet || gotPath != "/console/api/go/status" {
-		t.Fatalf("request = %s %s", gotMethod, gotPath)
+	if gotMethod != http.MethodGet || gotPath != "/zen/go/v1/usage" {
+		t.Fatalf("request = %s %s, want GET /zen/go/v1/usage", gotMethod, gotPath)
 	}
 	if gotAuth != "Bearer oc_sk_test" || gotAccept != "application/json" || gotUA != "onwatch-opencode-usage/1" {
 		t.Fatalf("headers: auth=%q accept=%q ua=%q", gotAuth, gotAccept, gotUA)
@@ -89,96 +95,91 @@ func TestFetchUsageSnapshot_SendsHeadersAndMapsMeters(t *testing.T) {
 	names := []string{}
 	for _, q := range snap.Quotas {
 		names = append(names, q.Name)
-		if q.Format != OpenCodeQuotaFormatCurrency {
-			t.Fatalf("quota %+v, want currency format", q)
+		if q.Format != OpenCodeQuotaFormatPercent {
+			t.Fatalf("quota %+v, want percent format", q)
 		}
 	}
 	if strings.Join(names, ",") != "five_hour,weekly,monthly" {
 		t.Fatalf("quota names = %v", names)
 	}
-	// Micro-cents to USD: 1 USD = 100 cents = 1e8 micro-cents.
-	for name, want := range map[string][2]float64{
-		"five_hour": {0, 12},
-		"weekly":    {3.84204992, 30},
-		"monthly":   {3.84204992, 60},
-	} {
+	for name, want := range map[string]float64{"five_hour": 5, "weekly": 2, "monthly": 1} {
 		q := quotaByName(t, snap.Quotas, name)
-		if math.Abs(q.Used-want[0]) > 1e-9 || q.Limit != want[1] {
-			t.Fatalf("%s used/limit = %v/%v, want %v/%v USD", name, q.Used, q.Limit, want[0], want[1])
+		if q.Utilization != want || q.Used != want || q.Limit != 100 {
+			t.Fatalf("%s = util %v used %v limit %v, want %v/100", name, q.Utilization, q.Used, q.Limit, want)
 		}
 	}
-	// 384204992 / 3000000000 = 12.807% and / 6000000000 = 6.403% (console: 12.81%, 6.40%).
-	for name, want := range map[string]float64{"five_hour": 0, "weekly": 12.8, "monthly": 6.4} {
-		if got := quotaByName(t, snap.Quotas, name).Utilization; got != want {
-			t.Fatalf("%s = %v, want %v", name, got, want)
-		}
-	}
-	wantReset(t, quotaByName(t, snap.Quotas, "five_hour"), "") // no open 5-hour session
-	wantReset(t, quotaByName(t, snap.Quotas, "weekly"), "2026-09-28T00:00:00Z")
-	wantReset(t, quotaByName(t, snap.Quotas, "monthly"), "2026-10-24T15:00:25Z") // access.endsAt
+	wantReset(t, quotaByName(t, snap.Quotas, "five_hour"), "2026-10-16T23:13:00Z")
+	wantReset(t, quotaByName(t, snap.Quotas, "weekly"), "2026-10-19T00:00:00Z")
+	wantReset(t, quotaByName(t, snap.Quotas, "monthly"), "2026-11-16T18:01:43Z")
 	if dump := fmt.Sprintf("%+v", *snap); strings.Contains(dump, "TESTSUBSCRIBER") || strings.Contains(dump, "TESTPM") {
 		t.Fatal("snapshot carries account IDs")
 	}
 }
 
-func TestFetchUsageSnapshot_OpenFiveHourSessionAndMonthResetsAt(t *testing.T) {
-	body := strings.Replace(goStatusBody,
-		`"fiveHour":{"startsAt":null,"resetsAt":null,"limitMicroCents":"1200000000","usedMicroCents":"0"}`,
-		`"fiveHour":{"startsAt":"2026-09-25T09:00:00.000Z","resetsAt":"2026-09-25T14:00:00.000Z","limitMicroCents":"1200000000","usedMicroCents":"400000000"}`, 1)
-	body = strings.Replace(body, `"month":{`, `"month":{"resetsAt":"2026-10-20T00:00:00.000Z",`, 1)
-	snap, err := fetchGoStatusBody(t, body)
+func TestFetchUsageSnapshot_FractionalPercentAndMissingMonthly(t *testing.T) {
+	// A plan without a monthly window: rolling and weekly still map.
+	body := `{"usage":{"rolling":{"status":"ok","percent":31.6,"resetsAt":"2026-10-16T23:13:00.000Z"},"weekly":{"status":"rate-limited","percent":100,"resetsAt":null}}}`
+	snap, err := fetchZenUsageBody(t, body)
 	if err != nil {
 		t.Fatalf("FetchUsageSnapshot: %v", err)
 	}
-	five := quotaByName(t, snap.Quotas, "five_hour")
-	if five.Utilization != 33.3 {
-		t.Fatalf("five_hour = %v, want 33.3 (one decimal)", five.Utilization)
+	if len(snap.Quotas) != 2 {
+		t.Fatalf("quotas = %+v, want 2 (monthly optional)", snap.Quotas)
 	}
-	wantReset(t, five, "2026-09-25T14:00:00Z")
-	// A month meter that carries its own resetsAt wins over access.endsAt.
-	wantReset(t, quotaByName(t, snap.Quotas, "monthly"), "2026-10-20T00:00:00Z")
+	if got := quotaByName(t, snap.Quotas, "five_hour").Utilization; got != 31.6 {
+		t.Fatalf("five_hour = %v, want 31.6", got)
+	}
+	if got := quotaByName(t, snap.Quotas, "weekly").Utilization; got != 100 {
+		t.Fatalf("weekly = %v, want 100", got)
+	}
+	wantReset(t, quotaByName(t, snap.Quotas, "weekly"), "")
 }
 
-func TestFetchUsageSnapshot_AcceptsBareNumberAmounts(t *testing.T) {
-	body := strings.Replace(goStatusBody, `"limitMicroCents":"3000000000","usedMicroCents":"384204992"`,
-		`"limitMicroCents":3000000000,"usedMicroCents":1500000000`, 1)
-	snap, err := fetchGoStatusBody(t, body)
+// The usage API reports a per-window status alongside the percent. It must be
+// carried through so a window that is not "ok" can render critical whatever
+// its percent, and an unknown value must survive verbatim.
+func TestFetchUsageSnapshot_CarriesWindowStatus(t *testing.T) {
+	body := `{"usage":{"rolling":{"status":"exhausted","percent":10,"resetsAt":null},"weekly":{"status":"ok","percent":4,"resetsAt":null},"monthly":{"status":"rate-limited","percent":2,"resetsAt":null}}}`
+	snap, err := fetchZenUsageBody(t, body)
 	if err != nil {
 		t.Fatalf("FetchUsageSnapshot: %v", err)
 	}
-	if got := quotaByName(t, snap.Quotas, "weekly").Utilization; got != 50 {
-		t.Fatalf("weekly = %v, want 50", got)
+	want := map[string]string{"five_hour": "exhausted", "weekly": "ok", "monthly": "rate-limited"}
+	for name, status := range want {
+		if got := quotaByName(t, snap.Quotas, name).Status; got != status {
+			t.Fatalf("%s status = %q, want %q", name, got, status)
+		}
+	}
+}
+
+func TestOpenCodeZenQuotas_MissingStatusIsEmpty(t *testing.T) {
+	var u openCodeZenUsage
+	if err := json.Unmarshal([]byte(`{"usage":{"rolling":{"percent":1},"weekly":{"percent":1}}}`), &u); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	quotas, err := u.quotas()
+	if err != nil {
+		t.Fatalf("quotas: %v", err)
+	}
+	if got := quotaByName(t, quotas, "five_hour").Status; got != "" {
+		t.Fatalf("status = %q, want empty for a window with no status", got)
 	}
 }
 
 func TestFetchUsageSnapshot_MalformedStatusIsParseFailed(t *testing.T) {
-	week := `"week":{"startsAt":"2026-09-21T00:00:00.000Z","resetsAt":"2026-09-28T00:00:00.000Z","limitMicroCents":"3000000000","usedMicroCents":"384204992"},`
-	month := ",\n" + `"month":{"limitMicroCents":"6000000000","usedMicroCents":"384204992"}`
 	cases := map[string]string{
-		"not json":         `<html>maintenance</html>`,
-		"empty object":     `{}`,
-		"null access":      `{"access":null}`,
-		"no meters":        `{"access":{"endsAt":"2026-10-24T15:00:25.000Z"}}`,
-		"no fiveHour":      strings.Replace(goStatusBody, `"fiveHour":{"startsAt":null,"resetsAt":null,"limitMicroCents":"1200000000","usedMicroCents":"0"},`, "", 1),
-		"no week":          strings.Replace(goStatusBody, week, "", 1),
-		"no month":         strings.Replace(goStatusBody, month, "", 1),
-		"no limit":         strings.Replace(goStatusBody, `"limitMicroCents":"6000000000",`, "", 1),
-		"no used":          strings.Replace(goStatusBody, `,"usedMicroCents":"0"`, "", 1),
-		"null limit":       strings.Replace(goStatusBody, `"limitMicroCents":"6000000000"`, `"limitMicroCents":null`, 1),
-		"zero limit":       strings.Replace(goStatusBody, `"limitMicroCents":"6000000000"`, `"limitMicroCents":"0"`, 1),
-		"negative limit":   strings.Replace(goStatusBody, `"limitMicroCents":"3000000000"`, `"limitMicroCents":"-3000000000"`, 1),
-		"negative used":    strings.Replace(goStatusBody, `"usedMicroCents":"0"`, `"usedMicroCents":"-1"`, 1),
-		"non-numeric used": strings.Replace(goStatusBody, `"usedMicroCents":"0"`, `"usedMicroCents":"abc"`, 1),
-		"empty limit":      strings.Replace(goStatusBody, `"limitMicroCents":"1200000000"`, `"limitMicroCents":""`, 1),
-		"NaN limit":        strings.Replace(goStatusBody, `"limitMicroCents":"1200000000"`, `"limitMicroCents":"NaN"`, 1),
-		"boolean used":     strings.Replace(goStatusBody, `"usedMicroCents":"0"`, `"usedMicroCents":true`, 1),
-		"bad resetsAt":     strings.Replace(goStatusBody, `"resetsAt":"2026-09-28T00:00:00.000Z"`, `"resetsAt":"next monday"`, 1),
+		"not json":        `<html>maintenance</html>`,
+		"empty object":    `{}`,
+		"null usage":      `{"usage":null}`,
+		"no rolling":      `{"usage":{"weekly":{"percent":1}}}`,
+		"no weekly":       `{"usage":{"rolling":{"percent":1}}}`,
+		"null percent":    `{"usage":{"rolling":{"percent":null},"weekly":{"percent":1}}}`,
+		"percent too low": `{"usage":{"rolling":{"percent":-1},"weekly":{"percent":1}}}`,
+		"percent too big": `{"usage":{"rolling":{"percent":101},"weekly":{"percent":1}}}`,
+		"bad resetsAt":    `{"usage":{"rolling":{"percent":1,"resetsAt":"next monday"},"weekly":{"percent":1}}}`,
 	}
 	for name, body := range cases {
-		if body == goStatusBody {
-			t.Fatalf("%s: replacement did not apply", name)
-		}
-		if _, err := fetchGoStatusBody(t, body); !errors.Is(err, ErrOpenCodeParseFailed) {
+		if _, err := fetchZenUsageBody(t, body); !errors.Is(err, ErrOpenCodeParseFailed) {
 			t.Errorf("%s: err=%v, want ErrOpenCodeParseFailed", name, err)
 		}
 	}
@@ -214,6 +215,23 @@ func TestFetchUsageSnapshot_MapsHTTPErrorsWithoutEchoingBody(t *testing.T) {
 	}
 }
 
+// A rejected key must say so plainly, not just "forbidden".
+func TestFetchUsageSnapshot_AuthErrorsNameTheFix(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+		_, err := NewOpenCodeClient(nil, WithOpenCodeBaseURL(srv.URL)).FetchUsageSnapshot(context.Background(), "oc_sk_bad")
+		srv.Close()
+		if !IsOpenCodeAuthError(err) {
+			t.Fatalf("status %d: err = %v, want an auth error", status, err)
+		}
+		if !strings.Contains(err.Error(), "Usage API Key") {
+			t.Fatalf("status %d: error %q does not point at the Usage API Key setting", status, err)
+		}
+	}
+}
+
 func TestFetchUsageSnapshot_MissingKeyMakesNoRequest(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
@@ -226,7 +244,7 @@ func TestFetchUsageSnapshot_MissingKeyMakesNoRequest(t *testing.T) {
 
 func TestFetchUsageSnapshot_OversizedBodyIsAnError(t *testing.T) {
 	// Valid JSON followed by whitespace: only the size cap can reject it.
-	srv := goStatusServer(t, goStatusBody+strings.Repeat(" ", openCodeUsageMaxBodyBytes))
+	srv := goStatusServer(t, zenUsageBody+strings.Repeat(" ", openCodeUsageMaxBodyBytes))
 	_, err := NewOpenCodeClient(nil, WithOpenCodeBaseURL(srv.URL)).FetchUsageSnapshot(context.Background(), "k")
 	if !errors.Is(err, ErrOpenCodeInvalidResponse) {
 		t.Fatalf("oversized body: err=%v, want ErrOpenCodeInvalidResponse", err)
@@ -237,7 +255,7 @@ func TestFetchUsageSnapshot_ReusesARecentStatus(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
-		_, _ = w.Write([]byte(goStatusBody))
+		_, _ = w.Write([]byte(zenUsageBody))
 	}))
 	defer srv.Close()
 	c := NewOpenCodeClient(nil, WithOpenCodeBaseURL(srv.URL))
@@ -246,12 +264,49 @@ func TestFetchUsageSnapshot_ReusesARecentStatus(t *testing.T) {
 		if err != nil {
 			t.Fatalf("FetchUsageSnapshot: %v", err)
 		}
-		if got := quotaByName(t, snap.Quotas, "weekly").Utilization; got != 12.8 {
-			t.Fatalf("reused snapshot weekly = %v, want 12.8", got)
+		if got := quotaByName(t, snap.Quotas, "weekly").Utilization; got != 2 {
+			t.Fatalf("reused snapshot weekly = %v, want 2", got)
 		}
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("status requests = %d, want 2 (reuse within %v, refetch on key change)", calls.Load(), openCodeUsageMinInterval)
+	}
+}
+
+// A status served from the 60s reuse window was fetched earlier. Stamping the
+// snapshot with the serve time makes up to a minute-old data read as fresh.
+func TestFetchUsageSnapshot_ReuseKeepsTheFillTime(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(zenUsageBody))
+	}))
+	defer srv.Close()
+	c := NewOpenCodeClient(nil, WithOpenCodeBaseURL(srv.URL))
+
+	first, err := c.FetchUsageSnapshot(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	// Simulate a poll one full interval later: the client cache is deliberately
+	// aged just inside the window so it is reused.
+	c.usageMu.Lock()
+	servedAt := time.Now().Add(-openCodeUsageMinInterval + 5*time.Second)
+	c.usageAt = servedAt
+	c.usageMu.Unlock()
+
+	second, err := c.FetchUsageSnapshot(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("status requests = %d, want 1 (reused)", calls.Load())
+	}
+	if !second.CapturedAt.Truncate(time.Second).Equal(servedAt.Truncate(time.Second)) {
+		t.Fatalf("reused CapturedAt = %v, want the cache fill time %v", second.CapturedAt, servedAt)
+	}
+	if second.CapturedAt.After(first.CapturedAt) {
+		t.Fatalf("reused CapturedAt moved forward: %v after %v", second.CapturedAt, first.CapturedAt)
 	}
 }
 
@@ -262,9 +317,9 @@ func TestFetchUsageSnapshot_FailuresAreNotReused(t *testing.T) {
 		case 1:
 			w.WriteHeader(http.StatusTooManyRequests)
 		case 2:
-			_, _ = w.Write([]byte(`{"access":{}}`))
+			_, _ = w.Write([]byte(`{"usage":{}}`))
 		default:
-			_, _ = w.Write([]byte(goStatusBody))
+			_, _ = w.Write([]byte(zenUsageBody))
 		}
 	}))
 	defer srv.Close()
@@ -293,5 +348,21 @@ func TestNewOpenCodeClient_Timeout(t *testing.T) {
 	}
 	if long := NewOpenCodeClient(nil, WithOpenCodeTimeout(45*time.Second)); long.httpClient.Timeout != 45*time.Second {
 		t.Fatalf("configured timeout = %v, want 45s", long.httpClient.Timeout)
+	}
+}
+
+// Rounding: percent is stored to one decimal so charts and cycle math are
+// stable across the integer API values.
+func TestOpenCodeZenQuotas_RoundsToOneDecimal(t *testing.T) {
+	var u openCodeZenUsage
+	if err := json.Unmarshal([]byte(`{"usage":{"rolling":{"percent":33.33333},"weekly":{"percent":0}}}`), &u); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	quotas, err := u.quotas()
+	if err != nil {
+		t.Fatalf("quotas: %v", err)
+	}
+	if got := quotaByName(t, quotas, "five_hour").Utilization; math.Abs(got-33.3) > 1e-9 {
+		t.Fatalf("five_hour = %v, want 33.3", got)
 	}
 }

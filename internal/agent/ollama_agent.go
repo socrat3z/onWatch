@@ -25,7 +25,9 @@ type OllamaAgent struct {
 	sm           *SessionManager
 	notifier     *notify.NotificationEngine
 	pollingCheck func() bool
-	cfg          *config.Config
+	// resetDay is snapshotted at build time: the settings save path rewrites
+	// the shared config while agents poll, so a poll must not read it live.
+	resetDay int
 }
 
 func (a *OllamaAgent) SetPollingCheck(fn func() bool) {
@@ -40,15 +42,18 @@ func NewOllamaAgent(client ollamaFetcher, store *store.Store, tr *tracker.Ollama
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &OllamaAgent{
+	a := &OllamaAgent{
 		client:   client,
 		store:    store,
 		tracker:  tr,
-		cfg:      cfg,
 		interval: interval,
 		logger:   logger,
 		sm:       sm,
 	}
+	if cfg != nil {
+		a.resetDay = cfg.OllamaResetDay
+	}
+	return a
 }
 
 func (a *OllamaAgent) Run(ctx context.Context) error {
@@ -77,7 +82,7 @@ func (a *OllamaAgent) Run(ctx context.Context) error {
 }
 
 func (a *OllamaAgent) poll(ctx context.Context) {
-	if a.client == nil || a.cfg == nil {
+	if a.client == nil {
 		return
 	}
 	if a.pollingCheck != nil && !a.pollingCheck() {
@@ -90,11 +95,13 @@ func (a *OllamaAgent) poll(ctx context.Context) {
 			return
 		}
 		a.logger.Error("Failed to fetch Ollama quotas", "error", err)
+		pollFailed("ollama", "", err)
 		return
 	}
 
 	a.applyLearnedReset(snapshot)
 
+	pollSucceeded("ollama", "")
 	if _, err := a.store.InsertOllamaSnapshot(snapshot); err != nil {
 		a.logger.Error("Failed to insert Ollama snapshot", "error", err)
 		return
@@ -148,7 +155,7 @@ const (
 // but paid plans reset on the subscription start day, which the API does
 // not expose. An explicit OLLAMA_RESET_DAY always wins.
 func (a *OllamaAgent) applyLearnedReset(snapshot *api.OllamaSnapshot) {
-	if a.store == nil || snapshot == nil || a.cfg.OllamaResetDay > 0 {
+	if a.store == nil || snapshot == nil || a.resetDay > 0 {
 		return
 	}
 	prev, err := a.store.QueryLatestOllama()

@@ -132,6 +132,68 @@ func TestAccountScopedRangeAndHistorySpendLimitPerAccount(t *testing.T) {
 	}
 }
 
+// Upstream's sampled chart query and range stats read the whole table; the
+// fork must keep them inside one account, defaulting to the default account.
+func TestAntigravitySampledRangeAndStatsAreAccountScoped(t *testing.T) {
+	s, err := New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	agDefault, err := s.ResolveDefaultProviderAccount("antigravity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agOther, err := s.CreateOrRestoreProviderAccount("antigravity", "personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-time.Hour)
+	for i := 0; i < 3; i++ {
+		at := base.Add(time.Duration(i) * time.Minute)
+		if _, err := s.InsertAntigravitySnapshot(&api.AntigravitySnapshot{AccountID: agDefault.ID, CapturedAt: at}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.InsertAntigravitySnapshot(&api.AntigravitySnapshot{AccountID: agOther.ID, CapturedAt: at.Add(time.Second)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.InsertAntigravitySnapshot(&api.AntigravitySnapshot{AccountID: agOther.ID, CapturedAt: base.Add(10 * time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	start, end := base.Add(-time.Minute), time.Now().UTC()
+
+	for _, tc := range []struct {
+		name    string
+		account []int64
+		want    int64
+		count   int
+	}{
+		{"default", nil, agDefault.ID, 3},
+		{"other", []int64{agOther.ID}, agOther.ID, 4},
+	} {
+		snaps, err := s.QueryAntigravityRangeSampled(start, end, tc.account...)
+		if err != nil {
+			t.Fatalf("%s sampled: %v", tc.name, err)
+		}
+		if len(snaps) != tc.count {
+			t.Fatalf("%s sampled: got %d snapshots, want %d", tc.name, len(snaps), tc.count)
+		}
+		for _, snap := range snaps {
+			if snap.AccountID != tc.want {
+				t.Fatalf("%s sampled leaked account %d", tc.name, snap.AccountID)
+			}
+		}
+		count, _, _, err := s.QueryAntigravityRangeStats(start, end, tc.account...)
+		if err != nil {
+			t.Fatalf("%s stats: %v", tc.name, err)
+		}
+		if count != tc.count {
+			t.Fatalf("%s stats: got %d polls, want %d", tc.name, count, tc.count)
+		}
+	}
+}
+
 // defaultAccountIDForTest returns the provider's default account so tests that
 // insert snapshot rows directly land in the account the default view reads.
 func defaultAccountIDForTest(t *testing.T, s *Store, provider string) int64 {

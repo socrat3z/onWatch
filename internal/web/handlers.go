@@ -14,8 +14,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/onllm-dev/onwatch/v2/internal/agent"
 	"github.com/onllm-dev/onwatch/v2/internal/api"
 	"github.com/onllm-dev/onwatch/v2/internal/config"
 	"github.com/onllm-dev/onwatch/v2/internal/menubar"
@@ -92,51 +94,149 @@ type MiniMaxAccountReloader interface {
 	Reload()
 }
 
+// CodexPauseReporter reports which Codex accounts are paused pending
+// re-authentication, keyed by database account ID (issue #147).
+type CodexPauseReporter interface {
+	PausedAccounts() map[int64]agent.CodexPauseState
+}
+
 // Handler handles HTTP requests for the web dashboard
 type Handler struct {
-	store               *store.Store
-	tracker             *tracker.Tracker
-	zaiTracker          *tracker.ZaiTracker
-	anthropicTracker    *tracker.AnthropicTracker
-	copilotTracker      *tracker.CopilotTracker
-	codexTracker        *tracker.CodexTracker
-	antigravityTracker  *tracker.AntigravityTracker
-	minimaxTracker      *tracker.MiniMaxTracker
-	geminiTracker       *tracker.GeminiTracker
-	openrouterTracker   *tracker.OpenRouterTracker
-	moonshotTracker     *tracker.MoonshotTracker
-	deepseekTracker     *tracker.DeepSeekTracker
-	cursorTracker       *tracker.CursorTracker
-	grokTracker         *tracker.GrokTracker
-	kimiTracker         *tracker.KimiTracker
-	opencodeTracker     *tracker.OpenCodeTracker
-	ollamaTracker       *tracker.OllamaTracker
-	museTracker         *tracker.MuseTracker
-	commandCodeTracker  *tracker.CommandCodeTracker
-	updater             *update.Updater
-	notifier            Notifier
-	agentManager        ProviderAgentController
-	minimaxAgentMgr     MiniMaxAccountReloader
-	logger              *slog.Logger
-	dashboardTmpl       *template.Template
-	loginTmpl           *template.Template
-	settingsTmpl        *template.Template
-	sessions            *SessionStore
-	config              *config.Config
-	metrics             *metrics.Metrics
-	version             string
-	menubarSettingsMu   sync.Mutex
-	smtpTestMu          sync.Mutex
-	smtpTestLastSent    time.Time
-	webhookTestMu       sync.Mutex
-	webhookTestLastSent time.Time
-	pushTestMu          sync.Mutex
-	pushTestLastSent    time.Time
-	rateLimiter         *LoginRateLimiter // Per-IP rate limiting for login attempts
+	store              *store.Store
+	tracker            *tracker.Tracker
+	zaiTracker         *tracker.ZaiTracker
+	anthropicTracker   *tracker.AnthropicTracker
+	copilotTracker     *tracker.CopilotTracker
+	codexTracker       *tracker.CodexTracker
+	antigravityTracker *tracker.AntigravityTracker
+	minimaxTracker     *tracker.MiniMaxTracker
+	geminiTracker      *tracker.GeminiTracker
+	openrouterTracker  *tracker.OpenRouterTracker
+	moonshotTracker    *tracker.MoonshotTracker
+	deepseekTracker    *tracker.DeepSeekTracker
+	cursorTracker      *tracker.CursorTracker
+	grokTracker        *tracker.GrokTracker
+	kimiTracker        *tracker.KimiTracker
+	opencodeTracker    *tracker.OpenCodeTracker
+	ollamaTracker      *tracker.OllamaTracker
+	museTracker        *tracker.MuseTracker
+	commandCodeTracker *tracker.CommandCodeTracker
+	updater            *update.Updater
+	notifier           Notifier
+	agentManager       ProviderAgentController
+	minimaxAgentMgr    MiniMaxAccountReloader
+	logger             *slog.Logger
+	dashboardTmpl      *template.Template
+	loginTmpl          *template.Template
+	settingsTmpl       *template.Template
+	sessions           *SessionStore
+	config             *config.Config
+	metrics            *metrics.Metrics
+	version            string
+	codexPauseReporter CodexPauseReporter
+	// pollStatus is the agent-side last-poll-outcome registry (classes only,
+	// never raw error text) used to explain stale menubar cards.
+	pollStatus        *agent.PollStatusRegistry
+	menubarSettingsMu sync.Mutex
+	// menubarLastGood holds the last successfully built card per menubar card
+	// ID (one entry per provider, or per account for Codex/MiniMax). When a
+	// provider's storage read fails, the snapshot serves this card unchanged -
+	// including its original updated_at_time - so a client's age keeps counting
+	// up instead of the card vanishing or turning into a fake-fresh zero.
+	// Bounded by the number of provider cards.
+	menubarLastGoodMu sync.Mutex
+	menubarLastGood   map[string]menubar.ProviderCard
+	// menubarQuotas remembers the last-seen capture time of every quota that
+	// has appeared on a card. A quota's time is used from the current payload
+	// while it is present; the remembered value is used only when that quota
+	// has disappeared from the payload (aged out of the builder's query
+	// window). The entry is dropped once every quota is back, and after
+	// menubarQuotaMemoryBound of continuous absence so a removed quota cannot
+	// pin the card's age until restart. Bounded by the number of cards and
+	// quotas and pruned with the last-good cache.
+	menubarQuotas map[string]map[string]time.Time
+	// menubarQuotaMissing records when a quota was first absent from a
+	// payload, so a permanently removed quota stops pinning the card's age
+	// after menubarQuotaMemoryBound. Pruned with the quota map.
+	menubarQuotaMissing map[string]map[string]time.Time
+	// menubarSnapshotData caches the last successfully built data so the
+	// summary, tray-title and preferences endpoints can answer without
+	// rebuilding roughly 60-90 SQL statements on every request. Only one build
+	// runs at a time.
+	menubarSnapshotMu    sync.Mutex
+	menubarSnapshotData  menubarBuiltData
+	menubarSnapshotAt    time.Time
+	menubarSnapshotGen   uint64
+	menubarSnapshotBuild *menubarSnapshotBuild
+	menubarBuildMu       sync.Mutex
+	// menubarLastSettings is the last settings read that succeeded. When a
+	// later read fails, a snapshot can still be built from it (gap A) instead
+	// of answering 500.
+	menubarLastSettingsMu sync.Mutex
+	menubarLastSettings   *menubar.Settings
+	// Test and diagnostics hooks. Nil in production.
+	menubarNow            func() time.Time
+	menubarBuildHook      func(context.Context) (menubarBuiltData, error)
+	menubarJoinHook       func()
+	menubarAfterBuildHook func(*menubar.Snapshot, error)
+	// menubarBuildAcquiredHook runs once a build goroutine has acquired
+	// menubarBuildMu, with the generation the build was created for and whether
+	// it is still current (runs queries) or already superseded (skips them). It
+	// is called with menubarBuildMu held, so the hook must not block. Tests use
+	// it to synchronise with the serialised build queue instead of relying on
+	// mutex handoff order.
+	menubarBuildAcquiredHook func(generation uint64, ran bool)
+	// menubarBuildRegisteredHook runs when a build becomes the registered
+	// in-flight build, before its goroutine has necessarily acquired the build
+	// mutex. It is called with menubarSnapshotMu held, so the hook must not
+	// block (a buffered channel send is fine). Tests use it to wait for an
+	// exact generation to be registered.
+	menubarBuildRegisteredHook func(generation uint64)
+	// menubarProvidersBuildHook counts entries into the provider build, so a
+	// test can prove the preferences endpoint never starts its own.
+	menubarProvidersBuildHook func()
+	menubarFreshFor           time.Duration
+	menubarWaitFor            time.Duration
+	menubarNoCacheFor         time.Duration
+	// menubarLastBuildEnd is the unix-nano time the last build finished
+	// (success or failure); background builds keep menubarMinRebuildGap apart.
+	menubarLastBuildEnd atomic.Int64
+	// menubarRebuildGapFor overrides menubarMinRebuildGap in tests; negative
+	// disables it.
+	menubarRebuildGapFor time.Duration
+	// responses caches dashboard aggregate responses until the provider they
+	// cover polls again (see response_cache.go).
+	responses *responseCache
+	// menubarLastRequest is the unix-nano time of the last menubar snapshot
+	// request; background prebuilds run only while a client is active.
+	menubarLastRequest atomic.Int64
+	// menubarPrebuildPending coalesces poll-driven prebuilds.
+	menubarPrebuildPending atomic.Bool
+	smtpTestMu             sync.Mutex
+	smtpTestLastSent       time.Time
+	webhookTestMu          sync.Mutex
+	webhookTestLastSent    time.Time
+	pushTestMu             sync.Mutex
+	pushTestLastSent       time.Time
+	rateLimiter            *LoginRateLimiter // Per-IP rate limiting for login attempts
 }
 
 // DefaultCodexAccountID is the default account ID for single-account setups.
 const DefaultCodexAccountID int64 = 1
+
+// codexSnapshotStaleAfter is how old a Codex snapshot may be before the
+// dashboard marks it stale. The poll interval is one minute, so anything much
+// older means the account is not being polled (paused, orphaned, or offline).
+const codexSnapshotStaleAfter = 15 * time.Minute
+
+// snapshotStale reports whether a snapshot captured at capturedAt is too old to
+// present as live data. A zero capturedAt is treated as not stale.
+func snapshotStale(now, capturedAt time.Time) bool {
+	if capturedAt.IsZero() {
+		return false
+	}
+	return now.Sub(capturedAt) > codexSnapshotStaleAfter
+}
 
 // parseCodexAccountID extracts the account ID from query params, defaulting to 1.
 func parseCodexAccountID(r *http.Request) int64 {
@@ -435,6 +535,7 @@ func (h *Handler) codexProfileSave(w http.ResponseWriter, r *http.Request) {
 			externalID = profile.AccountID
 		}
 		h.store.GetOrCreateProviderAccountByExternalID("codex", req.Name, externalID)
+		h.invalidateMenubarSnapshot()
 	}
 
 	respondJSON(w, http.StatusCreated, map[string]interface{}{
@@ -476,6 +577,7 @@ func (h *Handler) codexProfileDelete(w http.ResponseWriter, r *http.Request) {
 	// Mark profile as deleted in database
 	if h.store != nil {
 		h.store.MarkProviderAccountDeleted("codex", name)
+		h.invalidateMenubarSnapshot()
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
@@ -570,6 +672,7 @@ func (h *Handler) codexProfileRefresh(w http.ResponseWriter, r *http.Request) {
 			externalID = profile.AccountID
 		}
 		h.store.GetOrCreateProviderAccountByExternalID("codex", name, externalID)
+		h.invalidateMenubarSnapshot()
 	}
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
@@ -579,17 +682,55 @@ func (h *Handler) codexProfileRefresh(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// menubarAccountUsage pairs one account's current payload with the outcome of
+// the storage read that built it, so the menubar can serve its last good card
+// instead of an empty payload when that read failed.
+type menubarAccountUsage struct {
+	Usage   map[string]interface{}
+	ReadOK  bool
+	HasData bool
+}
+
 func (h *Handler) codexUsageAccounts() []map[string]interface{} {
+	usages, _ := h.codexUsageAccountsOK()
+	accounts := make([]map[string]interface{}, 0, len(usages))
+	for _, usage := range usages {
+		accounts = append(accounts, usage.Usage)
+	}
+	return accounts
+}
+
+// codexUsageAccountsOK is codexUsageAccounts with an explicit enumeration
+// outcome and the read outcome of each account's builder. enumerated is false
+// only when the account list itself could not be read; callers that cache
+// per-account data must then keep their known accounts and prune nothing.
+func (h *Handler) codexUsageAccountsOK() (accounts []menubarAccountUsage, enumerated bool) {
 	if h.store == nil {
-		return []map[string]interface{}{}
+		return nil, true
 	}
 
-	// Only active (non-deleted) accounts are rendered.
-	usages := h.providerAccountUsages("codex", h.buildCodexCurrent, func() int64 { return DefaultCodexAccountID })
-	if usages == nil {
-		return []map[string]interface{}{}
+	// Only return active (non-deleted) accounts for dashboard rendering
+	rows, err := h.store.QueryActiveProviderAccounts("codex")
+	if err != nil {
+		h.logger.Error("failed to query Codex accounts", "error", err)
+		return nil, false
 	}
-	return usages
+	if len(rows) == 0 {
+		rows = []store.ProviderAccount{
+			{ID: DefaultCodexAccountID, Name: "default"},
+		}
+	}
+
+	accounts = make([]menubarAccountUsage, 0, len(rows))
+	for _, acc := range rows {
+		usage, readOK, hasData := h.buildCodexCurrentOK(acc.ID)
+		usage["accountId"] = acc.ID
+		usage["accountName"] = store.ProviderAccountAlias(acc)
+		usage["id"] = acc.ID
+		usage["name"] = acc.Name
+		accounts = append(accounts, menubarAccountUsage{Usage: usage, ReadOK: readOK, HasData: hasData})
+	}
+	return accounts, true
 }
 
 func codexUsageAccountID(usage map[string]interface{}) int64 {
@@ -684,27 +825,28 @@ func NewHandler(store *store.Store, tracker *tracker.Tracker, logger *slog.Logge
 	}
 
 	// Parse dashboard template (layout + dashboard)
-	dashboardTmpl, err := template.New("").Funcs(recoveryTemplateFuncs).ParseFS(templatesFS, "templates/layout.html", "templates/dashboard.html")
+	dashboardTmpl, err := template.New("").Funcs(recoveryTemplateFuncs).Funcs(peakHoursTemplateFuncs).ParseFS(templatesFS, "templates/layout.html", "templates/dashboard.html")
 	if err != nil {
 		logger.Error("failed to parse dashboard template", "error", err)
 		dashboardTmpl = template.New("empty")
 	}
 
 	// Parse login template (layout + login)
-	loginTmpl, err := template.New("").Funcs(recoveryTemplateFuncs).ParseFS(templatesFS, "templates/layout.html", "templates/login.html")
+	loginTmpl, err := template.New("").Funcs(recoveryTemplateFuncs).Funcs(peakHoursTemplateFuncs).ParseFS(templatesFS, "templates/layout.html", "templates/login.html")
 	if err != nil {
 		logger.Error("failed to parse login template", "error", err)
 		loginTmpl = template.New("empty")
 	}
 
 	// Parse settings template (layout + settings)
-	settingsTmpl, err := template.New("").Funcs(recoveryTemplateFuncs).ParseFS(templatesFS, "templates/layout.html", "templates/settings.html")
+	settingsTmpl, err := template.New("").Funcs(recoveryTemplateFuncs).Funcs(peakHoursTemplateFuncs).ParseFS(templatesFS, "templates/layout.html", "templates/settings.html")
 	if err != nil {
 		logger.Error("failed to parse settings template", "error", err)
 		settingsTmpl = template.New("empty")
 	}
 
 	h := &Handler{
+		responses:     newResponseCache(),
 		store:         store,
 		tracker:       tracker,
 		logger:        logger,
@@ -832,10 +974,29 @@ func (h *Handler) SetMiniMaxAgentManager(m MiniMaxAccountReloader) {
 	h.minimaxAgentMgr = m
 }
 
+// SetCodexPauseReporter wires the Codex agent manager so /api/current can flag
+// paused accounts that need re-authentication.
+func (h *Handler) SetCodexPauseReporter(r CodexPauseReporter) {
+	h.codexPauseReporter = r
+}
+
+// codexPauseState returns the pause state for an account, if any.
+func (h *Handler) codexPauseState(accountID int64) (agent.CodexPauseState, bool) {
+	if h.codexPauseReporter == nil {
+		return agent.CodexPauseState{}, false
+	}
+	state, ok := h.codexPauseReporter.PausedAccounts()[accountID]
+	return state, ok && state.Paused
+}
+
 func (h *Handler) triggerMenubarRefresh() {
 	if h == nil {
 		return
 	}
+	// The companion re-fetches the summary; make sure that fetch rebuilds
+	// instead of serving the snapshot from before the change that triggered
+	// this refresh.
+	h.invalidateMenubarSnapshot()
 	testMode := false
 	if h.config != nil {
 		testMode = h.config.TestMode
@@ -864,6 +1025,14 @@ func (h *Handler) SettingsPage(w http.ResponseWriter, r *http.Request) {
 // respondJSON sends a JSON response
 func respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	// Every API response is live quota data; a stale browser cache served as
+	// "now" is indistinguishable from fresh data and defeats the age labels
+	// (macOS WKWebView was observed serving a day-old menubar summary). This is
+	// applied at respondJSON rather than per menubar endpoint because the
+	// dashboard has the same problem and no API response here is cacheable;
+	// the service worker does not cache /api/ paths, so no other client relied
+	// on revalidation.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
 }
@@ -1065,7 +1234,12 @@ func (h *Handler) saveAPIIntegrationsVisibility(vis map[string]bool) error {
 	if err != nil {
 		return err
 	}
-	return h.store.SetSetting("api_integrations_visibility", string(data))
+	if err := h.store.SetSetting("api_integrations_visibility", string(data)); err != nil {
+		return err
+	}
+	// Dashboard visibility gates provider card selection.
+	h.invalidateMenubarSnapshot()
+	return nil
 }
 
 func providerPollingValue(entry interface{}) (bool, bool) {
@@ -1144,31 +1318,100 @@ func (h *Handler) providerVisibilityMap() map[string]map[string]bool {
 	return vis
 }
 
+// isProviderConfigured reports whether a provider has credentials. The config
+// fields are read under a short read lock; any detection (keychain reads, the
+// 2s Antigravity probe, the MiniMax store query) runs outside the lock, so a
+// slow probe never blocks a settings save.
 func (h *Handler) isProviderConfigured(provider string) bool {
 	if h.config == nil {
 		return false
 	}
+	h.config.ReadLock()
+	configured, needsDetect := h.providerConfiguredFromConfig(provider)
+	h.config.ReadUnlock()
+	if configured || !needsDetect {
+		return configured
+	}
+	return h.providerConfiguredByDetection(provider)
+}
+
+// providerConfiguredFromConfig evaluates the config-only half of the check
+// while the caller holds the read lock. needsDetect is true when a false result
+// may still be resolved by detection outside the lock.
+func (h *Handler) providerConfiguredFromConfig(provider string) (configured, needsDetect bool) {
 	switch provider {
 	case "anthropic":
-		return strings.TrimSpace(h.config.AnthropicToken) != "" || strings.TrimSpace(api.DetectAnthropicToken(h.logger)) != ""
+		return strings.TrimSpace(h.config.AnthropicToken) != "", true
 	case "synthetic":
-		return strings.TrimSpace(h.config.SyntheticAPIKey) != ""
+		return strings.TrimSpace(h.config.SyntheticAPIKey) != "", false
 	case "zai":
-		return strings.TrimSpace(h.config.ZaiAPIKey) != ""
+		return strings.TrimSpace(h.config.ZaiAPIKey) != "", false
 	case "copilot":
-		return strings.TrimSpace(h.config.CopilotToken) != ""
+		return strings.TrimSpace(h.config.CopilotToken) != "", false
 	case "codex":
-		return strings.TrimSpace(h.config.CodexToken) != "" || strings.TrimSpace(api.DetectCodexToken(h.logger)) != ""
+		return strings.TrimSpace(h.config.CodexToken) != "", true
 	case "antigravity":
-		if h.config.AntigravityEnabled {
-			return true
+		return h.config.AntigravityEnabled, true
+	case "minimax":
+		return strings.TrimSpace(h.config.MiniMaxAPIKey) != "", true
+	case "openrouter":
+		return strings.TrimSpace(h.config.OpenRouterAPIKey) != "", false
+	case "moonshot":
+		return strings.TrimSpace(h.config.MoonshotAPIKey) != "", false
+	case "deepseek":
+		return strings.TrimSpace(h.config.DeepSeekAPIKey) != "", false
+	case "gemini":
+		return h.config.GeminiEnabled, false
+	case "cursor":
+		return strings.TrimSpace(h.config.CursorToken) != "", true
+	case "grok":
+		return h.config.GrokEnabled || strings.TrimSpace(h.config.GrokToken) != "", true
+	case "kimi":
+		return strings.TrimSpace(h.config.KimiToken) != "" || h.config.KimiEnabled, true
+	case "mistral":
+		return h.config.HasProviderLocked("mistral"), false
+	case "opencode":
+		return h.config.OpenCodeGoConfiguredLocked(), false
+	case "ollama":
+		return strings.TrimSpace(h.config.OllamaAPIKey) != "", false
+	case "muse":
+		// MUSE_ENABLED=false is an explicit opt-out and wins over everything,
+		// including a key that is present in the environment.
+		if h.config.MuseDisabled {
+			return false, false
 		}
+		return h.config.MuseEnabled || strings.TrimSpace(h.config.MuseAPIKey) != "", true
+	case "commandcode":
+		// COMMANDCODE_ENABLED=false is an explicit opt-out and wins over
+		// everything, including a key that is present in the environment.
+		if h.config.CommandCodeDisabled {
+			return false, false
+		}
+		return h.config.CommandCodeEnabled || strings.TrimSpace(h.config.CommandCodeAPIKey) != "", true
+	default:
+		return false, false
+	}
+}
+
+// testHookBeforeDetect, when set, runs at the start of credential detection.
+// Tests use it to prove detection runs without the config lock held.
+var testHookBeforeDetect func(provider string)
+
+// providerConfiguredByDetection runs credential detection without holding the
+// config lock.
+func (h *Handler) providerConfiguredByDetection(provider string) bool {
+	if testHookBeforeDetect != nil {
+		testHookBeforeDetect(provider)
+	}
+	switch provider {
+	case "anthropic":
+		return strings.TrimSpace(api.DetectAnthropicToken(h.logger)) != ""
+	case "codex":
+		return strings.TrimSpace(api.DetectCodexToken(h.logger)) != ""
+	case "antigravity":
 		return h.detectAntigravityConnection() != nil
 	case "minimax":
-		// Configured if any active MiniMax accounts have API keys, or legacy env var is set
-		if strings.TrimSpace(h.config.MiniMaxAPIKey) != "" {
-			return true
-		}
+		// Configured if any active MiniMax accounts have API keys.
 		if h.store != nil {
 			if accounts, err := h.store.QueryActiveProviderAccounts("minimax"); err == nil {
 				for _, acc := range accounts {
@@ -1179,62 +1422,18 @@ func (h *Handler) isProviderConfigured(provider string) bool {
 			}
 		}
 		return false
-	case "openrouter":
-		return strings.TrimSpace(h.config.OpenRouterAPIKey) != ""
-	case "moonshot":
-		return strings.TrimSpace(h.config.MoonshotAPIKey) != ""
-	case "deepseek":
-		return strings.TrimSpace(h.config.DeepSeekAPIKey) != ""
-	case "gemini":
-		return h.config.GeminiEnabled
 	case "cursor":
-		return strings.TrimSpace(h.config.CursorToken) != "" || strings.TrimSpace(api.DetectCursorToken(h.logger)) != ""
+		return strings.TrimSpace(api.DetectCursorToken(h.logger)) != ""
 	case "grok":
-		if h.config.GrokEnabled || strings.TrimSpace(h.config.GrokToken) != "" {
-			return true
-		}
-		if creds := api.DetectGrokCredentials(h.logger); creds != nil && strings.TrimSpace(creds.AccessToken) != "" {
-			return true
-		}
-		return false
+		creds := api.DetectGrokCredentials(h.logger)
+		return creds != nil && strings.TrimSpace(creds.AccessToken) != ""
 	case "kimi":
-		if h.config != nil && (strings.TrimSpace(h.config.KimiToken) != "" || h.config.KimiEnabled) {
-			return true
-		}
 		return api.DetectKimiCredentials(h.logger) != nil
-	case "mistral":
-		return h.config != nil && h.config.HasProvider("mistral")
-	case "opencode":
-		return h.config != nil && h.config.OpenCodeGoConfigured()
-	case "ollama":
-		return h.config != nil && strings.TrimSpace(h.config.OllamaAPIKey) != ""
 	case "muse":
-		if h.config == nil {
-			return false
-		}
-		// MUSE_ENABLED=false is an explicit opt-out and wins over everything,
-		// including a key that is present in the environment.
-		if h.config.MuseDisabled {
-			return false
-		}
-		if h.config.MuseEnabled || strings.TrimSpace(h.config.MuseAPIKey) != "" {
-			return true
-		}
 		// Cached: detection can shell out to the keychain with a multi-second
 		// deadline, and this runs on every provider-list request.
 		return api.DetectMuseCredentialsCached(h.logger) != nil
 	case "commandcode":
-		if h.config == nil {
-			return false
-		}
-		// COMMANDCODE_ENABLED=false is an explicit opt-out and wins over
-		// everything, including a key that is present in the environment.
-		if h.config.CommandCodeDisabled {
-			return false
-		}
-		if h.config.CommandCodeEnabled || strings.TrimSpace(h.config.CommandCodeAPIKey) != "" {
-			return true
-		}
 		// Reading a few small JSON files, so no cache is needed.
 		return api.DetectCommandCodeCredentials(h.logger) != nil
 	default:
@@ -1268,7 +1467,13 @@ func (h *Handler) saveProviderVisibility(vis map[string]map[string]bool) error {
 	if err != nil {
 		return err
 	}
-	return h.store.SetSetting("provider_visibility", string(data))
+	if err := h.store.SetSetting("provider_visibility", string(data)); err != nil {
+		return err
+	}
+	// Dashboard visibility and polling state select which cards the menubar
+	// shows.
+	h.invalidateMenubarSnapshot()
+	return nil
 }
 
 func (h *Handler) setProviderVisibility(provider string, polling, dashboard *bool) error {
@@ -1288,10 +1493,24 @@ func (h *Handler) setProviderVisibility(provider string, polling, dashboard *boo
 	return h.saveProviderVisibility(vis)
 }
 
+// tryAutoDetect probes for local credentials and, on success, records them in
+// the live config. Detection (keychain reads, the 2s Antigravity network probe)
+// runs WITHOUT the config lock, so a slow probe never blocks a settings save or
+// an agent factory; only the field assignments take the write lock.
 func (h *Handler) tryAutoDetect(provider string) bool {
 	if h.config == nil {
 		return false
 	}
+	if h.autoDetectProvider(provider) {
+		// Credentials discovered here can enable a provider, which changes the
+		// menubar's card set.
+		h.invalidateMenubarSnapshot()
+		return true
+	}
+	return false
+}
+
+func (h *Handler) autoDetectProvider(provider string) bool {
 	switch provider {
 	case "mistral":
 		// Enabling schedules discovery in the agent; never read browsers in HTTP handlers.
@@ -1314,30 +1533,46 @@ func (h *Handler) tryAutoDetect(provider string) bool {
 		if err != nil || h.store.SetSetting("provider_settings", string(data)) != nil {
 			return false
 		}
-		h.config.MistralEnabled = true
-		h.config.MistralDisabled = false
+		h.config.WithWrite(func() {
+			h.config.MistralEnabled = true
+			h.config.MistralDisabled = false
+		})
 		return true
 
 	case "anthropic":
-		if token := strings.TrimSpace(api.DetectAnthropicToken(h.logger)); token != "" {
+		token := strings.TrimSpace(api.DetectAnthropicToken(h.logger))
+		if token == "" {
+			return false
+		}
+		h.config.WithWrite(func() {
 			h.config.AnthropicToken = token
 			h.config.AnthropicAutoToken = true
-			return true
-		}
+		})
+		return true
 	case "codex":
-		if creds := api.DetectCodexCredentials(h.logger); creds != nil && strings.TrimSpace(creds.AccessToken) != "" {
-			h.config.CodexToken = strings.TrimSpace(creds.AccessToken)
+		creds := api.DetectCodexCredentials(h.logger)
+		if creds == nil || strings.TrimSpace(creds.AccessToken) == "" {
+			return false
+		}
+		token := strings.TrimSpace(creds.AccessToken)
+		isOpenCode := creds.Source == api.CredentialSourceOpenCode
+		h.config.WithWrite(func() {
+			h.config.CodexToken = token
 			h.config.CodexAutoToken = true
-			if creds.Source == api.CredentialSourceOpenCode {
+			if isOpenCode {
 				h.config.CodexAutoSource = "opencode"
 				h.config.OpenCodeEnabled = true
 			} else {
 				h.config.CodexAutoSource = "codex"
 			}
-			return true
-		}
+		})
+		return true
 	case "antigravity":
-		if conn := h.detectAntigravityConnection(); conn != nil {
+		conn := h.detectAntigravityConnection()
+		if conn == nil {
+			return false
+		}
+		h.config.WithWrite(func() {
 			h.config.AntigravityEnabled = true
 			if h.config.AntigravityBaseURL == "" {
 				h.config.AntigravityBaseURL = conn.BaseURL
@@ -1345,32 +1580,46 @@ func (h *Handler) tryAutoDetect(provider string) bool {
 			if h.config.AntigravityCSRFToken == "" {
 				h.config.AntigravityCSRFToken = conn.CSRFToken
 			}
-			return true
-		}
+		})
+		return true
 	case "gemini":
-		if token := strings.TrimSpace(api.DetectGeminiToken(h.logger)); token != "" {
+		token := strings.TrimSpace(api.DetectGeminiToken(h.logger))
+		if token == "" {
+			return false
+		}
+		h.config.WithWrite(func() {
 			h.config.GeminiEnabled = true
 			h.config.GeminiAutoToken = true
-			return true
-		}
+		})
+		return true
 	case "grok":
-		if creds := api.DetectGrokCredentials(h.logger); creds != nil && strings.TrimSpace(creds.AccessToken) != "" {
+		creds := api.DetectGrokCredentials(h.logger)
+		if creds == nil || strings.TrimSpace(creds.AccessToken) == "" {
+			return false
+		}
+		token := strings.TrimSpace(creds.AccessToken)
+		h.config.WithWrite(func() {
 			if h.config.GrokToken == "" {
-				h.config.GrokToken = strings.TrimSpace(creds.AccessToken)
+				h.config.GrokToken = token
 				h.config.GrokAutoToken = true
 			}
 			h.config.GrokEnabled = true
-			return true
-		}
+		})
+		return true
 	case "kimi":
-		if creds := api.DetectKimiCredentials(h.logger); creds != nil && (strings.TrimSpace(creds.AccessToken) != "" || strings.TrimSpace(creds.RefreshToken) != "") {
-			if h.config.KimiToken == "" && strings.TrimSpace(creds.AccessToken) != "" {
-				h.config.KimiToken = strings.TrimSpace(creds.AccessToken)
+		creds := api.DetectKimiCredentials(h.logger)
+		if creds == nil || (strings.TrimSpace(creds.AccessToken) == "" && strings.TrimSpace(creds.RefreshToken) == "") {
+			return false
+		}
+		token := strings.TrimSpace(creds.AccessToken)
+		h.config.WithWrite(func() {
+			if h.config.KimiToken == "" && token != "" {
+				h.config.KimiToken = token
 				h.config.KimiAutoToken = true
 			}
 			h.config.KimiEnabled = true
-			return true
-		}
+		})
+		return true
 	}
 	return false
 }
@@ -1568,8 +1817,26 @@ func sanitizeProviderSettings(providers map[string]interface{}) {
 
 // ApplyProviderSettingsFromDB loads provider_settings from the DB and applies
 // API keys, tokens, and region overrides to the runtime config. This allows
-// the UI to override .env values without requiring a daemon restart.
+// the UI to override .env values without requiring a daemon restart. The whole
+// apply is serialized on the config write lock so it cannot interleave with a
+// concurrent agent-factory snapshot or another save.
 func ApplyProviderSettingsFromDB(st *store.Store, cfg *config.Config, logger *slog.Logger) {
+	cfg.WriteLock()
+	defer cfg.WriteUnlock()
+	applyProviderSettingsFromDBLocked(st, cfg, logger)
+}
+
+func applyProviderSettingsFromDBLocked(st *store.Store, cfg *config.Config, logger *slog.Logger) {
+	applyProviderSettingsLocked(st, cfg, logger, nil)
+}
+
+// applyProviderSettingsLocked applies stored provider_settings to cfg. When
+// only is non-nil, only those providers are applied, and every field is written
+// only when it differs from the current value. A save that touches one provider
+// therefore never rewrites another provider's fields, which handlers and the
+// menubar read without the config lock (a write there would be a data race
+// even when the value is unchanged).
+func applyProviderSettingsLocked(st *store.Store, cfg *config.Config, logger *slog.Logger, only map[string]bool) {
 	provJSON, err := st.GetSetting("provider_settings")
 	if err != nil || provJSON == "" {
 		return
@@ -1578,128 +1845,169 @@ func ApplyProviderSettingsFromDB(st *store.Store, cfg *config.Config, logger *sl
 	if json.Unmarshal([]byte(provJSON), &provSettings) != nil {
 		return
 	}
-
-	if s := provSettings["synthetic"]; s != nil {
-		if key, _ := s["api_key"].(string); key != "" {
-			cfg.SyntheticAPIKey = key
+	if only != nil {
+		for provider := range provSettings {
+			if !only[provider] {
+				delete(provSettings, provider)
+			}
 		}
 	}
-	if s := provSettings["zai"]; s != nil {
-		if key, _ := s["api_key"].(string); key != "" {
-			cfg.ZaiAPIKey = key
+
+	// applySecret sets *dst from a stored secret field, honoring an explicit
+	// clear (a "<field>_cleared" marker) while an absent or legacy-blank field
+	// keeps the current value. The value is written only when it differs.
+	applySecret := func(dst *string, s map[string]interface{}, field string) {
+		if v, _ := s[field].(string); v != "" {
+			if *dst != v {
+				*dst = v
+			}
+		} else if providerSettingIsCleared(s, field) {
+			if *dst != "" {
+				*dst = ""
+			}
 		}
+	}
+	// setString writes only when the value differs, so an unchanged save never
+	// touches a field a lock-free reader may be reading.
+	setString := func(dst *string, v string) {
+		if *dst != v {
+			*dst = v
+		}
+	}
+	setBool := func(dst *bool, v bool) {
+		if *dst != v {
+			*dst = v
+		}
+	}
+	setFloat := func(dst *float64, v float64) {
+		if *dst != v {
+			*dst = v
+		}
+	}
+	setInt := func(dst *int, v int) {
+		if *dst != v {
+			*dst = v
+		}
+	}
+
+	if s := provSettings["synthetic"]; s != nil {
+		applySecret(&cfg.SyntheticAPIKey, s, "api_key")
+	}
+	if s := provSettings["zai"]; s != nil {
+		applySecret(&cfg.ZaiAPIKey, s, "api_key")
 		if region, _ := s["region"].(string); region != "" {
-			cfg.ZaiRegion = region
+			setString(&cfg.ZaiRegion, region)
 			if region == "cn" {
-				cfg.ZaiBaseURL = "https://open.bigmodel.cn/api"
+				setString(&cfg.ZaiBaseURL, "https://open.bigmodel.cn/api")
 			} else {
-				cfg.ZaiBaseURL = "https://api.z.ai/api"
+				setString(&cfg.ZaiBaseURL, "https://api.z.ai/api")
 			}
 		}
 	}
 	if s := provSettings["copilot"]; s != nil {
-		if token, _ := s["token"].(string); token != "" {
-			cfg.CopilotToken = token
-		}
+		applySecret(&cfg.CopilotToken, s, "token")
 	}
 	if s := provSettings["minimax"]; s != nil {
-		if key, _ := s["api_key"].(string); key != "" {
-			cfg.MiniMaxAPIKey = key
-		}
+		applySecret(&cfg.MiniMaxAPIKey, s, "api_key")
 		if region, _ := s["region"].(string); region != "" {
-			cfg.MiniMaxRegion = region
+			setString(&cfg.MiniMaxRegion, region)
 		}
 	}
 	if s := provSettings["openrouter"]; s != nil {
-		if key, _ := s["api_key"].(string); key != "" {
-			cfg.OpenRouterAPIKey = key
-		}
+		applySecret(&cfg.OpenRouterAPIKey, s, "api_key")
 	}
 	if s := provSettings["moonshot"]; s != nil {
-		if key, _ := s["api_key"].(string); key != "" {
-			cfg.MoonshotAPIKey = key
-		}
+		applySecret(&cfg.MoonshotAPIKey, s, "api_key")
 	}
 	if s := provSettings["deepseek"]; s != nil {
-		if key, _ := s["api_key"].(string); key != "" {
-			cfg.DeepSeekAPIKey = key
-		}
+		applySecret(&cfg.DeepSeekAPIKey, s, "api_key")
 	}
 	if s := provSettings["antigravity"]; s != nil {
 		if url, _ := s["base_url"].(string); url != "" {
-			cfg.AntigravityBaseURL = url
-			cfg.AntigravityEnabled = true
+			setString(&cfg.AntigravityBaseURL, url)
+			setBool(&cfg.AntigravityEnabled, true)
 		}
-		if token, _ := s["csrf_token"].(string); token != "" {
-			cfg.AntigravityCSRFToken = token
-		}
+		applySecret(&cfg.AntigravityCSRFToken, s, "csrf_token")
 		if source, _ := s["source"].(string); source != "" {
-			cfg.AntigravitySource = api.NormalizeAntigravitySource(source)
+			setString(&cfg.AntigravitySource, api.NormalizeAntigravitySource(source))
 		}
 	}
 	// OpenCode (opencode-codex) feeds the Codex provider; the UI persists a
 	// simple enabled flag, mirroring the OPENCODE_ENABLED env var.
 	if s := provSettings["mistral"]; s != nil {
 		if enabled, ok := s["enabled"].(string); ok {
-			cfg.MistralEnabled = enabled == "true"
-			cfg.MistralDisabled = !cfg.MistralEnabled
+			setBool(&cfg.MistralEnabled, enabled == "true")
+			setBool(&cfg.MistralDisabled, !cfg.MistralEnabled)
 		}
 		if enabled, ok := s["enabled"].(bool); ok {
-			cfg.MistralDisabled = !enabled
-			cfg.MistralEnabled = enabled
+			setBool(&cfg.MistralDisabled, !enabled)
+			setBool(&cfg.MistralEnabled, enabled)
 		}
 		if v, ok := s["auth_mode"].(string); ok {
-			cfg.MistralAuthMode = v
+			setString(&cfg.MistralAuthMode, v)
 		}
 		if v, ok := s["browser"].(string); ok {
-			cfg.MistralBrowser = v
+			setString(&cfg.MistralBrowser, v)
 		}
 		if v, ok := s["browser_profile"].(string); ok {
-			cfg.MistralBrowserProfile = v
+			setString(&cfg.MistralBrowserProfile, v)
 		}
 		if v, ok := s["auth_cookie"].(string); ok && v != "" {
-			cfg.MistralAuthCookie = v
+			setString(&cfg.MistralAuthCookie, v)
+		} else if providerSettingIsCleared(s, "auth_cookie") {
+			setString(&cfg.MistralAuthCookie, "")
 		}
 	}
 	if s := provSettings["opencode"]; s != nil {
 		if enabled, ok := s["enabled"].(bool); ok {
-			cfg.OpenCodeEnabled = enabled
+			setBool(&cfg.OpenCodeEnabled, enabled)
 		}
+		// A value is removed only when an explicit "<field>_cleared" marker is
+		// stored. A legacy bare "" (written by older versions, which always sent
+		// workspace_id) keeps the env/current value, so an upgrade cannot wipe a
+		// workspace ID that lives in .env.
 		if id, _ := s["workspace_id"].(string); id != "" {
-			cfg.OpenCodeGoWorkspaceID = id
+			setString(&cfg.OpenCodeGoWorkspaceID, id)
+		} else if providerSettingIsCleared(s, "workspace_id") {
+			setString(&cfg.OpenCodeGoWorkspaceID, "")
 		}
 		if cookie, _ := s["auth_cookie"].(string); cookie != "" {
-			cfg.OpenCodeGoAuthCookie = cookie
+			setString(&cfg.OpenCodeGoAuthCookie, cookie)
+		} else if providerSettingIsCleared(s, "auth_cookie") {
+			setString(&cfg.OpenCodeGoAuthCookie, "")
 		}
 		// Usage-API mode: a console service-account key (preferred over the cookie).
 		if key, _ := s["api_key"].(string); strings.TrimSpace(key) != "" {
-			cfg.OpenCodeGoAPIKey = strings.TrimSpace(key)
+			setString(&cfg.OpenCodeGoAPIKey, strings.TrimSpace(key))
+		} else if providerSettingIsCleared(s, "api_key") {
+			setString(&cfg.OpenCodeGoAPIKey, "")
 		}
 	}
 	// Ollama Cloud: API key plus optional included-usage cap and reset day.
 	if s := provSettings["ollama"]; s != nil {
-		if key, _ := s["api_key"].(string); key != "" {
-			cfg.OllamaAPIKey = key
-		}
+		applySecret(&cfg.OllamaAPIKey, s, "api_key")
 		if limit := parseSettingFloat(s["monthly_limit"]); limit > 0 {
-			cfg.OllamaMonthlyLimit = limit
+			setFloat(&cfg.OllamaMonthlyLimit, limit)
 		}
 		if day := parseSettingInt(s["reset_day"]); day >= 1 && day <= 31 {
-			cfg.OllamaResetDay = day
+			setInt(&cfg.OllamaResetDay, day)
 		}
 	}
 	// Muse coding plan: API key plus optional probe model override.
 	if s := provSettings["muse"]; s != nil {
 		if key, _ := s["api_key"].(string); key != "" {
-			cfg.MuseAPIKey = key
+			setString(&cfg.MuseAPIKey, key)
 			// Saving a key through Settings is an explicit opt-in, so it grants
 			// the consent that auto-detection deliberately does not.
 			if !cfg.MuseDisabled {
-				cfg.MuseEnabled = true
+				setBool(&cfg.MuseEnabled, true)
 			}
+		} else if providerSettingIsCleared(s, "api_key") {
+			setString(&cfg.MuseAPIKey, "")
+			setBool(&cfg.MuseEnabled, false)
 		}
 		if model, _ := s["model"].(string); strings.TrimSpace(model) != "" {
-			cfg.MuseModel = strings.TrimSpace(model)
+			setString(&cfg.MuseModel, strings.TrimSpace(model))
 		}
 		// Detection is cached for 60s, misses included. Without this a key
 		// saved from Settings stays invisible to the provider list until the
@@ -1709,13 +2017,16 @@ func ApplyProviderSettingsFromDB(st *store.Store, cfg *config.Config, logger *sl
 	// Command Code: API key plus optional base URL override.
 	if s := provSettings["commandcode"]; s != nil {
 		if key, _ := s["api_key"].(string); strings.TrimSpace(key) != "" {
-			cfg.CommandCodeAPIKey = strings.TrimSpace(key)
+			setString(&cfg.CommandCodeAPIKey, strings.TrimSpace(key))
 			if !cfg.CommandCodeDisabled {
-				cfg.CommandCodeEnabled = true
+				setBool(&cfg.CommandCodeEnabled, true)
 			}
+		} else if providerSettingIsCleared(s, "api_key") {
+			setString(&cfg.CommandCodeAPIKey, "")
+			setBool(&cfg.CommandCodeEnabled, false)
 		}
 		if base, _ := s["base_url"].(string); strings.TrimSpace(base) != "" {
-			cfg.CommandCodeBaseURL = strings.TrimSpace(base)
+			setString(&cfg.CommandCodeBaseURL, strings.TrimSpace(base))
 		}
 	}
 
@@ -1862,6 +2173,278 @@ func (h *Handler) ToggleProvider(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// reconcileProviderAgents applies provider_settings from the DB to the live
+// config and starts, stops or restarts the affected provider agents. It is
+// called after a Settings save. Stopping a disabled or no-longer-configured
+// provider always applies; a start or restart applies only to providers whose
+// factory builds a fresh agent (opencode, mistral), so a rotated key takes
+// effect immediately for them. Only providers named in changed are touched, so
+// an unrelated save never disrupts a healthy agent.
+func (h *Handler) reconcileProviderAgents(changed []string, restart map[string]bool) {
+	if h.agentManager == nil || h.store == nil || h.config == nil {
+		return
+	}
+	// Only providers whose settings actually changed are applied and reconciled.
+	// A save that touches one provider must not rewrite another provider's
+	// fields: handlers and the menubar read those fields without the config
+	// lock, so a write there is a data race even when the value is unchanged.
+	// The special "global" bucket carries display settings, not provider config.
+	changedSet := make(map[string]bool, len(changed))
+	for _, key := range changed {
+		changedSet[key] = true
+	}
+	// Apply the settings under the config write lock, then release it before
+	// touching agents: a factory build takes the read lock (Snapshot), and
+	// nested locking would deadlock. The reconcile decisions below read the
+	// config under their own read lock.
+	var only map[string]bool
+	if len(changed) > 0 {
+		only = changedSet
+	}
+	h.config.WithWrite(func() {
+		applyProviderSettingsLocked(h.store, h.config, h.logger, only)
+	})
+	if len(changed) == 0 {
+		// No provider list: reconcile every provider (used by callers that do
+		// not track which settings changed).
+		vis := h.providerVisibilityMap()
+		for _, p := range providerCatalog() {
+			h.reconcileProviderAgent(p.Key, vis, true)
+		}
+		return
+	}
+	vis := h.providerVisibilityMap()
+	for _, p := range providerCatalog() {
+		if !changedSet[p.Key] {
+			continue
+		}
+		h.reconcileProviderAgent(p.Key, vis, restart[p.Key])
+	}
+}
+
+// reconcileProviderAgent starts, stops or restarts one provider's agent to
+// match the current config and visibility. A stop (provider disabled or no
+// longer configured) always applies. A start or restart only applies to
+// providers whose factory builds a fresh agent and client (see
+// providerRuntimeRestartable); every other provider keeps its startup-built
+// shared instance, so an enable or key change takes effect on the next daemon
+// restart, exactly as before this reconcile path existed.
+func (h *Handler) reconcileProviderAgent(key string, vis map[string]map[string]bool, forceRestart bool) {
+	polling := h.providerPollingEnabled(key, vis)
+	configured := h.isProviderConfigured(key)
+	running := h.agentManager.IsRunning(key)
+	if !polling || !configured {
+		if running {
+			h.agentManager.Stop(key)
+		}
+		if polling && !configured {
+			h.logger.Warn("provider enabled but not configured; skipping polling",
+				"provider", key, "hint", "add its API key or credentials in Settings -> Providers")
+		}
+		return
+	}
+	if !providerRuntimeRestartable[key] {
+		// A shared-instance provider: starting it now would run a second copy
+		// of an agent whose client was built at startup (and never pick up the
+		// new credential anyway), so leave it untouched.
+		return
+	}
+	if running {
+		if !forceRestart {
+			return
+		}
+		// Restart so a changed key or credential is re-read. Stop waits for the
+		// old Run to exit, so Start cannot overlap two agents for this key.
+		h.agentManager.Stop(key)
+	}
+	if err := h.agentManager.Start(key); err != nil {
+		h.logger.Warn("provider start failed after settings update", "provider", key, "error", err)
+	}
+}
+
+// providerRestartFields are the provider_settings field names that only take
+// effect when the agent is (re)built: credentials, enable flags and connection
+// details. Any other field (display_mode, pace_mode, auto_start_*, thresholds)
+// applies live, so a save that touches only those leaves a running agent alone.
+var providerRestartFields = map[string]bool{
+	"api_key":         true,
+	"token":           true,
+	"auth_cookie":     true,
+	"csrf_token":      true,
+	"workspace_id":    true,
+	"base_url":        true,
+	"enabled":         true,
+	"profiles_dir":    true,
+	"region":          true,
+	"browser":         true,
+	"browser_profile": true,
+	"auth_mode":       true,
+	"model":           true,
+	"monthly_limit":   true,
+	"reset_day":       true,
+}
+
+// providerRuntimeRestartable lists providers whose agent factory builds a fresh
+// agent and client on every Start, so a runtime restart actually applies new
+// credentials. Every other provider shares one instance built at startup; for
+// them a restart would run two copies of the same agent and re-read nothing, so
+// changes keep applying on the next daemon restart (as before).
+var providerRuntimeRestartable = map[string]bool{
+	"opencode": true,
+	"mistral":  true,
+}
+
+// providerSettingsNeedRestart reports which providers in a saved
+// provider_settings payload changed a restart-requiring field to a different
+// value. The UI sends every non-password field on every save, so presence of a
+// field is not a change; only a value that differs from the stored one is. A
+// display-only save, a no-op save, or a change to a provider that is not
+// restarted at runtime returns no entries.
+func providerSettingsNeedRestart(provSettings, stored map[string]interface{}, cleared map[string]map[string]bool) map[string]bool {
+	restart := map[string]bool{}
+	for provider, raw := range provSettings {
+		if !providerRuntimeRestartable[provider] {
+			continue
+		}
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		storedMap, _ := stored[provider].(map[string]interface{})
+		for field, value := range m {
+			if !providerRestartFields[field] {
+				continue
+			}
+			if !providerSettingChanged(field, value, storedMap[field], cleared[provider][field]) {
+				continue
+			}
+			restart[provider] = true
+			break
+		}
+	}
+	return restart
+}
+
+// providerSettingChanged reports whether an incoming restart-field value is a
+// real change from the stored one. An empty incoming string is normally not a
+// change: the settings merge and ApplyProviderSettingsFromDB treat an empty
+// value as "keep the stored one" (the UI omits unchanged sensitive fields
+// entirely). An explicit clear (null or a clear_ flag) is a change even though
+// it arrives as an empty string.
+func providerSettingChanged(field string, incoming, stored interface{}, explicitlyCleared bool) bool {
+	if explicitlyCleared {
+		return true
+	}
+	if incoming == nil {
+		return false
+	}
+	if s, ok := incoming.(string); ok && strings.TrimSpace(s) == "" {
+		return false
+	}
+	return !providerSettingValuesEqual(incoming, stored)
+}
+
+// providerSettingValuesEqual compares two setting values that may have arrived
+// as different JSON types (for example a select's "true" string against a bool
+// stored by another path). Numbers and bools are compared by their text form.
+func providerSettingValuesEqual(a, b interface{}) bool {
+	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
+}
+
+// applyProviderSettingClearFlags rewrites an incoming provider_settings payload
+// so an explicit clear is unambiguous: a null value for any field, or a
+// `clear_<field>: true` flag, becomes the empty string and the flag is dropped.
+// It returns the set of explicitly cleared fields per provider. A blank string
+// (what the UI sends for an empty plain text field) is NOT a clear - only null
+// or the explicit flag is - so a blank workspace_id or browser_profile never
+// wipes a stored or .env value.
+func applyProviderSettingClearFlags(provSettings map[string]interface{}) map[string]map[string]bool {
+	cleared := map[string]map[string]bool{}
+	for provider, raw := range provSettings {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for key, value := range m {
+			if strings.HasPrefix(key, "clear_") {
+				field := strings.TrimPrefix(key, "clear_")
+				if isTruthy(value) {
+					m[field] = ""
+					if cleared[provider] == nil {
+						cleared[provider] = map[string]bool{}
+					}
+					cleared[provider][field] = true
+				}
+				delete(m, key)
+				continue
+			}
+			if value == nil {
+				// A null value means clear, not "leave as is".
+				m[key] = ""
+				if cleared[provider] == nil {
+					cleared[provider] = map[string]bool{}
+				}
+				cleared[provider][key] = true
+			}
+		}
+	}
+	return cleared
+}
+
+// isTruthy reads a JSON flag that may arrive as a bool or a string.
+func isTruthy(v interface{}) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		return t == "true" || t == "1"
+	}
+	return false
+}
+
+// providerSettingClearMarker is the stored key that records an intentional
+// clear of a provider field, e.g. "workspace_id_cleared": true. A bare empty
+// string is NOT a clear: older versions always persisted a blank workspace_id,
+// so treating "" as a clear would wipe a value that comes from .env on upgrade.
+func providerSettingClearMarker(field string) string {
+	return field + "_cleared"
+}
+
+// providerSettingIsCleared reports whether a stored provider setting was
+// intentionally cleared, i.e. it carries the "<field>_cleared" marker. A
+// present-but-empty legacy value without the marker is not a clear.
+func providerSettingIsCleared(m map[string]interface{}, field string) bool {
+	return isTruthy(m[providerSettingClearMarker(field)])
+}
+
+// setProviderSettingClearMarker records or removes the explicit-clear marker
+// for a field, so a later apply knows the empty value is intentional. Setting a
+// non-empty value must remove the marker.
+func setProviderSettingClearMarker(m map[string]interface{}, field string, cleared bool) {
+	if cleared {
+		m[providerSettingClearMarker(field)] = true
+		return
+	}
+	delete(m, providerSettingClearMarker(field))
+}
+
+// cloneProviderSettings deep-copies a provider_settings map so the pre-merge
+// snapshot used for change detection is not mutated by the merge.
+func cloneProviderSettings(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return nil
+	}
+	data, err := json.Marshal(in)
+	if err != nil {
+		return nil
+	}
+	var out map[string]interface{}
+	if json.Unmarshal(data, &out) != nil {
+		return nil
+	}
+	return out
+}
+
 // ReloadProviders reloads provider configuration from env and reconciles runtime polling.
 func (h *Handler) ReloadProviders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1877,12 +2460,16 @@ func (h *Handler) ReloadProviders(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "failed to reload config")
 		return
 	}
-	applyProviderConfig(h.config, cfg)
-
-	// Apply provider_settings from DB (keys/regions set via UI override .env)
-	if h.store != nil {
-		ApplyProviderSettingsFromDB(h.store, h.config, h.logger)
-	}
+	// Replace the live config under the write lock, so a factory snapshot or a
+	// concurrent save cannot observe a half-applied config.
+	h.config.WithWrite(func() {
+		applyProviderConfig(h.config, cfg)
+		// Apply provider_settings from DB (keys/regions set via UI override .env)
+		if h.store != nil {
+			applyProviderSettingsFromDBLocked(h.store, h.config, h.logger)
+		}
+	})
+	h.invalidateMenubarSnapshot()
 
 	if h.agentManager != nil {
 		vis := h.providerVisibilityMap()
@@ -2093,40 +2680,74 @@ func (h *Handler) currentGrok(w http.ResponseWriter, r *http.Request) {
 // quota values. Some polls store an empty snapshot (transient API response), so
 // falling back keeps the card/insights populated instead of flickering empty.
 func (h *Handler) latestGrokSnapshot() *api.GrokSnapshot {
+	latest, _, _ := h.latestGrokSnapshotOK()
+	return latest
+}
+
+// latestGrokSnapshotOK is latestGrokSnapshot plus the outcome of the reads it
+// actually performed. ok is false when the latest read, or the 7-day fallback
+// read it needed, failed. A latest snapshot with quotas needs no fallback read,
+// so only that first read decides success then.
+//
+// A failed latest read still tries the 7-day fallback (the dashboard builder
+// behaved that way before the menubar refactor). When the fallback supplies
+// data, the snapshot is returned with ok=false so the menubar keeps serving its
+// last good card while the dashboard still renders the older rows.
+func (h *Handler) latestGrokSnapshotOK() (latest *api.GrokSnapshot, ok bool, hasData bool) {
 	if h.store == nil {
-		return nil
+		return nil, true, false
 	}
 	latest, err := h.store.QueryLatestGrok(store.DefaultGrokAccountID)
+	if err != nil {
+		latest = nil
+	}
 	if err == nil && latest != nil && len(latest.Quotas) > 0 {
-		return latest
+		return latest, true, true
 	}
 	now := time.Now().UTC()
-	if snaps, rerr := h.store.QueryGrokRange(store.DefaultGrokAccountID, now.Add(-7*24*time.Hour), now); rerr == nil {
-		for i := len(snaps) - 1; i >= 0; i-- {
-			if len(snaps[i].Quotas) > 0 {
-				return snaps[i]
-			}
+	snaps, rerr := h.store.QueryGrokRange(store.DefaultGrokAccountID, now.Add(-7*24*time.Hour), now)
+	if rerr != nil {
+		return latest, false, false
+	}
+	for i := len(snaps) - 1; i >= 0; i-- {
+		if len(snaps[i].Quotas) > 0 {
+			return snaps[i], err == nil, true
 		}
 	}
-	return latest
+	return latest, err == nil, latest != nil
 }
 
 // buildGrokCurrent builds the response for the Grok provider using the dedicated store
 // and tracker. Returns a structure with "quotas" array (for the custom Grok card renderer)
 // plus identity info from the auth.json snapshot.
 func (h *Handler) buildGrokCurrent() map[string]interface{} {
+	response, _, _ := h.buildGrokCurrentOK()
+	// Main's dashboard builder reports the build time here; the stored time is
+	// used only by the menubar age label.
+	response["capturedAt"] = time.Now().UTC().Format(time.RFC3339)
+	return response
+}
+
+// buildGrokCurrentOK is buildGrokCurrent with an explicit storage outcome.
+// readOK reports the outcome of the very read that supplied the payload,
+// including the fallback range read, so the menubar never treats a failed read
+// as a successful empty one.
+func (h *Handler) buildGrokCurrentOK() (response map[string]interface{}, readOK bool, hasData bool) {
 	now := time.Now().UTC()
-	response := map[string]interface{}{
+	response = map[string]interface{}{
 		"provider":   "grok",
 		"capturedAt": now.Format(time.RFC3339),
 		"quotas":     []interface{}{},
 	}
 
 	if h.store == nil {
-		return response
+		return response, true, false
 	}
 
-	latest := h.latestGrokSnapshot()
+	latest, readOK, hasData := h.latestGrokSnapshotOK()
+	if !readOK && !hasData {
+		return response, false, false
+	}
 	if latest == nil {
 		// No data yet (agent may not have run, or first poll pending). Return empty quotas but identity if we can detect.
 		if creds := api.DetectGrokCredentials(h.logger); creds != nil {
@@ -2134,8 +2755,13 @@ func (h *Handler) buildGrokCurrent() map[string]interface{} {
 			response["team_id"] = creds.TeamID
 			response["login_method"] = creds.LoginMethod()
 		}
-		return response
+		return response, true, false
 	}
+
+	// The menubar age label reads capturedAt, so it must be the stored snapshot
+	// time, not the build time: a provider whose polls have stopped must show a
+	// growing age even while the daemon keeps serving snapshots.
+	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
 
 	// Build quotas array matching what renderGrokQuotaCards expects.
 	// Also provide displayName/label so menubar normalizeQuotas shows nice "Credits".
@@ -2200,7 +2826,7 @@ func (h *Handler) buildGrokCurrent() map[string]interface{} {
 		}
 	}
 
-	return response
+	return response, readOK, hasData
 }
 
 // historyGrok serves /api/history?provider=grok . Returns a flat array of points
@@ -2217,10 +2843,12 @@ func (h *Handler) historyGrok(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	snaps, err := h.store.QueryGrokRange(store.DefaultGrokAccountID, now.Add(-duration), now)
+	snaps, err := h.store.QueryGrokRangeSampled(store.DefaultGrokAccountID, now.Add(-duration), now)
 	if err != nil {
 		h.logger.Error("failed to query grok range for history", "error", err)
-		respondJSON(w, http.StatusOK, []interface{}{})
+		// An error status, not an empty 200: the dashboard keeps its last
+		// chart on a failed fetch, and the response cache never stores it.
+		respondError(w, http.StatusInternalServerError, "failed to load history")
 		return
 	}
 	// Drop snapshots without quota values - some grok polls store an empty
@@ -2366,7 +2994,7 @@ func (h *Handler) cycleOverviewGrok(w http.ResponseWriter, r *http.Request) {
 
 // insightsGrok serves /api/insights?provider=grok .
 func (h *Handler) insightsGrok(w http.ResponseWriter, _ *http.Request, _ time.Duration) {
-	respondJSON(w, http.StatusOK, h.buildGrokInsights(h.getHiddenInsightKeys()))
+	respondInsights(w, h.buildGrokInsights(h.getHiddenInsightKeys()))
 }
 
 // buildGrokInsights builds stats + forecast insights for the single Grok credits quota.
@@ -2527,22 +3155,43 @@ func (h *Handler) currentSynthetic(w http.ResponseWriter, r *http.Request) {
 
 // buildSyntheticCurrent builds the Synthetic current quota response map.
 func (h *Handler) buildSyntheticCurrent() map[string]interface{} {
+	response, _, _ := h.buildSyntheticCurrentOK()
+	return response
+}
+
+// buildSyntheticCurrentOK is buildSyntheticCurrent with an explicit storage
+// outcome. The menubar needs to tell a read failure apart from a genuine
+// first run: the fallback map is stamped time.Now(), so serving it after a
+// failure would show a fake-fresh zero card. readOK is false only when the
+// store read itself failed; hasData reports whether a stored snapshot backed
+// the payload.
+func (h *Handler) buildSyntheticCurrentOK() (response map[string]interface{}, readOK bool, hasData bool) {
 	now := time.Now().UTC()
-	response := map[string]interface{}{
+	response = map[string]interface{}{
 		"capturedAt":   now.Format(time.RFC3339),
 		"subscription": buildEmptyQuotaResponse("Subscription", "Main API request quota for your plan"),
 		"search":       buildEmptyQuotaResponse("Search (Hourly)", "Search endpoint calls, resets every hour"),
 		"toolCalls":    buildEmptyQuotaResponse("Tool Call Discounts", "Discounted tool call requests"),
 	}
 
+	// Without a tracker the builder cannot read the store, so it can only
+	// produce the fabricated fallback. Report that as a failure: the menubar
+	// keeps the last good card instead of showing a fake-fresh zero.
+	if h.store != nil && h.tracker == nil {
+		applyDisplayModeToResponse(response, h.getDisplayMode("synthetic"))
+		return response, false, false
+	}
+
 	if h.store != nil && h.tracker != nil {
 		latest, err := h.store.QueryLatest()
 		if err != nil {
 			h.logger.Error("failed to query latest snapshot", "error", err)
-			return response
+			applyDisplayModeToResponse(response, h.getDisplayMode("synthetic"))
+			return response, false, false
 		}
 
 		if latest != nil {
+			hasData = true
 			response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
 			response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 			response["subscription"] = buildQuotaResponse("Subscription", "Main API request quota for your plan", latest.Sub, h.tracker, "subscription")
@@ -2552,7 +3201,7 @@ func (h *Handler) buildSyntheticCurrent() map[string]interface{} {
 	}
 
 	applyDisplayModeToResponse(response, h.getDisplayMode("synthetic"))
-	return response
+	return response, true, hasData
 }
 
 // currentZai returns Z.ai quota status
@@ -2562,8 +3211,17 @@ func (h *Handler) currentZai(w http.ResponseWriter, r *http.Request) {
 
 // buildZaiCurrent builds the Z.ai current quota response map.
 func (h *Handler) buildZaiCurrent() map[string]interface{} {
+	response, _, _ := h.buildZaiCurrentOK()
+	return response
+}
+
+// buildZaiCurrentOK is buildZaiCurrent with an explicit storage outcome. readOK
+// is false only when the store read itself failed; the menubar then serves the
+// last good card instead of this time.Now()-stamped fallback. hasData reports
+// whether a stored snapshot backed the payload.
+func (h *Handler) buildZaiCurrentOK() (response map[string]interface{}, readOK bool, hasData bool) {
 	now := time.Now().UTC()
-	response := map[string]interface{}{
+	response = map[string]interface{}{
 		"capturedAt":  now.Format(time.RFC3339),
 		"tokensLimit": buildEmptyZaiQuotaResponse("Tokens Limit", "Token consumption budget"),
 		"timeLimit":   buildEmptyZaiQuotaResponse("Time Limit", "Tool call time budget"),
@@ -2574,10 +3232,12 @@ func (h *Handler) buildZaiCurrent() map[string]interface{} {
 		latest, err := h.store.QueryLatestZai()
 		if err != nil {
 			h.logger.Error("failed to query latest Z.ai snapshot", "error", err)
-			return response
+			applyDisplayModeToResponse(response, h.getDisplayMode("zai"))
+			return response, false, false
 		}
 
 		if latest != nil {
+			hasData = true
 			response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
 			response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 			tokensResp := buildZaiTokensQuotaResponse(latest)
@@ -2602,7 +3262,7 @@ func (h *Handler) buildZaiCurrent() map[string]interface{} {
 	}
 
 	applyDisplayModeToResponse(response, h.getDisplayMode("zai"))
-	return response
+	return response, true, hasData
 }
 
 func buildEmptyQuotaResponse(name, description string) map[string]interface{} {
@@ -2910,6 +3570,7 @@ func (h *Handler) History(w http.ResponseWriter, r *http.Request) {
 // historyBoth returns both providers' history.
 func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{}
+	historyErrors := map[string]string{}
 	visibility := h.providerVisibilitySettings()
 
 	rangeStr := r.URL.Query().Get("range")
@@ -2923,8 +3584,10 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	start := now.Add(-duration)
 
 	if h.config.HasProvider("synthetic") && providerTelemetryEnabled(visibility, "synthetic") && h.store != nil {
-		snapshots, err := h.store.QueryRange(start, now)
-		if err == nil {
+		snapshots, err := h.store.QueryRangeSampled(start, now)
+		if err != nil {
+			historyErrors["synthetic"] = "history read failed"
+		} else {
 			step := downsampleStep(len(snapshots), maxChartPoints)
 			last := len(snapshots) - 1
 			synData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
@@ -2960,8 +3623,10 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("zai") && providerTelemetryEnabled(visibility, "zai") && h.store != nil {
-		snapshots, err := h.store.QueryZaiRange(start, now)
-		if err == nil {
+		snapshots, err := h.store.QueryZaiRangeSampled(start, now)
+		if err != nil {
+			historyErrors["zai"] = "history read failed"
+		} else {
 			step := downsampleStep(len(snapshots), maxChartPoints)
 			last := len(snapshots) - 1
 			zaiData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
@@ -2985,8 +3650,10 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("anthropic") && providerTelemetryEnabled(visibility, "anthropic") && h.store != nil {
-		snapshots, err := h.store.QueryAnthropicRange(start, now)
-		if err == nil {
+		snapshots, err := h.store.QueryAnthropicRangeSampled(start, now)
+		if err != nil {
+			historyErrors["anthropic"] = "history read failed"
+		} else {
 			step := downsampleStep(len(snapshots), maxChartPoints)
 			last := len(snapshots) - 1
 			anthData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
@@ -3007,8 +3674,10 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("copilot") && providerTelemetryEnabled(visibility, "copilot") && h.store != nil {
-		snapshots, err := h.store.QueryCopilotRange(start, now)
-		if err == nil {
+		snapshots, err := h.store.QueryCopilotRangeSampled(start, now)
+		if err != nil {
+			historyErrors["copilot"] = "history read failed"
+		} else {
 			step := downsampleStep(len(snapshots), maxChartPoints)
 			last := len(snapshots) - 1
 			copData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
@@ -3031,15 +3700,23 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("codex") && providerTelemetryEnabled(visibility, "codex") && h.store != nil {
-		codexAccounts := h.codexUsageAccounts()
+		codexAccountUsages, enumerated := h.codexUsageAccountsOK()
+		if !enumerated {
+			historyErrors["codex"] = "failed to list accounts"
+		}
+		codexAccounts := make([]map[string]interface{}, 0, len(codexAccountUsages))
+		for _, usage := range codexAccountUsages {
+			codexAccounts = append(codexAccounts, usage.Usage)
+		}
 		codexHistories := make([]map[string]interface{}, 0, len(codexAccounts))
 		for _, acc := range codexAccounts {
 			accountID := codexUsageAccountID(acc)
 			if !codexAccountTelemetryEnabled(visibility, accountID) {
 				continue
 			}
-			snapshots, err := h.store.QueryCodexRange(accountID, start, now)
+			snapshots, err := h.store.QueryCodexRangeSampled(accountID, start, now)
 			if err != nil {
+				historyErrors[fmt.Sprintf("codex:%d", accountID)] = "history read failed"
 				continue
 			}
 			step := downsampleStep(len(snapshots), maxChartPoints)
@@ -3076,8 +3753,10 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("antigravity") && providerTelemetryEnabled(visibility, "antigravity") && h.store != nil {
-		snapshots, err := h.store.QueryAntigravityRange(start, now)
-		if err == nil {
+		snapshots, err := h.store.QueryAntigravityRangeSampled(start, now)
+		if err != nil {
+			historyErrors["antigravity"] = "history read failed"
+		} else {
 			step := downsampleStep(len(snapshots), maxChartPoints)
 			last := len(snapshots) - 1
 			antData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
@@ -3098,15 +3777,23 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("minimax") && providerTelemetryEnabled(visibility, "minimax") && h.store != nil {
-		minimaxAccounts := h.minimaxUsageAccounts()
+		minimaxAccountUsages, enumerated := h.minimaxUsageAccountsOK()
+		if !enumerated {
+			historyErrors["minimax"] = "failed to list accounts"
+		}
+		minimaxAccounts := make([]map[string]interface{}, 0, len(minimaxAccountUsages))
+		for _, usage := range minimaxAccountUsages {
+			minimaxAccounts = append(minimaxAccounts, usage.Usage)
+		}
 		minimaxHistories := make([]map[string]interface{}, 0, len(minimaxAccounts))
 		for _, acc := range minimaxAccounts {
 			accountID := minimaxUsageAccountID(acc)
 			if !minimaxAccountTelemetryEnabled(visibility, accountID) {
 				continue
 			}
-			snapshots, err := h.store.QueryMiniMaxRange(start, now, accountID)
+			snapshots, err := h.store.QueryMiniMaxRangeSampled(start, now, accountID)
 			if err != nil {
+				historyErrors[fmt.Sprintf("minimax:%d", accountID)] = "history read failed"
 				continue
 			}
 			step := downsampleStep(len(snapshots), maxChartPoints)
@@ -3142,8 +3829,10 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("openrouter") && providerTelemetryEnabled(visibility, "openrouter") && h.store != nil {
-		snapshots, err := h.store.QueryOpenRouterRange(start, now)
-		if err == nil {
+		snapshots, err := h.store.QueryOpenRouterRangeSampled(start, now)
+		if err != nil {
+			historyErrors["openrouter"] = "history read failed"
+		} else {
 			step := downsampleStep(len(snapshots), maxChartPoints)
 			last := len(snapshots) - 1
 			orData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
@@ -3170,8 +3859,10 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("moonshot") && providerTelemetryEnabled(visibility, "moonshot") && h.store != nil {
-		snapshots, err := h.store.QueryMoonshotRange(start, now)
-		if err == nil {
+		snapshots, err := h.store.QueryMoonshotRangeSampled(start, now)
+		if err != nil {
+			historyErrors["moonshot"] = "history read failed"
+		} else {
 			step := downsampleStep(len(snapshots), maxChartPoints)
 			last := len(snapshots) - 1
 			msData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
@@ -3192,8 +3883,10 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("deepseek") && providerTelemetryEnabled(visibility, "deepseek") && h.store != nil {
-		snapshots, err := h.store.QueryDeepSeekRange(start, now)
-		if err == nil {
+		snapshots, err := h.store.QueryDeepSeekRangeSampled(start, now)
+		if err != nil {
+			historyErrors["deepseek"] = "history read failed"
+		} else {
 			step := downsampleStep(len(snapshots), maxChartPoints)
 			last := len(snapshots) - 1
 			dsData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
@@ -3216,8 +3909,10 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("gemini") && providerTelemetryEnabled(visibility, "gemini") && h.store != nil {
-		snapshots, err := h.store.QueryGeminiRange(start, now)
-		if err == nil {
+		snapshots, err := h.store.QueryGeminiRangeSampled(start, now)
+		if err != nil {
+			historyErrors["gemini"] = "history read failed"
+		} else {
 			// Filter empty snapshots and aggregate by family
 			var valid []*api.GeminiSnapshot
 			for _, s := range snapshots {
@@ -3245,7 +3940,9 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 
 	if h.config.HasProvider("cursor") && providerTelemetryEnabled(visibility, "cursor") && h.store != nil {
 		snapshots, err := h.store.QueryCursorRange(start, now, 200)
-		if err == nil {
+		if err != nil {
+			historyErrors["cursor"] = "history read failed"
+		} else {
 			step := downsampleStep(len(snapshots), maxChartPoints)
 			last := len(snapshots) - 1
 			cursorData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
@@ -3266,8 +3963,10 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("grok") && providerTelemetryEnabled(visibility, "grok") && h.store != nil {
-		snaps, err := h.store.QueryGrokRange(store.DefaultGrokAccountID, start, now)
-		if err == nil {
+		snaps, err := h.store.QueryGrokRangeSampled(store.DefaultGrokAccountID, start, now)
+		if err != nil {
+			historyErrors["grok"] = "history read failed"
+		} else {
 			withQuotas := make([]*api.GrokSnapshot, 0, len(snaps))
 			for _, s := range snaps {
 				if len(s.Quotas) > 0 {
@@ -3292,8 +3991,10 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("kimi") && providerTelemetryEnabled(visibility, "kimi") && h.store != nil {
-		snaps, err := h.store.QueryKimiRange(store.DefaultKimiAccountID, start, now)
-		if err == nil {
+		snaps, err := h.store.QueryKimiRangeSampled(store.DefaultKimiAccountID, start, now)
+		if err != nil {
+			historyErrors["kimi"] = "history read failed"
+		} else {
 			withQuotas := make([]*api.KimiSnapshot, 0, len(snaps))
 			for _, s := range snaps {
 				if len(s.Quotas) > 0 {
@@ -3319,13 +4020,17 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 
 	if h.config.HasProvider("mistral") && providerTelemetryEnabled(visibility, "mistral") && h.store != nil {
 		rows, err := h.store.MistralHistory(r.Context(), start, now, 200)
-		if err == nil {
+		if err != nil {
+			historyErrors["mistral"] = "history read failed"
+		} else {
 			response["mistral"] = rows
 		}
 	}
 	if h.config.HasProvider("opencode") && providerTelemetryEnabled(visibility, "opencode") && h.store != nil {
-		snapshots, err := h.store.QueryOpenCodeRange(start, now, 200)
-		if err == nil {
+		snapshots, err := h.store.QueryOpenCodeChartRange(start, now)
+		if err != nil {
+			historyErrors["opencode"] = "history read failed"
+		} else {
 			step := downsampleStep(len(snapshots), maxChartPoints)
 			last := len(snapshots) - 1
 			opencodeData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
@@ -3347,7 +4052,9 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 
 	if h.config.HasProvider("ollama") && providerTelemetryEnabled(visibility, "ollama") && h.store != nil {
 		snapshots, err := h.store.QueryOllamaRange(start, now, 200)
-		if err == nil {
+		if err != nil {
+			historyErrors["ollama"] = "history read failed"
+		} else {
 			step := downsampleStep(len(snapshots), maxChartPoints)
 			last := len(snapshots) - 1
 			ollamaData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
@@ -3369,7 +4076,9 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 
 	if h.config.HasProvider("muse") && providerTelemetryEnabled(visibility, "muse") && h.store != nil {
 		snapshots, err := h.store.QueryMuseRange(start, now, 200)
-		if err == nil {
+		if err != nil {
+			historyErrors["muse"] = "history read failed"
+		} else {
 			step := downsampleStep(len(snapshots), maxChartPoints)
 			last := len(snapshots) - 1
 			museData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
@@ -3390,8 +4099,10 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.config.HasProvider("commandcode") && providerTelemetryEnabled(visibility, "commandcode") && h.store != nil {
-		snapshots, err := h.store.QueryCommandCodeRange(start, now, 200)
-		if err == nil {
+		snapshots, err := h.store.QueryCommandCodeChartRange(start, now)
+		if err != nil {
+			historyErrors["commandcode"] = "history read failed"
+		} else {
 			step := downsampleStep(len(snapshots), maxChartPoints)
 			last := len(snapshots) - 1
 			ccData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
@@ -3409,6 +4120,11 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 			}
 			response["commandcode"] = ccData
 		}
+	}
+
+	if len(historyErrors) > 0 {
+		response["errors"] = historyErrors
+		w.Header().Set(partialResponseHeader, "1")
 	}
 
 	respondJSON(w, http.StatusOK, response)
@@ -3432,7 +4148,7 @@ func (h *Handler) historySynthetic(w http.ResponseWriter, r *http.Request) {
 	start := now.Add(-duration)
 	end := now
 
-	snapshots, err := h.store.QueryRange(start, end)
+	snapshots, err := h.store.QueryRangeSampled(start, end)
 	if err != nil {
 		h.logger.Error("failed to query history", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query history")
@@ -3497,7 +4213,7 @@ func (h *Handler) historyZai(w http.ResponseWriter, r *http.Request) {
 	start := now.Add(-duration)
 	end := now
 
-	snapshots, err := h.store.QueryZaiRange(start, end)
+	snapshots, err := h.store.QueryZaiRangeSampled(start, end)
 	if err != nil {
 		h.logger.Error("failed to query Z.ai history", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query history")
@@ -3534,9 +4250,18 @@ func (h *Handler) currentOpenRouter(w http.ResponseWriter, r *http.Request) {
 
 // buildOpenRouterCurrent builds the OpenRouter current credits response map.
 func (h *Handler) buildOpenRouterCurrent() map[string]interface{} {
+	response, _, _ := h.buildOpenRouterCurrentOK()
+	return response
+}
+
+// buildOpenRouterCurrentOK is buildOpenRouterCurrent with an explicit storage
+// outcome. readOK is false only when the store read itself failed; the menubar
+// then serves the last good card instead of this empty fallback.
+// hasData reports whether a stored snapshot backed the payload.
+func (h *Handler) buildOpenRouterCurrentOK() (response map[string]interface{}, readOK bool, hasData bool) {
 	// Without a stored snapshot every amount stays null so the dashboard can
 	// render "--" instead of an invented healthy zero usage.
-	response := map[string]interface{}{
+	response = map[string]interface{}{
 		"capturedAt":        nil,
 		"snapshotAvailable": false,
 		"credits": map[string]interface{}{
@@ -3563,10 +4288,11 @@ func (h *Handler) buildOpenRouterCurrent() map[string]interface{} {
 		latest, err := h.store.QueryLatestOpenRouter()
 		if err != nil {
 			h.logger.Error("failed to query latest OpenRouter snapshot", "error", err)
-			return response
+			return response, false, false
 		}
 
 		if latest != nil {
+			hasData = true
 			response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
 			response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
 			response["snapshotAvailable"] = true
@@ -3625,7 +4351,7 @@ func (h *Handler) buildOpenRouterCurrent() map[string]interface{} {
 		}
 	}
 
-	return response
+	return response, true, hasData
 }
 
 // historyOpenRouter returns OpenRouter usage history
@@ -3646,7 +4372,7 @@ func (h *Handler) historyOpenRouter(w http.ResponseWriter, r *http.Request) {
 	start := now.Add(-duration)
 	end := now
 
-	snapshots, err := h.store.QueryOpenRouterRange(start, end)
+	snapshots, err := h.store.QueryOpenRouterRangeSampled(start, end)
 	if err != nil {
 		h.logger.Error("failed to query OpenRouter history", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query history")
@@ -3804,7 +4530,7 @@ func (h *Handler) buildOpenRouterSummaryMap() map[string]interface{} {
 // insightsOpenRouter returns OpenRouter insights
 func (h *Handler) insightsOpenRouter(w http.ResponseWriter, r *http.Request, rangeDur time.Duration) {
 	hidden := h.getHiddenInsightKeys()
-	respondJSON(w, http.StatusOK, h.buildOpenRouterInsights(hidden))
+	respondInsights(w, h.buildOpenRouterInsights(hidden))
 }
 
 // buildOpenRouterInsights builds the OpenRouter insights response.
@@ -3816,6 +4542,7 @@ func (h *Handler) buildOpenRouterInsights(hidden map[string]bool) insightsRespon
 	}
 
 	latest, err := h.store.QueryLatestOpenRouter()
+	markPartial(&resp.partial, err)
 	if err != nil {
 		h.logger.Error("failed to query OpenRouter data for insights", "error", err)
 		return resp
@@ -5197,7 +5924,12 @@ func (h *Handler) getHiddenInsightKeys() map[string]bool {
 type insightsResponse struct {
 	Stats    []insightStat `json:"stats"`
 	Insights []insightItem `json:"insights"`
+	// partial marks an answer built after a swallowed read error; it is
+	// served but never cached.
+	partial bool
 }
+
+func (r insightsResponse) isPartial() bool { return r.partial }
 
 // Insights returns computed deep analytics (API endpoint)
 func (h *Handler) Insights(w http.ResponseWriter, r *http.Request) {
@@ -5260,6 +5992,7 @@ func (h *Handler) Insights(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) insightsBoth(w http.ResponseWriter, r *http.Request, rangeDur time.Duration) {
 	hidden := h.getHiddenInsightKeys()
 	response := map[string]interface{}{}
+	partial := false
 	visibility := h.providerVisibilitySettings()
 
 	if h.config.HasProvider("synthetic") && providerTelemetryEnabled(visibility, "synthetic") {
@@ -5283,6 +6016,7 @@ func (h *Handler) insightsBoth(w http.ResponseWriter, r *http.Request, rangeDur 
 				continue
 			}
 			ins := h.buildCodexInsights(accountID, hidden, rangeDur)
+			partial = partial || ins.partial
 			codexInsights = append(codexInsights, map[string]interface{}{
 				"accountId":   accountID,
 				"accountName": codexUsageAccountName(acc),
@@ -5309,6 +6043,7 @@ func (h *Handler) insightsBoth(w http.ResponseWriter, r *http.Request, rangeDur 
 				continue
 			}
 			ins := h.buildMiniMaxInsights(accountID, hidden, rangeDur)
+			partial = partial || ins.partial
 			minimaxInsights = append(minimaxInsights, map[string]interface{}{
 				"accountId":   accountID,
 				"accountName": minimaxUsageAccountName(acc),
@@ -5360,13 +6095,21 @@ func (h *Handler) insightsBoth(w http.ResponseWriter, r *http.Request, rangeDur 
 		response["commandcode"] = h.buildCommandCodeInsights(hidden, rangeDur)
 	}
 
+	for _, v := range response {
+		if pm, ok := v.(partialMarker); ok && pm.isPartial() {
+			partial = true
+		}
+	}
+	if partial {
+		w.Header().Set(partialResponseHeader, "1")
+	}
 	respondJSON(w, http.StatusOK, response)
 }
 
 // insightsSynthetic returns Synthetic deep analytics
 func (h *Handler) insightsSynthetic(w http.ResponseWriter, r *http.Request, rangeDur time.Duration) {
 	hidden := h.getHiddenInsightKeys()
-	respondJSON(w, http.StatusOK, h.buildSyntheticInsights(hidden, rangeDur))
+	respondInsights(w, h.buildSyntheticInsights(hidden, rangeDur))
 }
 
 // buildSyntheticInsights builds the Synthetic insights response.
@@ -5574,7 +6317,7 @@ func (h *Handler) buildSyntheticInsights(hidden map[string]bool, rangeDur time.D
 // insightsZai returns Z.ai deep analytics with historical data
 func (h *Handler) insightsZai(w http.ResponseWriter, r *http.Request, rangeDur time.Duration) {
 	hidden := h.getHiddenInsightKeys()
-	respondJSON(w, http.StatusOK, h.buildZaiInsights(hidden))
+	respondInsights(w, h.buildZaiInsights(hidden))
 }
 
 // buildZaiInsights builds the Z.ai insights response.
@@ -5586,6 +6329,7 @@ func (h *Handler) buildZaiInsights(hidden map[string]bool) insightsResponse {
 	}
 
 	latest, err := h.store.QueryLatestZai()
+	markPartial(&resp.partial, err)
 	if err != nil {
 		h.logger.Error("failed to query Z.ai data for insights", "error", err)
 		return resp
@@ -5879,78 +6623,6 @@ func (h *Handler) buildZaiInsights(hidden map[string]bool) insightsResponse {
 	return resp
 }
 
-// ── Anthropic Promo Definitions ──
-
-type anthropicPromo struct {
-	ID               string `json:"id"`
-	Title            string `json:"title"`
-	Description      string `json:"description"`
-	StartsAt         string `json:"startsAt"`
-	EndsAt           string `json:"endsAt"`
-	PeakStartHourET  int    `json:"peakStartHourET"`
-	PeakEndHourET    int    `json:"peakEndHourET"`
-	PeakWeekdaysOnly bool   `json:"peakWeekdaysOnly"`
-}
-
-var anthropicPromos = []anthropicPromo{
-	{
-		ID:               "peak-hours-2026",
-		Title:            "Peak Hours",
-		Description:      "During peak hours (weekdays 5am-11am PT / 8am-2pm ET) you move through 5-hour session limits faster. Weekly limits are unchanged.",
-		StartsAt:         "2026-03-28T00:00:00-07:00",
-		EndsAt:           "",
-		PeakStartHourET:  8,
-		PeakEndHourET:    14,
-		PeakWeekdaysOnly: true,
-	},
-}
-
-// activeAnthropicPromo returns the promo entry currently in effect, or nil.
-// An empty EndsAt means the entry is ongoing (no end date).
-func activeAnthropicPromo(now time.Time) *anthropicPromo {
-	for i := range anthropicPromos {
-		start, err := time.Parse(time.RFC3339, anthropicPromos[i].StartsAt)
-		if err != nil {
-			continue
-		}
-		if now.Before(start) {
-			continue
-		}
-		if anthropicPromos[i].EndsAt != "" {
-			end, err := time.Parse(time.RFC3339, anthropicPromos[i].EndsAt)
-			if err != nil {
-				continue
-			}
-			if !now.Before(end) {
-				continue
-			}
-		}
-		return &anthropicPromos[i]
-	}
-	return nil
-}
-
-// isAnthropicPeakHours reports whether the given time falls inside the promo's
-// peak-hours window. Timezone for PeakStartHourET/PeakEndHourET is America/New_York.
-func isAnthropicPeakHours(p *anthropicPromo, now time.Time) bool {
-	if p == nil {
-		return false
-	}
-	loc, err := time.LoadLocation("America/New_York")
-	if err != nil {
-		return false
-	}
-	et := now.In(loc)
-	if p.PeakWeekdaysOnly {
-		wd := et.Weekday()
-		if wd == time.Saturday || wd == time.Sunday {
-			return false
-		}
-	}
-	hour := et.Hour()
-	return hour >= p.PeakStartHourET && hour < p.PeakEndHourET
-}
-
 // ── Anthropic Provider Handlers ──
 
 // currentAnthropic returns Anthropic quota status.
@@ -5962,17 +6634,22 @@ func (h *Handler) currentAnthropic(w http.ResponseWriter, r *http.Request) {
 // Merges data from the latest snapshot (statusline or API) with per-quota
 // freshness information so the UI can show all quotas with age indicators.
 func (h *Handler) buildAnthropicCurrent() map[string]interface{} {
+	response, _, _ := h.buildAnthropicCurrentOK()
+	return response
+}
+
+// buildAnthropicCurrentOK is buildAnthropicCurrent with an explicit storage
+// outcome. The builder prefers the per-quota merge and falls back to the single
+// latest snapshot, so only a failure of both reads is a storage failure.
+func (h *Handler) buildAnthropicCurrentOK() (response map[string]interface{}, readOK bool, hasData bool) {
 	now := time.Now().UTC()
-	response := map[string]interface{}{
+	response = map[string]interface{}{
 		"capturedAt": now.Format(time.RFC3339),
 		"quotas":     []interface{}{},
 	}
-	if promo := activeAnthropicPromo(now); promo != nil {
-		response["promo"] = promo
-	}
 
 	if h.store == nil {
-		return response
+		return response, true, false
 	}
 
 	// Get per-quota latest values (merges statusline + API snapshots).
@@ -5982,11 +6659,21 @@ func (h *Handler) buildAnthropicCurrent() map[string]interface{} {
 	if err != nil {
 		h.logger.Error("failed to query latest per-quota Anthropic data", "error", err)
 		// Fall back to single-snapshot approach
-		return h.buildAnthropicCurrentFallback(response)
+		response, snapOK, snapData := h.buildAnthropicCurrentFallbackOK(response)
+		if !snapOK {
+			return response, false, false
+		}
+		return response, true, snapData
 	}
 
 	if len(latestPerQuota) == 0 {
-		return response
+		// The per-quota table is empty; the single-snapshot read can still hold
+		// an older API poll, and its outcome decides success.
+		response, snapOK, snapData := h.buildAnthropicCurrentFallbackOK(response)
+		if !snapOK {
+			return response, false, false
+		}
+		return response, true, snapData
 	}
 
 	// Find the most recent capturedAt across all quotas
@@ -6009,7 +6696,9 @@ func (h *Handler) buildAnthropicCurrent() map[string]interface{} {
 		return latestPerQuota[i].Name < latestPerQuota[j].Name
 	})
 
-	var quotas []map[string]interface{}
+	// Initialise so an empty result serialises as [] like the public builder
+	// always did, not null.
+	quotas := make([]map[string]interface{}, 0, len(latestPerQuota))
 	for _, q := range latestPerQuota {
 		age := now.Sub(q.CapturedAt)
 		qMap := map[string]interface{}{
@@ -6039,15 +6728,25 @@ func (h *Handler) buildAnthropicCurrent() map[string]interface{} {
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("anthropic"))
-	return response
+	return response, true, true
 }
 
 // buildAnthropicCurrentFallback uses the single latest snapshot when per-quota
 // merge fails. This preserves the original behavior as a safety net.
 func (h *Handler) buildAnthropicCurrentFallback(response map[string]interface{}) map[string]interface{} {
+	response, _, _ = h.buildAnthropicCurrentFallbackOK(response)
+	return response
+}
+
+// buildAnthropicCurrentFallbackOK is buildAnthropicCurrentFallback with an
+// explicit storage outcome.
+func (h *Handler) buildAnthropicCurrentFallbackOK(response map[string]interface{}) (result map[string]interface{}, readOK bool, hasData bool) {
 	latest, err := h.store.QueryLatestAnthropic()
-	if err != nil || latest == nil {
-		return response
+	if err != nil {
+		return response, false, false
+	}
+	if latest == nil {
+		return response, true, false
 	}
 
 	now := time.Now().UTC()
@@ -6063,7 +6762,9 @@ func (h *Handler) buildAnthropicCurrentFallback(response map[string]interface{})
 		}
 		return orderedQuotas[i].Name < orderedQuotas[j].Name
 	})
-	var quotas []map[string]interface{}
+	// Initialise so an empty result serialises as [] rather than null, as the
+	// public builder always did.
+	quotas := make([]map[string]interface{}, 0, len(orderedQuotas))
 	age := now.Sub(latest.CapturedAt)
 	for _, q := range orderedQuotas {
 		qMap := map[string]interface{}{
@@ -6092,7 +6793,7 @@ func (h *Handler) buildAnthropicCurrentFallback(response map[string]interface{})
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("anthropic"))
-	return response
+	return response, true, true
 }
 
 // anthropicUtilStatus returns a status string based on utilization percentage.
@@ -6146,7 +6847,7 @@ func (h *Handler) historyAnthropic(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	start := now.Add(-duration)
-	snapshots, err := h.store.QueryAnthropicRange(start, now)
+	snapshots, err := h.store.QueryAnthropicRangeSampled(start, now)
 	if err != nil {
 		h.logger.Error("failed to query Anthropic history", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query history")
@@ -6317,7 +7018,7 @@ func buildAnthropicSummaryResponse(summary *tracker.AnthropicSummary) map[string
 // insightsAnthropic returns Anthropic deep analytics.
 func (h *Handler) insightsAnthropic(w http.ResponseWriter, r *http.Request, rangeDur time.Duration) {
 	hidden := h.getHiddenInsightKeys()
-	respondJSON(w, http.StatusOK, h.buildAnthropicInsights(hidden, rangeDur))
+	respondInsights(w, h.buildAnthropicInsights(hidden, rangeDur))
 }
 
 // buildAnthropicInsights builds the Anthropic insights response with per-quota analytics.
@@ -6327,6 +7028,7 @@ func (h *Handler) buildAnthropicInsights(hidden map[string]bool, rangeDur time.D
 		return resp
 	}
 	latest, err := h.store.QueryLatestAnthropic()
+	markPartial(&resp.partial, err)
 	if err != nil || latest == nil {
 		resp.Insights = append(resp.Insights, insightItem{
 			Type: "info", Severity: "info",
@@ -6962,6 +7664,10 @@ var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-
 
 // UpdateSettings updates settings from JSON body (partial updates supported).
 func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
+	// Every settings write can reshape cached dashboard answers (hidden
+	// insights are filtered server-side, timezone and toggles format them),
+	// so drop them however this request ends.
+	defer h.responses.invalidateAll()
 	if r.Method != http.MethodPut {
 		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -7131,14 +7837,15 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// Handle notification settings
 	if raw, ok := body["notifications"]; ok {
 		var notif struct {
-			WarningThreshold  float64 `json:"warning_threshold"`
-			CriticalThreshold float64 `json:"critical_threshold"`
-			NotifyWarning     bool    `json:"notify_warning"`
-			NotifyCritical    bool    `json:"notify_critical"`
-			NotifyReset       bool    `json:"notify_reset"`
-			NotifyAuthError   bool    `json:"notify_auth_error"`
-			NotifyRepeat      bool    `json:"notify_repeat"`
-			CooldownMinutes   int     `json:"cooldown_minutes"`
+			WarningThreshold        float64 `json:"warning_threshold"`
+			CriticalThreshold       float64 `json:"critical_threshold"`
+			NotifyWarning           bool    `json:"notify_warning"`
+			NotifyCritical          bool    `json:"notify_critical"`
+			NotifyReset             bool    `json:"notify_reset"`
+			NotifyAuthError         bool    `json:"notify_auth_error"`
+			NotifyResetCreditExpiry *bool   `json:"notify_reset_credit_expiry"`
+			NotifyRepeat            bool    `json:"notify_repeat"`
+			CooldownMinutes         int     `json:"cooldown_minutes"`
 			// Channels is a pointer so an omitted value keeps the stored
 			// selection instead of silently resetting every channel to off.
 			Channels  *notify.NotificationChannels `json:"channels,omitempty"`
@@ -7188,14 +7895,22 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Preserve the stored channel selection when the client omits it.
-		if notif.Channels == nil {
+		// Preserve the stored channel selection and the reset-credit toggle
+		// when the client omits them. The reset-credit warning defaults on when
+		// it has never been saved.
+		if notif.Channels == nil || notif.NotifyResetCreditExpiry == nil {
 			if existingJSON, _ := h.store.GetSetting("notifications"); existingJSON != "" {
 				var existing struct {
-					Channels *notify.NotificationChannels `json:"channels"`
+					Channels                *notify.NotificationChannels `json:"channels"`
+					NotifyResetCreditExpiry *bool                        `json:"notify_reset_credit_expiry"`
 				}
 				if json.Unmarshal([]byte(existingJSON), &existing) == nil {
-					notif.Channels = existing.Channels
+					if notif.Channels == nil {
+						notif.Channels = existing.Channels
+					}
+					if notif.NotifyResetCreditExpiry == nil {
+						notif.NotifyResetCreditExpiry = existing.NotifyResetCreditExpiry
+					}
 				}
 			}
 		}
@@ -7305,6 +8020,7 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, "failed to save provider visibility settings")
 			return
 		}
+		h.invalidateMenubarSnapshot()
 		if h.agentManager != nil {
 			for _, p := range providerCatalog() {
 				enabled := h.providerPollingEnabled(p.Key, vis)
@@ -7398,22 +8114,64 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusBadRequest, "invalid provider_settings value")
 			return
 		}
+		// An empty payload changes nothing: do not re-apply settings or touch
+		// any agent (the full-reconcile path would otherwise restart every
+		// runtime-restartable provider).
+		if len(provSettings) == 0 {
+			provJSON, _ := h.store.GetSetting("provider_settings")
+			existing := map[string]interface{}{}
+			if provJSON != "" {
+				_ = json.Unmarshal([]byte(provJSON), &existing)
+			}
+			stripProviderSecrets(existing)
+			result["provider_settings"] = existing
+			respondJSON(w, http.StatusOK, result)
+			return
+		}
 		// Deep-merge with existing settings: preserve fields not in the update
 		// (e.g. sensitive keys omitted from the form when unchanged).
 		existing := make(map[string]interface{})
 		if existingJSON, _ := h.store.GetSetting("provider_settings"); existingJSON != "" {
 			_ = json.Unmarshal([]byte(existingJSON), &existing)
 		}
+		// Snapshot the stored settings before merging so change detection can
+		// compare each incoming value against what was there. The UI sends
+		// every non-password field on every save, so presence alone is not a
+		// change; only a different value requires a restart.
+		storedSettings := cloneProviderSettings(existing)
+		clearedFields := applyProviderSettingClearFlags(provSettings)
 		for k, v := range provSettings {
 			newMap, newOK := v.(map[string]interface{})
 			existingMap, existOK := existing[k].(map[string]interface{})
 			if newOK && existOK {
-				// Merge fields: new values override, missing keys preserved
+				// Merge fields: new values override, missing keys preserved. A
+				// blank value that was not explicitly cleared is "unchanged" -
+				// the UI always sends plain text fields, so a blank
+				// workspace_id/browser_profile must not wipe a stored or .env
+				// value. Only an explicit clear writes "" and records a
+				// "<field>_cleared" marker so apply knows the empty value is
+				// intentional (and a legacy bare "" is not).
 				for fk, fv := range newMap {
+					if s, ok := fv.(string); ok && s == "" {
+						if !clearedFields[k][fk] {
+							continue
+						}
+						setProviderSettingClearMarker(existingMap, fk, true)
+						existingMap[fk] = fv
+						continue
+					}
+					setProviderSettingClearMarker(existingMap, fk, false)
 					existingMap[fk] = fv
 				}
 				existing[k] = existingMap
 			} else {
+				// A provider not yet stored: record clear markers so a cleared
+				// field is not mistaken for a legacy blank value on apply.
+				if newOK {
+					for fk := range clearedFields[k] {
+						setProviderSettingClearMarker(newMap, fk, true)
+					}
+				}
 				existing[k] = v
 			}
 		}
@@ -7431,6 +8189,19 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Strings(updatedProviders)
 		h.logger.Info("Provider settings updated", "providers", updatedProviders)
+		// Keys and enable flags just saved must reach the runtime without a
+		// daemon restart: re-apply them to the live config and start, stop or
+		// restart the affected provider agents. Only providers whose factory
+		// builds a fresh agent (opencode, mistral) are restarted at runtime,
+		// and only when a restart-requiring field actually changed value - the
+		// UI resends every field, so a no-op or display-only save must not
+		// disrupt a healthy agent (nor re-run Mistral's browser cookie import).
+		h.reconcileProviderAgents(updatedProviders, providerSettingsNeedRestart(provSettings, storedSettings, clearedFields))
+		// Invalidate only after the live config reflects the save. A build
+		// that starts in between would otherwise carry the new generation but
+		// read the old provider/credential state, and cache it for the whole
+		// freshness window.
+		h.invalidateMenubarSnapshot()
 		// Strip sensitive fields before returning to client
 		stripProviderSecrets(existing)
 		result["provider_settings"] = existing
@@ -8291,6 +9062,9 @@ func cycleOverviewRowsToJSON(rows []store.CycleOverviewRow) []map[string]interfa
 			"totalDelta": row.TotalDelta,
 			"peakTime":   row.PeakTime.Format(time.RFC3339),
 		}
+		if row.ResetsAt != nil {
+			entry["resetsAt"] = row.ResetsAt.Format(time.RFC3339)
+		}
 		if row.CycleEnd != nil {
 			entry["cycleEnd"] = row.CycleEnd.Format(time.RFC3339)
 		} else {
@@ -8323,24 +9097,31 @@ func (h *Handler) currentCopilot(w http.ResponseWriter, r *http.Request) {
 
 // buildCopilotCurrent builds the Copilot current quota response map.
 func (h *Handler) buildCopilotCurrent() map[string]interface{} {
+	response, _, _ := h.buildCopilotCurrentOK()
+	return response
+}
+
+// buildCopilotCurrentOK is buildCopilotCurrent with an explicit storage outcome.
+// readOK is false only when the store read itself failed.
+func (h *Handler) buildCopilotCurrentOK() (response map[string]interface{}, readOK bool, hasData bool) {
 	now := time.Now().UTC()
-	response := map[string]interface{}{
+	response = map[string]interface{}{
 		"capturedAt": now.Format(time.RFC3339),
 		"quotas":     []interface{}{},
 	}
 
 	if h.store == nil {
-		return response
+		return response, true, false
 	}
 
 	latest, err := h.store.QueryLatestCopilot()
 	if err != nil {
 		h.logger.Error("failed to query latest Copilot snapshot", "error", err)
-		return response
+		return response, false, false
 	}
 
 	if latest == nil {
-		return response
+		return response, true, false
 	}
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
@@ -8382,7 +9163,7 @@ func (h *Handler) buildCopilotCurrent() map[string]interface{} {
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("copilot"))
-	return response
+	return response, true, true
 }
 
 // copilotUsageStatus returns a status string based on usage percentage.
@@ -8416,7 +9197,7 @@ func (h *Handler) historyCopilot(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	start := now.Add(-duration)
-	snapshots, err := h.store.QueryCopilotRange(start, now)
+	snapshots, err := h.store.QueryCopilotRangeSampled(start, now)
 	if err != nil {
 		h.logger.Error("failed to query Copilot history", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query history")
@@ -8572,7 +9353,7 @@ func buildCopilotSummaryResponse(summary *tracker.CopilotSummary) map[string]int
 // insightsCopilot returns Copilot deep analytics.
 func (h *Handler) insightsCopilot(w http.ResponseWriter, r *http.Request, rangeDur time.Duration) {
 	hidden := h.getHiddenInsightKeys()
-	respondJSON(w, http.StatusOK, h.buildCopilotInsights(hidden, rangeDur))
+	respondInsights(w, h.buildCopilotInsights(hidden, rangeDur))
 }
 
 // buildCopilotInsights builds the Copilot insights response.
@@ -8582,6 +9363,7 @@ func (h *Handler) buildCopilotInsights(hidden map[string]bool, rangeDur time.Dur
 		return resp
 	}
 	latest, err := h.store.QueryLatestCopilot()
+	markPartial(&resp.partial, err)
 	if err != nil || latest == nil {
 		resp.Insights = append(resp.Insights, insightItem{
 			Type: "info", Severity: "info",
@@ -8868,26 +9650,67 @@ func (h *Handler) getCodexPaceMode() string {
 }
 
 func (h *Handler) buildCodexCurrent(accountID int64) map[string]interface{} {
+	response, _, _ := h.buildCodexCurrentOK(accountID)
+	return response
+}
+
+// buildCodexCurrentOK is buildCodexCurrent with an explicit storage outcome.
+// readOK is false only when the store read itself failed; the menubar then
+// serves the last good card instead of the fallback payload stamped now.
+// hasData reports whether a stored snapshot backed the payload.
+func (h *Handler) buildCodexCurrentOK(accountID int64) (response map[string]interface{}, readOK bool, hasData bool) {
 	now := time.Now().UTC()
-	response := map[string]interface{}{
+	response = map[string]interface{}{
 		"capturedAt": now.Format(time.RFC3339),
 		"quotas":     []interface{}{},
 	}
+
+	// A paused account needs re-authentication: surface it explicitly so the UI
+	// can flag it instead of rendering the last snapshot as live data (#147).
+	pauseState, paused := h.codexPauseState(accountID)
+	if paused {
+		response["paused"] = true
+		response["authRequired"] = true
+		response["status"] = "paused"
+		if pauseState.Reason != "" {
+			response["pausedReason"] = pauseState.Reason
+		}
+		if !pauseState.Since.IsZero() {
+			response["pausedSince"] = pauseState.Since.UTC().Format(time.RFC3339)
+		}
+	}
+
 	if h.store == nil {
-		return response
+		return response, true, false
 	}
 
 	latest, err := h.store.QueryLatestCodex(accountID)
 	if err != nil {
 		h.logger.Error("failed to query latest Codex snapshot", "error", err)
-		return response
+		return response, false, false
 	}
 	if latest == nil {
-		return response
+		return response, true, false
 	}
+	hasData = true
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
 	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
+	// Snapshot age drives the dashboard's stale-card treatment: a polling-disabled
+	// or long-paused account keeps serving its last snapshot, which must not look
+	// live. ageSeconds lets the card show "Last updated <age> ago".
+	age := now.Sub(latest.CapturedAt)
+	if age < 0 {
+		age = 0
+	}
+	response["ageSeconds"] = int64(age.Seconds())
+	response["lastUpdatedAt"] = latest.CapturedAt.Format(time.RFC3339)
+	// A snapshot old enough that it cannot be live is stale, not resetting: mark
+	// it so the countdown does not read as a negative "Resetting..." forever.
+	stale := snapshotStale(now, latest.CapturedAt)
+	if stale {
+		response["isStale"] = true
+	}
 	if latest.PlanType != "" {
 		response["planType"] = latest.PlanType
 		response["planLabel"] = codexPlanLabel(latest.PlanType)
@@ -8927,6 +9750,11 @@ func (h *Handler) buildCodexCurrent(accountID int64) map[string]interface{} {
 			"utilization": q.Utilization,
 			"headroom":    headroom,
 			"status":      status,
+			// Per-quota freshness so the card's stale treatment applies to a
+			// polling-disabled or long-paused account (issue #147 review).
+			"ageSeconds":    int64(age.Seconds()),
+			"lastUpdatedAt": latest.CapturedAt.Format(time.RFC3339),
+			"isStale":       stale,
 		}
 		// code_review always shows remaining; five_hour/seven_day show remaining when display_mode="available"
 		if normalizedName == "code_review" || (showAvailable && (normalizedName == "five_hour" || normalizedName == "seven_day")) {
@@ -8942,8 +9770,16 @@ func (h *Handler) buildCodexCurrent(accountID int64) map[string]interface{} {
 		if q.ResetsAt != nil {
 			timeUntilReset := time.Until(*q.ResetsAt)
 			qMap["resetsAt"] = q.ResetsAt.Format(time.RFC3339)
-			qMap["timeUntilReset"] = formatDuration(timeUntilReset)
-			qMap["timeUntilResetSeconds"] = int64(timeUntilReset.Seconds())
+			// Clamp a reset already in the past to 0 so the UI shows an expired
+			// window instead of a negative "Resetting..." countdown (#147).
+			if timeUntilReset < 0 {
+				qMap["timeUntilReset"] = "0m"
+				qMap["timeUntilResetSeconds"] = int64(0)
+				qMap["resetElapsed"] = true
+			} else {
+				qMap["timeUntilReset"] = formatDuration(timeUntilReset)
+				qMap["timeUntilResetSeconds"] = int64(timeUntilReset.Seconds())
+			}
 		}
 		if h.codexTracker != nil {
 			if summary, err := h.codexTracker.UsageSummary(accountID, q.Name); err == nil && summary != nil {
@@ -8959,8 +9795,116 @@ func (h *Handler) buildCodexCurrent(accountID int64) map[string]interface{} {
 		}
 	}
 	response["quotas"] = quotas
+	response["resetCredits"] = h.buildCodexResetCredits(accountID, latest)
 	applyDisplayModeToResponse(response, displayMode)
-	return response
+	return response, true, hasData
+}
+
+// buildCodexResetCredits shapes the read-only banked reset-credit view for one
+// account (issue #152). It only adds fields and never fails the response: a
+// missing check row is reported as "unknown", and an absent usage count stays
+// null rather than 0.
+func (h *Handler) buildCodexResetCredits(accountID int64, latest *api.CodexSnapshot) map[string]interface{} {
+	out := map[string]interface{}{
+		"status":           "unknown",
+		"available_count":  nil,
+		"applicable_count": nil,
+		"next_expires_at":  nil,
+		"credits":          []interface{}{},
+		"last_checked_at":  nil,
+	}
+	if h.store == nil {
+		return out
+	}
+
+	// Counts from the latest snapshot are always available, even when the
+	// detail endpoint cannot be reached.
+	if latest != nil && latest.ResetCreditsAvailableCount.Valid {
+		out["available_count"] = latest.ResetCreditsAvailableCount.Value
+	}
+	if latest != nil && latest.ResetCreditsApplicableCount.Valid {
+		out["applicable_count"] = latest.ResetCreditsApplicableCount.Value
+	}
+
+	check, err := h.store.QueryCodexResetCreditCheckStatus(accountID)
+	if err != nil {
+		h.logger.Error("failed to query Codex reset-credit check", "error", err, "account_id", accountID)
+		return out
+	}
+	if check != nil {
+		switch check.Status {
+		case "ok":
+			out["status"] = "ok"
+			// The detail response's own counts are authoritative once it has
+			// served data; a NULL count stays unknown and falls back to the
+			// snapshot value (never 0).
+			if check.AvailableCount != nil {
+				out["available_count"] = *check.AvailableCount
+			}
+			if check.ApplicableCount != nil {
+				out["applicable_count"] = *check.ApplicableCount
+			}
+		case "unavailable":
+			out["status"] = "unavailable"
+		}
+		if !check.LastCheckedAt.IsZero() {
+			out["last_checked_at"] = check.LastCheckedAt.UTC().Format(time.RFC3339)
+		}
+	}
+
+	rows, err := h.store.QueryCodexResetCredits(accountID)
+	if err != nil {
+		h.logger.Error("failed to query Codex reset credits", "error", err, "account_id", accountID)
+		return out
+	}
+
+	credits := make([]interface{}, 0, len(rows))
+	available := make([]store.CodexResetCreditRecord, 0, len(rows))
+	for _, row := range rows {
+		if row.GoneAt != nil || row.Status != "available" {
+			continue
+		}
+		available = append(available, row)
+	}
+	// The store already orders by expiry with never-expiring last. Keep that
+	// order, but put plan-usable credits first: the soonest usable expiry
+	// drives next_expires_at and the card tooltip.
+	sort.SliceStable(available, func(i, j int) bool {
+		left, right := available[i], available[j]
+		if left.UnsupportedByPlan != right.UnsupportedByPlan {
+			return !left.UnsupportedByPlan
+		}
+		switch {
+		case left.ExpiresAt == nil && right.ExpiresAt == nil:
+			return left.CreditID < right.CreditID
+		case left.ExpiresAt == nil:
+			return false
+		case right.ExpiresAt == nil:
+			return true
+		default:
+			return left.ExpiresAt.Before(*right.ExpiresAt)
+		}
+	})
+	for _, row := range available {
+		entry := map[string]interface{}{
+			"id":                  row.CreditID,
+			"status":              row.Status,
+			"reset_type":          row.ResetType,
+			"title":               row.Title,
+			"expires_at":          nil,
+			"unsupported_by_plan": row.UnsupportedByPlan,
+			"expiry_unknown":      row.ExpiryUnknown,
+		}
+		if row.ExpiresAt != nil {
+			entry["expires_at"] = row.ExpiresAt.UTC().Format(time.RFC3339)
+			if out["next_expires_at"] == nil && !row.UnsupportedByPlan {
+				out["next_expires_at"] = row.ExpiresAt.UTC().Format(time.RFC3339)
+			}
+		}
+		credits = append(credits, entry)
+	}
+	out["credits"] = credits
+	return out
 }
 
 func codexUtilStatus(util float64) string {
@@ -9005,15 +9949,22 @@ func (h *Handler) currentAntigravity(w http.ResponseWriter, r *http.Request) {
 
 // buildAntigravityCurrent builds the Antigravity current quota response map.
 func (h *Handler) buildAntigravityCurrent(accountID int64) map[string]interface{} {
+	response, _, _ := h.buildAntigravityCurrentOK(accountID)
+	return response
+}
+
+// buildAntigravityCurrentOK is buildAntigravityCurrent with an explicit storage
+// outcome. readOK is false only when the store read itself failed.
+func (h *Handler) buildAntigravityCurrentOK(accountID int64) (response map[string]interface{}, readOK bool, hasData bool) {
 	now := time.Now().UTC()
-	response := map[string]interface{}{
+	response = map[string]interface{}{
 		"capturedAt": now.Format(time.RFC3339),
 		"quotas":     []interface{}{},
 		"pools":      []interface{}{},
 	}
 
 	if h.store == nil {
-		return response
+		return response, true, false
 	}
 	if identity := h.accountIdentity("antigravity", accountID); identity != nil {
 		response["account"] = identity
@@ -9022,11 +9973,11 @@ func (h *Handler) buildAntigravityCurrent(accountID int64) map[string]interface{
 	latest, err := h.store.QueryLatestAntigravity(accountID)
 	if err != nil {
 		h.logger.Error("failed to query latest Antigravity snapshot", "error", err)
-		return response
+		return response, false, false
 	}
 
 	if latest == nil {
-		return response
+		return response, true, false
 	}
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
@@ -9055,7 +10006,7 @@ func (h *Handler) buildAntigravityCurrent(accountID int64) map[string]interface{
 			response["lowestPool"] = lowest
 		}
 		applyDisplayModeToResponse(response, h.getDisplayMode("antigravity"))
-		return response
+		return response, true, true
 	}
 
 	groups := api.GroupAntigravityModelsByLogicalQuota(latest.Models)
@@ -9108,7 +10059,7 @@ func (h *Handler) buildAntigravityCurrent(accountID int64) map[string]interface{
 	}
 
 	applyDisplayModeToResponse(response, h.getDisplayMode("antigravity"))
-	return response
+	return response, true, true
 }
 
 // buildAntigravityCLIQuotas renders agy CLI bucket rows (one card per bucket,
@@ -9192,7 +10143,7 @@ func antigravityUsageStatus(usagePercent float64) string {
 // insightsAntigravity returns Antigravity-specific deep analytics.
 func (h *Handler) insightsAntigravity(w http.ResponseWriter, r *http.Request, rangeDur time.Duration) {
 	hidden := h.getHiddenInsightKeys()
-	respondJSON(w, http.StatusOK, h.buildAntigravityInsights(hidden, rangeDur))
+	respondInsights(w, h.buildAntigravityInsights(hidden, rangeDur))
 }
 
 // buildAntigravityInsights builds Antigravity insights focused on burn rates and exhaustion forecast.
@@ -9206,14 +10157,16 @@ func (h *Handler) buildAntigravityInsights(hidden map[string]bool, rangeDur time
 	now := time.Now().UTC()
 	rangeStart := now.Add(-rangeDur)
 	latest, err := h.store.QueryLatestAntigravity(h.defaultProviderAccountID("antigravity"))
+	markPartial(&resp.partial, err)
 	if err != nil || latest == nil {
 		return resp
 	}
 
 	groups := api.GroupAntigravityModelsByLogicalQuota(latest.Models)
-	snapshots, err := h.store.QueryAntigravityHistory(rangeStart, now)
+	pollCount, firstPoll, lastPoll, err := h.store.QueryAntigravityRangeStats(rangeStart, now)
+	markPartial(&resp.partial, err)
 	if err != nil {
-		snapshots = nil
+		pollCount = 0
 	}
 
 	type burnRateStats struct {
@@ -9362,15 +10315,13 @@ func (h *Handler) buildAntigravityInsights(hidden map[string]bool, rangeDur time
 		})
 	}
 
-	if len(snapshots) >= 2 && !hidden["coverage"] {
-		first := snapshots[0]
-		last := snapshots[len(snapshots)-1]
-		dur := last.CapturedAt.Sub(first.CapturedAt)
+	if pollCount >= 2 && !hidden["coverage"] {
+		dur := lastPoll.Sub(firstPoll)
 		resp.Insights = append(resp.Insights, insightItem{
 			Key:      "coverage",
 			Title:    "Coverage",
 			Metric:   formatDuration(dur),
-			Sublabel: fmt.Sprintf("%d polls", len(snapshots)),
+			Sublabel: fmt.Sprintf("%d polls", pollCount),
 			Severity: "info",
 		})
 	}
@@ -9410,13 +10361,10 @@ func (h *Handler) historyAntigravity(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, accountErr.Error())
 		return
 	}
-	snapshots, err := h.store.QueryAntigravityRangeForAccount(accountID, start, end)
+	snapshots, err := h.store.QueryAntigravityRangeSampled(start, end, accountID)
 	if err != nil {
 		h.logger.Error("failed to query antigravity history", "error", err)
-		respondJSON(w, http.StatusOK, map[string]interface{}{
-			"labels":   []string{},
-			"datasets": []interface{}{},
-		})
+		respondError(w, http.StatusInternalServerError, "failed to load history")
 		return
 	}
 
@@ -9494,7 +10442,7 @@ func (h *Handler) historyCodex(w http.ResponseWriter, r *http.Request) {
 	}
 	end := time.Now().UTC()
 	start := end.Add(-duration)
-	snapshots, err := h.store.QueryCodexRange(accountID, start, end)
+	snapshots, err := h.store.QueryCodexRangeSampled(accountID, start, end)
 	if err != nil {
 		h.logger.Error("failed to query Codex history", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query history")
@@ -9676,15 +10624,47 @@ func (h *Handler) defaultMiniMaxAccountID() int64 {
 // minimaxUsageAccounts returns current usage for all active MiniMax accounts.
 // Mirrors codexUsageAccounts() pattern.
 func (h *Handler) minimaxUsageAccounts() []map[string]interface{} {
+	usages, _ := h.minimaxUsageAccountsOK()
+	accounts := make([]map[string]interface{}, 0, len(usages))
+	for _, usage := range usages {
+		accounts = append(accounts, usage.Usage)
+	}
+	return accounts
+}
+
+// minimaxUsageAccountsOK is minimaxUsageAccounts with an explicit enumeration
+// outcome and the read outcome of each account's builder. enumerated is false
+// only when the account list itself could not be read; callers that cache
+// per-account data must then keep their known accounts and prune nothing.
+func (h *Handler) minimaxUsageAccountsOK() (accounts []menubarAccountUsage, enumerated bool) {
 	if h.store == nil {
-		return []map[string]interface{}{}
+		return nil, true
 	}
 
-	usages := h.providerAccountUsages("minimax", h.buildMiniMaxCurrent, h.defaultMiniMaxAccountID)
-	if usages == nil {
-		return []map[string]interface{}{}
+	rows, err := h.store.QueryActiveProviderAccounts("minimax")
+	if err != nil {
+		h.logger.Error("failed to query MiniMax accounts", "error", err)
+		return nil, false
 	}
-	return usages
+	if len(rows) == 0 {
+		defID := h.defaultMiniMaxAccountID()
+		if defID > 0 {
+			rows = []store.ProviderAccount{
+				{ID: defID, Name: "default"},
+			}
+		}
+	}
+
+	accounts = make([]menubarAccountUsage, 0, len(rows))
+	for _, acc := range rows {
+		usage, readOK, hasData := h.buildMiniMaxCurrentOK(acc.ID)
+		usage["accountId"] = acc.ID
+		usage["accountName"] = store.ProviderAccountAlias(acc)
+		usage["id"] = acc.ID
+		usage["name"] = acc.Name
+		accounts = append(accounts, menubarAccountUsage{Usage: usage, ReadOK: readOK, HasData: hasData})
+	}
+	return accounts, true
 }
 
 func minimaxUsageAccountID(usage map[string]interface{}) int64 {
@@ -9829,6 +10809,7 @@ func (h *Handler) minimaxAccountCreate(w http.ResponseWriter, r *http.Request) {
 	if h.minimaxAgentMgr != nil {
 		h.minimaxAgentMgr.Reload()
 	}
+	h.invalidateMenubarSnapshot()
 
 	respondJSON(w, http.StatusCreated, map[string]interface{}{
 		"message": "account created",
@@ -9916,6 +10897,7 @@ func (h *Handler) minimaxAccountUpdate(w http.ResponseWriter, r *http.Request) {
 	if h.minimaxAgentMgr != nil {
 		h.minimaxAgentMgr.Reload()
 	}
+	h.invalidateMenubarSnapshot()
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{"message": "account updated", "id": id})
 }
@@ -9947,6 +10929,7 @@ func (h *Handler) minimaxAccountDelete(w http.ResponseWriter, r *http.Request) {
 	if h.minimaxAgentMgr != nil {
 		h.minimaxAgentMgr.Reload()
 	}
+	h.invalidateMenubarSnapshot()
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{"message": "account deleted", "id": id})
 }
@@ -10000,24 +10983,34 @@ func (h *Handler) currentMiniMax(w http.ResponseWriter, r *http.Request) {
 
 // buildMiniMaxCurrent builds current MiniMax response.
 func (h *Handler) buildMiniMaxCurrent(accountID int64) map[string]interface{} {
+	response, _, _ := h.buildMiniMaxCurrentOK(accountID)
+	return response
+}
+
+// buildMiniMaxCurrentOK is buildMiniMaxCurrent with an explicit storage
+// outcome. readOK is false only when the store read itself failed; the menubar
+// then serves the last good card instead of the fallback payload stamped now.
+// hasData reports whether a stored snapshot backed the payload.
+func (h *Handler) buildMiniMaxCurrentOK(accountID int64) (response map[string]interface{}, readOK bool, hasData bool) {
 	now := time.Now().UTC()
-	response := map[string]interface{}{
+	response = map[string]interface{}{
 		"capturedAt":  now.Format(time.RFC3339),
 		"quotas":      []interface{}{},
 		"sharedQuota": false,
 	}
 	if h.store == nil {
-		return response
+		return response, true, false
 	}
 
 	latest, err := h.store.QueryLatestMiniMax(accountID)
 	if err != nil {
 		h.logger.Error("failed to query latest MiniMax snapshot", "error", err)
-		return response
+		return response, false, false
 	}
 	if latest == nil {
-		return response
+		return response, true, false
 	}
+	hasData = true
 
 	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
 	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
@@ -10116,7 +11109,7 @@ func (h *Handler) buildMiniMaxCurrent(accountID int64) map[string]interface{} {
 	}
 	response["quotas"] = quotas
 	applyDisplayModeToResponse(response, h.getDisplayMode("minimax"))
-	return response
+	return response, true, hasData
 }
 
 func minimaxSharedModelSummary(models []string) string {
@@ -10539,7 +11532,7 @@ func (h *Handler) historyMiniMax(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	start := now.Add(-duration)
 	minimaxAccID := h.parseMiniMaxAccountID(r)
-	snapshots, err := h.store.QueryMiniMaxRange(start, now, minimaxAccID)
+	snapshots, err := h.store.QueryMiniMaxRangeSampled(start, now, minimaxAccID)
 	if err != nil {
 		h.logger.Error("failed to query MiniMax history", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to query history")
@@ -10762,7 +11755,7 @@ func buildMiniMaxSummaryResponse(summary *tracker.MiniMaxSummary) map[string]int
 // insightsMiniMax returns MiniMax insights.
 func (h *Handler) insightsMiniMax(w http.ResponseWriter, r *http.Request, rangeDur time.Duration) {
 	hidden := h.getHiddenInsightKeys()
-	respondJSON(w, http.StatusOK, h.buildMiniMaxInsights(h.parseMiniMaxAccountID(r), hidden, rangeDur))
+	respondInsights(w, h.buildMiniMaxInsights(h.parseMiniMaxAccountID(r), hidden, rangeDur))
 }
 
 func (h *Handler) buildMiniMaxInsights(accountID int64, hidden map[string]bool, rangeDur time.Duration) insightsResponse {
@@ -10775,6 +11768,7 @@ func (h *Handler) buildMiniMaxInsights(accountID int64, hidden map[string]bool, 
 		minimaxAccID = h.defaultMiniMaxAccountID()
 	}
 	latest, err := h.store.QueryLatestMiniMax(minimaxAccID)
+	markPartial(&resp.partial, err)
 	if err != nil || latest == nil || len(latest.Models) == 0 {
 		resp.Insights = append(resp.Insights, insightItem{
 			Type: "info", Severity: "info", Title: "Getting Started",
@@ -10794,6 +11788,7 @@ func (h *Handler) buildMiniMaxInsights(accountID int64, hidden map[string]bool, 
 		}
 		now := time.Now().UTC()
 		snapshots, err := h.store.QueryMiniMaxRange(now.Add(-rangeWindow), now, minimaxAccID, minimaxInsightSampleLimit)
+		markPartial(&resp.partial, err)
 		if err != nil {
 			h.logger.Error("failed to query MiniMax snapshots for insights", "error", err)
 		}
@@ -11103,7 +12098,14 @@ func buildCodexSummaryResponse(summary *tracker.CodexSummary) map[string]interfa
 	}
 	if summary.ResetsAt != nil {
 		result["resetsAt"] = summary.ResetsAt.Format(time.RFC3339)
-		result["timeUntilReset"] = formatDuration(summary.TimeUntilReset)
+		// A reset already in the past reads as "reset due" rather than the
+		// perpetual "Resetting..." that formatDuration would produce (#147).
+		if summary.TimeUntilReset < 0 {
+			result["timeUntilReset"] = "reset due"
+			result["resetElapsed"] = true
+		} else {
+			result["timeUntilReset"] = formatDuration(summary.TimeUntilReset)
+		}
 	}
 	if !summary.TrackingSince.IsZero() {
 		result["trackingSince"] = summary.TrackingSince.Format(time.RFC3339)
@@ -11114,7 +12116,7 @@ func buildCodexSummaryResponse(summary *tracker.CodexSummary) map[string]interfa
 func (h *Handler) insightsCodex(w http.ResponseWriter, r *http.Request, rangeDur time.Duration) {
 	accountID := parseCodexAccountID(r)
 	hidden := h.getHiddenInsightKeys()
-	respondJSON(w, http.StatusOK, h.buildCodexInsights(accountID, hidden, rangeDur))
+	respondInsights(w, h.buildCodexInsights(accountID, hidden, rangeDur))
 }
 
 func (h *Handler) buildCodexInsights(accountID int64, hidden map[string]bool, rangeDur time.Duration) insightsResponse {
@@ -11124,6 +12126,7 @@ func (h *Handler) buildCodexInsights(accountID int64, hidden map[string]bool, ra
 		return resp
 	}
 	latest, err := h.store.QueryLatestCodex(accountID)
+	markPartial(&resp.partial, err)
 	if err != nil || latest == nil {
 		resp.Insights = append(resp.Insights, insightItem{Type: "info", Severity: "info", Title: "Getting Started", Desc: "Keep onWatch running to collect Codex usage data. Insights will appear after a few snapshots."})
 		return resp
@@ -11162,6 +12165,7 @@ func (h *Handler) buildCodexInsights(accountID int64, hidden map[string]bool, ra
 	}
 
 	primaryCycles, err := h.store.QueryCodexCyclesSince(accountID, primaryQuotaName, windowStart)
+	markPartial(&resp.partial, err)
 	if codexIsFreePlan(latest.PlanType) && (err != nil || len(primaryCycles) == 0) {
 		if legacyCycles, legacyErr := h.store.QueryCodexCyclesSince(accountID, "five_hour", windowStart); legacyErr == nil {
 			primaryCycles = legacyCycles
@@ -11594,6 +12598,8 @@ func (h *Handler) cycleOverviewAntigravity(w http.ResponseWriter, r *http.Reques
 }
 
 type loggingHistoryCrossQuota struct {
+	Format   string
+	ResetsAt *time.Time
 	Name     string
 	Value    float64
 	Limit    float64
@@ -11705,6 +12711,12 @@ func loggingHistoryRowsFromSnapshots(
 				"name":    cq.Name,
 				"percent": cq.Percent,
 				"delta":   delta,
+			}
+			if cq.Format != "" {
+				entry["format"] = cq.Format
+			}
+			if cq.ResetsAt != nil {
+				entry["resetsAt"] = cq.ResetsAt.Format(time.RFC3339)
 			}
 			if cq.HasValue {
 				entry["value"] = cq.Value

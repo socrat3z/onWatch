@@ -2,34 +2,34 @@
 
 Track OpenCode Go subscription quotas in onWatch.
 
-OpenCode Go has no documented quota API. onWatch reads the subscription's own meters from the console endpoint `GET /console/api/go/status`, and it can authenticate in either of two ways:
+OpenCode Go has no documented quota API. onWatch reads the subscription's own meters, and it can authenticate in either of two ways:
 
-- **Service-account key (recommended).** A console key with usage read access. No browser cookie, and it does not expire when you log out.
-- **Browser session.** Your workspace ID plus the `__Host-console_session` cookie from opencode.ai. Used only when no key is set.
+- **Go API key (recommended).** A key with usage read access. No browser cookie, and it does not expire when you log out. Key mode reads `GET /zen/go/v1/usage`, the same route the OpenCode CLI and console use.
+- **Browser session.** Your workspace ID plus the `__Host-console_session` cookie from opencode.ai. Used only when no key is set. Session mode reads the console's `GET /console/api/go/status` document.
 
 This is separate from `OPENCODE_ENABLED`, which only feeds ChatGPT credentials from OpenCode into the **Codex** provider.
 
-> **Upgrading from the old scrape mode?** The `/workspace/{id}/go` page and the `auth` cookie no longer work ([issue #134](https://github.com/onllm-dev/onWatch/issues/134)). Keep your workspace ID, but replace `OPENCODE_GO_AUTH_COOKIE` with the value of the `__Host-console_session` cookie, or switch to a service-account key.
+> **Upgrading from the old scrape mode?** The `/workspace/{id}/go` page and the `auth` cookie no longer work ([issue #134](https://github.com/onllm-dev/onWatch/issues/134)). Keep your workspace ID, but replace `OPENCODE_GO_AUTH_COOKIE` with the value of the `__Host-console_session` cookie, or switch to a Go API key.
 
 ---
 
 ## What you see
 
-`go/status` returns three meters, each with a used and a limit amount. They are the figures OpenCode enforces and shows on the Go page. onWatch shows them as the **5-Hour**, **Weekly** and **Monthly** cards, with the percentage and the dollar amount (for example `$3.84 / $30.00`). Nothing is estimated, and there is no price table to keep in sync.
+Both sources return the subscription's three meters. onWatch shows them as the **5-Hour** (Rolling), **Weekly** and **Monthly** cards with the percentage OpenCode enforces and shows on the Go page.
 
-- **5-Hour** is a session window. While a session is open it carries its reset time. With no open session it shows 0% and no reset time.
+- **5-Hour** is a rolling session window with its own reset time.
 - **Weekly** resets at the time the API reports.
-- **Monthly** renews with the subscription period. Its reset is the period end the API reports, so no reset day needs to be configured.
+- **Monthly** renews with the subscription period; its reset is the period end the API reports, so no reset day needs to be configured. A plan without a monthly window simply omits that card.
 
-Amounts are stored in USD. Snapshots taken before this change were stored as percentages (limit 100), so the logging history shows a short window of mixed units after upgrading. Charts and cycle history use the percentage and are unaffected. If you set an **absolute** notification threshold for an OpenCode quota, it is now compared in dollars; percentage thresholds are unchanged.
+Key mode reports an integer percentage per window; session mode reports micro-cents, which onWatch stores as USD. Charts and cycle history use the percentage either way. A key and a session for the same account show the same percentages.
 
-onWatch reuses a status response for 60 seconds, so a poll interval shorter than that does not add requests.
+onWatch reuses a response for 60 seconds, so a poll interval shorter than that does not add requests.
 
 ---
 
-## Option 1: Service-account key (recommended)
+## Option 1: Go API key (recommended)
 
-1. In the OpenCode console, open **Keys -> Add Service Account** and create a key with **usage read** access. Keys look like `oc_sk_...`.
+1. In the OpenCode console, open **Keys -> Add Service Account** (or your Go API key) and create a key with **usage read** access. Keys look like `oc_sk_...`.
 2. Set it (or paste it into **Settings -> Providers -> OpenCode Go -> Usage API Key**):
 
    ```bash
@@ -37,6 +37,8 @@ onWatch reuses a status response for 60 seconds, so a poll interval shorter than
    ```
 
 The meters belong to the Go subscription the key resolves to. To track a different subscription, use a key from that subscription's workspace.
+
+The `onwatch setup` wizard offers **OpenCode Go only** (or add it under **Multiple** / **All available**). Paste a key to have it verified with one read-only request, or paste a `wrk_...` workspace ID to switch to session-cookie mode.
 
 ---
 
@@ -71,7 +73,7 @@ You can also set them in **Settings -> Providers -> OpenCode Go** (**Workspace I
 
 ## Reload / Restart
 
-Settings changes take effect after a daemon restart:
+Saving a key or enable flag in **Settings -> Providers** applies live - onWatch starts (or restarts) the OpenCode Go agent without a daemon restart. A restart is still safe:
 
 ```bash
 onwatch stop
@@ -80,7 +82,7 @@ onwatch
 
 Or verify in the foreground with `onwatch --debug`. You should see `OpenCode poll complete` with `quota_count=3`.
 
-Then open http://localhost:9211, switch to the **OpenCode** tab, and confirm the 5-Hour, Weekly and Monthly cards populate. Charts, cycle overview and insights fill in after a few polls.
+Then open http://localhost:9211, switch to the **OpenCode** tab, and confirm the 5-Hour, Weekly and Monthly cards populate. Charts, cycle overview and insights fill in after a few polls. The macOS menubar shows the OpenCode Go card once a poll has produced data.
 
 ---
 
@@ -88,7 +90,7 @@ Then open http://localhost:9211, switch to the **OpenCode** tab, and confirm the
 
 - Never commit `.env` or paste the key or cookie into issue reports / logs
 - onWatch redacts `api_key` and `auth_cookie` from `/api/settings` responses
-- `go/status` responses are never written to logs or echoed in errors (they contain account IDs)
+- Response bodies are never written to logs or echoed in errors (they contain account IDs)
 - The session cookie is only sent to `opencode.ai`, and redirects are never followed
 - All processing stays local on your machine
 
@@ -96,10 +98,10 @@ Then open http://localhost:9211, switch to the **OpenCode** tab, and confirm the
 
 ## Limitations & Notes
 
-- `go/status` is undocumented. If OpenCode changes its shape, onWatch reports a parse failure rather than showing wrong numbers.
-- Session cookie lifetime is controlled by OpenCode. Expect to refresh it after logout or session rotation; a service-account key avoids this.
+- The usage routes are undocumented. If OpenCode changes their shape, onWatch reports a parse failure rather than showing wrong numbers.
+- Session cookie lifetime is controlled by OpenCode. Expect to refresh it after logout or session rotation; a Go API key avoids this.
 - The workspace ID is required in session mode; onWatch does not auto-discover workspaces.
-- The console usage export (`/console/api/v1/usage/export`) is not used: its Go rows carry no cost, and since 25 September 2026 it answers 403 to service-account keys while OpenCode migrates its usage records. See [anomalyco/opencode#50912](https://github.com/anomalyco/opencode/issues/50912), which also describes `go/status`.
+- The console usage export (`/console/api/v1/usage/export`) is not used: its Go rows carry no cost, and it answers 403 to service-account keys. See [anomalyco/opencode#50912](https://github.com/anomalyco/opencode/issues/50912).
 
 ---
 
@@ -108,21 +110,21 @@ Then open http://localhost:9211, switch to the **OpenCode** tab, and confirm the
 ### No OpenCode tab
 
 - Confirm `OPENCODE_GO_API_KEY` is set, or both `OPENCODE_GO_WORKSPACE_ID` and `OPENCODE_GO_AUTH_COOKIE`
-- Restart onWatch and check `--debug` logs for missing-config messages
+- Check the log for `OpenCode Go not configured; skipping polling` (no credential) or `provider enabled but not configured` (enabled with no key). Both name the setting to fix.
 
 ### Unauthorized / forbidden
 
-- **Key:** check the service-account key still exists and has usage read access. A 403 on a key that used to work usually means OpenCode changed what service-account keys may read.
+- **Key:** check the Go API key still exists and has usage read access. The log names the setting: `check the OpenCode Go Usage API Key in Settings`.
 - **Session:** the log says `paste the __Host-console_session cookie`. Re-copy a fresh `__Host-console_session` value while signed in; the old `auth` cookie is rejected. A `400` / invalid response usually means the workspace ID is wrong.
 - A 429 means the API is rate limiting; onWatch skips that poll and tries again on the next one.
 
 ### Parse failed / response format changed
 
-OpenCode likely changed the `go/status` response. File an issue with:
+OpenCode likely changed the usage response. File an issue with:
 
 - Approximate time of failure
 - Whether the browser console still shows 5h / weekly / monthly usage
-- **Do not** attach keys, cookies or raw `go/status` responses (they contain account IDs)
+- **Do not** attach keys, cookies or raw responses (they contain account IDs)
 
 ### Docker / headless
 

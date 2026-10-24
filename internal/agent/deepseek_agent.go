@@ -98,6 +98,7 @@ func (a *DeepSeekAgent) poll(ctx context.Context) {
 			return
 		}
 		a.logger.Error("Failed to fetch DeepSeek balance", "error", err)
+		pollFailed("deepseek", "", err)
 		return
 	}
 	a.backoff.Reset()
@@ -120,6 +121,9 @@ func (a *DeepSeekAgent) poll(ctx context.Context) {
 			a.logger.Error("DeepSeek tracker processing failed", "error", err)
 		}
 	}
+	// Published after the write, so listeners (the dashboard response cache,
+	// the menubar prebuild) see the new snapshot.
+	pollSucceeded("deepseek", "")
 
 	// Report to session manager for usage-based session detection
 	// Inverting for balance: smaller balance means usage

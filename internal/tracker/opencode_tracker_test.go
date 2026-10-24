@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -283,4 +284,36 @@ func TestOpenCodeTracker_Process_IdleCycleAdoptsSessionReset(t *testing.T) {
 	if err != nil || len(h) != 1 || h[0].PeakUtilization != 9 {
 		t.Fatalf("history = %+v (err %v), want one closed cycle with peak 9", h, err)
 	}
+}
+
+// Two overlapping agent Runs can share one tracker (main.go builds every fresh
+// OpenCode agent over the same opencodeTr). Process must be safe under
+// concurrent use; the maps had no lock. Run under -race.
+func TestOpenCodeTracker_ProcessConcurrentIsRaceFree(t *testing.T) {
+	s := newTestOpenCodeStore(t)
+	tr := NewOpenCodeTracker(s, slog.Default())
+
+	now := time.Now().UTC()
+	resetsAt := now.Add(5 * time.Hour)
+	snapshot := func(util float64) *api.OpenCodeSnapshot {
+		return &api.OpenCodeSnapshot{
+			CapturedAt: now,
+			Quotas: []api.OpenCodeQuota{
+				{Name: "five_hour", Utilization: util, Format: api.OpenCodeQuotaFormatPercent, ResetsAt: &resetsAt},
+				{Name: "weekly", Utilization: util, Format: api.OpenCodeQuotaFormatPercent, ResetsAt: &resetsAt},
+			},
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				_ = tr.Process(snapshot(float64((n + j) % 100)))
+			}
+		}(i)
+	}
+	wg.Wait()
 }

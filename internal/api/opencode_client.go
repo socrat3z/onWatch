@@ -1,9 +1,7 @@
 package api
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -26,12 +24,14 @@ var (
 type OpenCodeClient struct {
 	httpClient  *http.Client
 	logger      *slog.Logger
-	goStatusURL string
+	goUsageURL  string // key-authenticated /zen/go/v1/usage
+	goStatusURL string // console /console/api/go/status (browser session)
 
-	usageMu     sync.Mutex
-	usageStatus *openCodeGoStatus // last good go/status, reused for openCodeUsageMinInterval
-	usageKey    string            // credential the cached status belongs to
-	usageAt     time.Time
+	usageMu       sync.Mutex
+	usageStatus   *openCodeZenUsage // last good usage doc, reused for openCodeUsageMinInterval
+	goStatusCache *openCodeGoStatus // last good console status, same reuse window
+	usageKey      string            // credential the cached document belongs to
+	usageAt       time.Time
 }
 
 type OpenCodeClientOption func(*OpenCodeClient)
@@ -51,6 +51,7 @@ func WithOpenCodeTimeout(timeout time.Duration) OpenCodeClientOption {
 func WithOpenCodeBaseURL(baseURL string) OpenCodeClientOption {
 	return func(c *OpenCodeClient) {
 		baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+		c.goUsageURL = baseURL + openCodeGoUsagePath
 		c.goStatusURL = baseURL + openCodeGoStatusPath
 	}
 }
@@ -77,33 +78,13 @@ func NewOpenCodeClient(logger *slog.Logger, opts ...OpenCodeClientOption) *OpenC
 			},
 		},
 		logger:      logger,
+		goUsageURL:  openCodeDefaultBaseURL + openCodeGoUsagePath,
 		goStatusURL: openCodeDefaultBaseURL + openCodeGoStatusPath,
 	}
 	for _, o := range opts {
 		o(c)
 	}
 	return c
-}
-
-// FetchSnapshot reads the Go meters with the browser's console session. The
-// console authenticates with the __Host-console_session cookie and needs the
-// workspace ID as x-org-id; the old auth cookie and the /workspace/<id>/go
-// page no longer work (issue #134).
-func (c *OpenCodeClient) FetchSnapshot(ctx context.Context, workspaceID, sessionCookie string) (*OpenCodeSnapshot, error) {
-	workspaceID = strings.TrimSpace(workspaceID)
-	sessionCookie = strings.TrimSpace(sessionCookie)
-	if workspaceID == "" || sessionCookie == "" {
-		return nil, ErrOpenCodeMissingConfig
-	}
-	cookieHeader := openCodeConsoleCookieHeader(sessionCookie)
-	snap, err := c.goStatusSnapshot(ctx, "cookie\x00"+workspaceID+"\x00"+cookieHeader, func(req *http.Request) {
-		req.Header.Set("Cookie", cookieHeader)
-		req.Header.Set("x-org-id", workspaceID)
-	})
-	if errors.Is(err, ErrOpenCodeUnauthorized) {
-		return nil, fmt.Errorf("%w: paste the __Host-console_session cookie from opencode.ai/console", err)
-	}
-	return snap, err
 }
 
 // openCodeConsoleCookieHeader sends a bare value as __Host-console_session and

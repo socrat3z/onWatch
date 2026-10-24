@@ -20,7 +20,6 @@
             --font-lg: 12px;
             --font-xl: 13px;
 
-            --chart-size: 40px;
             --chart-stroke: 4px;
 
             --bg-body: #0d0d0d;
@@ -37,8 +36,6 @@
             --scrollbar-thumb-soft-hover: rgba(255, 255, 255, 0.25);
             --scrollbar-thumb: rgba(255, 255, 255, 0.22);
             --scrollbar-thumb-hover: rgba(255, 255, 255, 0.32);
-            --quota-center: rgba(0, 0, 0, 0.52);
-            --quota-percent-stroke: rgba(0, 0, 0, 0.82);
             --footer-divider: rgba(255, 255, 255, 0.18);
             --footer-refresh-hover-bg: rgba(255, 255, 255, 0.08);
             --footer-refresh-hover-border: rgba(255, 255, 255, 0.12);
@@ -46,12 +43,24 @@
             --text-primary: #ffffff;
             --text-soft: rgba(255, 255, 255, 0.78);
             --text-muted: rgba(255, 255, 255, 0.5);
+            /* Near-white secondary for dense metadata (reset/usage lines):
+               ~80% opacity clears WCAG AA 4.5:1 on the dark card. */
+            --text-secondary: rgba(255, 255, 255, 0.82);
 
             --healthy: #22c55e;
             --warning: #f59e0b;
             --critical: #ef4444;
             --track: rgba(255, 255, 255, 0.08);
             --focus: rgba(96, 165, 250, 0.42);
+            /* "Needs action" dot: a saturated amber, deliberately brighter and
+               more orange than --warning so a paused/reconnect card reads as a
+               call to action, not just high usage. */
+            --attention: #fbbf24;
+            --attention-halo: rgba(251, 191, 36, 0.22);
+            /* Stale (older than the provider cadence): amber label, hollow dot.
+               Deliberately distinct from --attention so a stale-only card does
+               not read as needing a user action. */
+            --stale: #fbbf24;
         }
 
         :root[data-theme="light"] {
@@ -70,16 +79,20 @@
             --scrollbar-thumb-soft-hover: rgba(15, 23, 42, 0.34);
             --scrollbar-thumb: rgba(15, 23, 42, 0.3);
             --scrollbar-thumb-hover: rgba(15, 23, 42, 0.42);
-            --quota-center: rgba(248, 250, 252, 0.92);
-            --quota-percent-stroke: rgba(255, 255, 255, 0.95);
             --footer-divider: rgba(15, 23, 42, 0.26);
             --footer-refresh-hover-bg: rgba(15, 23, 42, 0.1);
             --footer-refresh-hover-border: rgba(15, 23, 42, 0.2);
             --text-primary: #0f172a;
             --text-soft: rgba(15, 23, 42, 0.82);
             --text-muted: rgba(15, 23, 42, 0.62);
+            /* Darker secondary for dense metadata on the light card. */
+            --text-secondary: rgba(15, 23, 42, 0.78);
             --track: rgba(15, 23, 42, 0.12);
             --focus: rgba(37, 99, 235, 0.45);
+            /* Darker amber on the light card so the dot keeps contrast. */
+            --attention: #d97706;
+            --attention-halo: rgba(217, 119, 6, 0.2);
+            --stale: #b45309;
         }
 
         * {
@@ -441,37 +454,96 @@
             letter-spacing: -0.01em;
         }
 
-        .promo-tag {
+        /* Peak/off-peak chip next to the provider name. Its tooltip is a child
+           node shown on hover/focus; the chip is compact and truncates before
+           it can push the age label or status dot off the card. */
+        .peak-chip-wrap {
+            position: relative;
+            display: inline-flex;
+            min-width: 0;
+            flex-shrink: 1;
+            margin-left: 4px;
+            border-radius: 999px;
+        }
+
+        .peak-chip-wrap:focus-visible {
+            outline: 2px solid var(--focus);
+            outline-offset: 2px;
+        }
+
+        .peak-chip {
             display: inline-flex;
             align-items: center;
+            max-width: 112px;
             padding: 1px 6px;
             border-radius: 999px;
             font-size: 9px;
             font-weight: 600;
             letter-spacing: 0.02em;
-            margin-left: 4px;
-            text-decoration: none;
-            cursor: pointer;
-            flex-shrink: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex-shrink: 1;
+            min-width: 0;
         }
 
-        .promo-tag.promo-offpeak {
+        .peak-chip.promo-offpeak {
             background: transparent;
             color: var(--text-muted);
             padding: 0 4px;
         }
 
-        .promo-tag.promo-offpeak:hover {
-            color: var(--text-primary);
+        .peak-chip.reset-chip {
+            background: rgba(16, 163, 127, 0.14);
+            color: #10A37F;
         }
 
-        .promo-tag.promo-peak {
+        :root[data-theme="light"] .peak-chip.reset-chip {
+            background: rgba(13, 128, 100, 0.12);
+            color: #0D8064;
+        }
+
+        .peak-chip.promo-peak {
             background: rgba(239, 68, 68, 0.15);
             color: #EF4444;
         }
 
-        .promo-tag.promo-peak:hover {
-            background: rgba(239, 68, 68, 0.25);
+        :root[data-theme="light"] .peak-chip.promo-peak {
+            background: rgba(220, 38, 38, 0.12);
+            color: #B91C1C;
+        }
+
+        .peak-chip-tip {
+            display: none;
+            position: absolute;
+            top: calc(100% + 6px);
+            left: 0;
+            z-index: 40;
+            max-width: 220px;
+            width: max-content;
+            padding: 5px 8px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: var(--bg-card-strong);
+            color: var(--text-primary);
+            font-size: var(--font-xs);
+            font-weight: 500;
+            line-height: 1.3;
+            letter-spacing: 0;
+            text-align: left;
+            white-space: normal;
+            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
+            pointer-events: none;
+        }
+
+        .peak-chip-wrap:hover .peak-chip-tip,
+        .peak-chip-wrap:focus-within .peak-chip-tip,
+        .peak-chip-wrap:focus .peak-chip-tip {
+            display: block;
+        }
+
+        :root[data-theme="light"] .peak-chip-tip {
+            box-shadow: 0 6px 18px rgba(15, 23, 42, 0.16);
         }
 
         .provider-updated {
@@ -479,6 +551,175 @@
             color: var(--text-muted);
             font-size: var(--font-xs);
             white-space: nowrap;
+        }
+
+        /* Default-view header meta: freshness label plus a status dot. The dot
+           carries the status; there is no inline status text. */
+        .provider-meta {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            flex-shrink: 0;
+        }
+
+        .provider-status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 999px;
+            background: var(--healthy);
+            flex-shrink: 0;
+        }
+
+        .provider-status-dot.status-warning {
+            background: var(--warning);
+        }
+
+        .provider-status-dot.status-critical,
+        .provider-status-dot.status-danger {
+            background: var(--critical);
+        }
+
+        /* Attention state: the card needs a user action (re-auth, reconnect,
+           browser access). It deliberately does NOT touch background, so the
+           severity classes keep owning the fill: a paused account at 100%
+           still reads red. Attention is a separate amber ring plus a soft
+           halo around the dot, visible on both card surfaces. */
+        .provider-status-dot.status-attention {
+            box-shadow:
+                0 0 0 1.5px var(--attention),
+                0 0 0 3.5px var(--attention-halo);
+        }
+
+        /* Stale data: the age label turns amber and the severity dot becomes a
+           hollow ring (severity color stays the ring, fill is transparent).
+           The card keeps its numbers; staleness never changes severity. On an
+           attention card both treatments show: attention keeps its halo and
+           the stale ring sits inside it. */
+        .provider-updated.is-stale {
+            color: var(--stale);
+            font-weight: 600;
+            cursor: default;
+        }
+
+        /* Wrapper that carries the stale age tooltip; positioned so the tip
+           anchors to the label, not to the card. */
+        .provider-age {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            border-radius: 6px;
+        }
+
+        .provider-age:focus-visible {
+            outline: 2px solid var(--focus);
+            outline-offset: 2px;
+        }
+
+        .provider-age:hover .provider-status-tip,
+        .provider-age:focus-within .provider-status-tip,
+        .provider-age:focus .provider-status-tip {
+            display: block;
+        }
+
+        .provider-age.tip-above .provider-status-tip {
+            top: auto;
+            bottom: calc(100% + 6px);
+        }
+
+        .provider-status-dot.is-stale {
+            background: transparent;
+            box-shadow: inset 0 0 0 1.5px var(--healthy);
+        }
+
+        .provider-status-dot.status-warning.is-stale {
+            box-shadow: inset 0 0 0 1.5px var(--warning);
+        }
+
+        .provider-status-dot.status-critical.is-stale,
+        .provider-status-dot.status-danger.is-stale {
+            box-shadow: inset 0 0 0 1.5px var(--critical);
+        }
+
+        /* Both states at once: the hollow severity ring stays the inner ring,
+           and the attention halo sits outside it. */
+        .provider-status-dot.status-attention.is-stale {
+            box-shadow:
+                inset 0 0 0 1.5px var(--healthy),
+                0 0 0 1.5px var(--attention),
+                0 0 0 3.5px var(--attention-halo);
+        }
+
+        .provider-status-dot.status-warning.status-attention.is-stale {
+            box-shadow:
+                inset 0 0 0 1.5px var(--warning),
+                0 0 0 1.5px var(--attention),
+                0 0 0 3.5px var(--attention-halo);
+        }
+
+        .provider-status-dot.status-critical.status-attention.is-stale,
+        .provider-status-dot.status-danger.status-attention.is-stale {
+            box-shadow:
+                inset 0 0 0 1.5px var(--critical),
+                0 0 0 1.5px var(--attention),
+                0 0 0 3.5px var(--attention-halo);
+        }
+
+        /* Hover/focus tooltip for the dot. Native title tooltips are unreliable
+           inside the non-activating macOS WKWebView panel, so the reason and
+           the action are rendered here. */
+        .provider-status {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            border-radius: 999px;
+        }
+
+        .provider-status:focus-visible {
+            outline: 2px solid var(--focus);
+            outline-offset: 2px;
+        }
+
+        .provider-status-tip {
+            display: none;
+            position: absolute;
+            top: calc(100% + 6px);
+            right: 0;
+            z-index: 40;
+            max-width: 220px;
+            width: max-content;
+            padding: 5px 8px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: var(--bg-card-strong);
+            color: var(--text-primary);
+            font-size: var(--font-xs);
+            font-weight: 500;
+            line-height: 1.3;
+            letter-spacing: 0;
+            text-align: left;
+            white-space: normal;
+            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
+            pointer-events: none;
+        }
+
+        /* display, not opacity: a hidden absolutely positioned tip still
+           contributes scrollable overflow, which would add phantom scroll space
+           to the popover body. */
+        .provider-status:hover .provider-status-tip,
+        .provider-status:focus-within .provider-status-tip,
+        .provider-status:focus .provider-status-tip {
+            display: block;
+        }
+
+        /* The scrollable body clips a tip that hangs past its bottom edge, so a
+           card near the bottom flips its tip above the dot. */
+        .provider-status.tip-above .provider-status-tip {
+            top: auto;
+            bottom: calc(100% + 6px);
+        }
+
+        :root[data-theme="light"] .provider-status-tip {
+            box-shadow: 0 6px 18px rgba(15, 23, 42, 0.16);
         }
 
         .mistral-recovery {
@@ -549,10 +790,20 @@
             align-content: start;
         }
 
+        /* Default view packs cards into explicit rows (computed in JS): each row
+           is a flex line whose cards grow in proportion to their column span, so
+           a row never leaves empty space on the right. */
         .provider-grid-standard {
-            display: grid;
-            grid-template-columns: repeat(6, minmax(0, 1fr));
-            gap: 6px;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .provider-row {
+            display: flex;
+            align-items: stretch;
+            gap: 5px;
+            min-width: 0;
         }
 
         .provider-grid-detailed {
@@ -568,8 +819,12 @@
         }
 
         .provider-card-standard {
-            grid-column: span var(--card-span, 6);
+            /* --card-span is min(quotaCount, 4); grow keeps row proportions. */
+            flex: var(--card-span, 4) 1 0;
             min-width: 0;
+            gap: 2px;
+            padding: 4px 6px;
+            border-radius: 12px;
         }
 
         .provider-card-detailed {
@@ -579,9 +834,37 @@
 
         .quota-grid {
             display: grid;
-            grid-template-columns: repeat(min(var(--quota-count, 1), 3), minmax(0, 1fr));
-            gap: 1px;
+            /* --quota-cols is ringColumns(count): never orphans a lone ring. */
+            grid-template-columns: repeat(var(--quota-cols, 1), minmax(0, 1fr));
+            gap: 2px;
             min-width: 0;
+        }
+
+        /* Default-view density: big ring tiles, tighter chrome than the detailed
+           view. --ring-size is set per card in JS so a four-quota card keeps its
+           rings from crowding the label at 360px. */
+        .menubar-view-standard {
+            --chart-stroke: 4px;
+            --ring-size: 58px;
+        }
+
+        .menubar-view-standard .provider-header {
+            padding-bottom: 0;
+        }
+
+        .menubar-view-standard .provider-icon {
+            width: 14px;
+            height: 14px;
+            -webkit-mask-size: 14px 14px;
+            mask-size: 14px 14px;
+        }
+
+        .menubar-view-standard .provider-name {
+            font-size: 11px;
+        }
+
+        .menubar-view-standard .provider-copy {
+            gap: 5px;
         }
 
         .supplementary-section {
@@ -636,27 +919,42 @@
             letter-spacing: 0;
         }
 
-        .quota-item {
+        /* Default-view ring tile: the ring carries the percent and the reset
+           countdown, and the full label wraps underneath. No inner box - tiles
+           sit directly on the provider card. */
+        .quota-tile {
             display: flex;
             flex-direction: column;
             align-items: center;
-            gap: 1px;
+            gap: 2px;
             min-width: 0;
             color: var(--healthy);
         }
 
-        .quota-item.status-warning {
+        .quota-tile.status-warning {
             color: var(--warning);
         }
 
-        .quota-item.status-critical,
-        .quota-item.status-danger {
+        .quota-tile.status-critical,
+        .quota-tile.status-danger {
             color: var(--critical);
         }
 
+        .quota-ring {
+            position: relative;
+            display: grid;
+            place-items: center;
+            width: var(--ring-size, 58px);
+            height: var(--ring-size, 58px);
+            max-width: 100%;
+            flex-shrink: 0;
+        }
+
         .quota-meter {
-            width: var(--chart-size);
-            height: var(--chart-size);
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
             overflow: visible;
         }
 
@@ -675,32 +973,71 @@
             transform-origin: 20px 20px;
         }
 
-        .quota-center {
-            fill: var(--quota-center);
+        .quota-ring-center {
+            position: relative;
+            display: grid;
+            place-items: center;
+            text-align: center;
+            line-height: 1;
+            color: currentColor;
         }
 
-        .quota-percent {
-            fill: var(--text-primary);
-            font-size: 11px;
+        .quota-ring-pct {
+            font-size: calc(var(--ring-size, 58px) * 0.28);
             font-weight: 700;
-            paint-order: stroke;
-            stroke: var(--quota-percent-stroke);
-            stroke-width: 2.2px;
-            stroke-linejoin: round;
+            line-height: 1;
+            letter-spacing: -0.04em;
+            font-variant-numeric: tabular-nums;
         }
 
-        .quota-label {
-            max-width: 80px;
-            color: var(--text-primary);
-            font-size: var(--font-sm);
+        /* Three digits would touch the ring stroke at the default size. */
+        .quota-ring-pct.is-wide {
+            font-size: calc(var(--ring-size, 58px) * 0.225);
+        }
+
+        .quota-ring-pct.is-wide .quota-ring-unit {
+            font-size: calc(var(--ring-size, 58px) * 0.13);
+        }
+
+        .quota-ring-unit {
+            font-size: calc(var(--ring-size, 58px) * 0.155);
+            font-weight: 700;
+            opacity: 0.72;
+            margin-left: 0.5px;
+        }
+
+        .quota-ring-reset {
+            margin-top: calc(var(--ring-size, 58px) * 0.03);
+            font-size: calc(var(--ring-size, 58px) * 0.155);
             font-weight: 500;
-            line-height: 1.05;
+            line-height: 1;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        .quota-tile-label {
+            max-width: 100%;
+            color: var(--text-soft);
+            font-size: 9.5px;
+            font-weight: 550;
+            line-height: 1.1;
+            text-align: center;
+            overflow-wrap: anywhere;
+            hyphens: auto;
+        }
+
+        .quota-tile-usage {
+            max-width: 100%;
+            color: var(--text-muted);
+            font-size: 8.5px;
+            line-height: 1;
             text-align: center;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
 
+        /* Detailed view reset line (shared by the detailed layout). */
         .quota-reset-line {
             display: inline-flex;
             align-items: center;
@@ -709,17 +1046,6 @@
             font-size: 8px;
             line-height: 1;
             white-space: nowrap;
-        }
-
-        .quota-usage-line {
-            font-size: 8px;
-            color: var(--text-muted);
-            opacity: 0.7;
-            white-space: nowrap;
-        }
-
-        .menubar-view-standard .quota-reset-line {
-            font-size: 9px;
         }
 
         .quota-reset-line svg {
@@ -1365,12 +1691,13 @@
                 grid-template-columns: 1fr;
             }
 
-            .provider-grid-standard {
-                grid-template-columns: 1fr;
+            /* Too narrow for 4 columns: stack every card full width. */
+            .provider-row {
+                flex-wrap: wrap;
             }
 
             .provider-card-standard {
-                grid-column: 1 / -1 !important;
+                flex: 1 1 100% !important;
             }
 
         }
@@ -1380,7 +1707,7 @@
                 grid-template-columns: repeat(2, minmax(0, 1fr));
             }
 
-            .quota-item:last-child:nth-child(odd) {
+            .quota-tile:last-child:nth-child(odd) {
                 grid-column: 1 / -1;
             }
         }
@@ -1446,6 +1773,7 @@
     </main>
 
     <script src="__ONWATCH_BASE_PATH__/static/mistral-recovery.js?v=__ONWATCH_MISTRAL_ASSET_VERSION__"></script>
+    <script src="__ONWATCH_BASE_PATH__/static/peak-hours.js?v=__ONWATCH_PEAK_ASSET_VERSION__"></script>
     <script>
         window.__ONWATCH_MENUBAR__ = __ONWATCH_MENUBAR_BOOTSTRAP__;
 
@@ -1456,6 +1784,11 @@
             const VIEW_STORAGE_KEY = "menubar_view_mode";
             const ORDER_STORAGE_KEY = "menubar_provider_order";
             const THEME_STORAGE_KEY = "menubar_theme_mode";
+            // The last successful summary, so the popover paints instantly on
+            // open instead of flashing a loading card. One versioned entry,
+            // overwritten on every success.
+            const SNAPSHOT_CACHE_KEY = "menubar_snapshot_cache";
+            const SNAPSHOT_CACHE_VERSION = 1;
             const VIEW_ORDER = ["minimal", "standard", "detailed"];
             const THEME_MODES = ["system", "light", "dark"];
 
@@ -1541,8 +1874,10 @@
             const settingsNote = document.getElementById("settings-note");
             const footerVersion = document.getElementById("footer-version");
             let refreshTimer = null;
+            let ageTickTimer = null;
             let resizeFrame = 0;
             let resizeTimer = 0;
+            let lastReportedHeight = null;
             let autoSaveTimer = null;
             // Without the recovery script the rest of the quick view must still work.
             const mistralRecovery = !window.MistralRecovery ? { suspended: false, markup: () => "", grantResult() {}, hide() {} } : new window.MistralRecovery({
@@ -1558,9 +1893,16 @@
                 mistralRecovery.grantResult(result);
                 if (refresh && result !== 'idle' && result !== 'pending') void loadSnapshot();
             };
+            // Native hosts call this from the popover show path. It is the
+            // same coalesced fresh fetch, not a no-op soft refresh.
+            window.__onwatchMenubarShown = () => {
+                requestFreshSnapshot();
+            };
             window.__onwatchMenubarRefresh = () => {
                 mistralRecovery.suspended = false;
                 sendNativeAction('browser_access_status');
+                // Always a real fetch (cache: "no-store"), coalesced with any
+                // in-flight request by the generation guard.
                 void refreshData();
             };
 
@@ -1622,20 +1964,59 @@
             settingsBody.addEventListener("dragover", handleSettingsDragOver);
             settingsBody.addEventListener("drop", handleSettingsDrop);
             settingsBody.addEventListener("dragend", handleSettingsDragEnd);
+            // Flip a status tooltip above its dot when it would be clipped by
+            // the bottom of the scrollable body. Event delegation keeps this
+            // working across re-renders, and the tip is shown by CSS hover, so
+            // mouseover/focus is the first moment it has a measurable box.
+            const positionTipFor = (event) => {
+                if (!(event.target instanceof Element)) {
+                    return;
+                }
+                const status = event.target.closest(".provider-status, .provider-age");
+                if (status) {
+                    positionStatusTip(status);
+                }
+            };
+            document.addEventListener("mouseover", positionTipFor);
+            document.addEventListener("focusin", positionTipFor);
             window.addEventListener("resize", queueResizeReport);
-
-            init();
+            // A host that missed the first report (bridge or iframe listener not
+            // yet ready) must still get a later one. Re-arm the debounce on
+            // visibility/focus so a same-height report is not suppressed forever.
+            const rearmResizeReport = () => {
+                resizeReportDelivered = false;
+                queueResizeReport();
+            };
+            document.addEventListener("visibilitychange", () => {
+                if (!document.hidden) {
+                    rearmResizeReport();
+                    // Timers are throttled or suspended in a hidden popover, so
+                    // catch up immediately on show instead of waiting a tick.
+                    requestFreshSnapshot();
+                }
+            });
+            window.addEventListener("focus", () => {
+                rearmResizeReport();
+                requestFreshSnapshot();
+            });
 
             async function init() {
                 applyTheme();
+                // Paint the last-known snapshot immediately, then fetch. Ages
+                // are computed from the stored timestamps, so a restored
+                // snapshot shows its real age rather than looking live. The
+                // guarded variant clears a cache that cannot render and falls
+                // back to the empty state, so startup always reaches the fetch.
+                restoreCachedSnapshotSafely();
                 render();
                 await Promise.all([loadPreferences(), loadSnapshot()]);
             }
 
             async function loadPreferences() {
                 try {
-                    const response = await fetch(API_BASE + "/api/menubar/preferences", {
+                    const response = await menubarFetch(API_BASE + "/api/menubar/preferences", {
                         credentials: "same-origin",
+                        cache: "no-store",
                         headers: { "Accept": "application/json" }
                     });
                     if (!response.ok) {
@@ -1672,37 +2053,181 @@
                 }
             }
 
+            // Manual, periodic, native-show and recovery refreshes can overlap.
+            // Each request takes a generation when it starts, and a response
+            // is applied and persisted only if it is newer than the last one
+            // applied. The snapshot's generated_at is a second guard, so a
+            // request that started later but carries an older build cannot
+            // roll the numbers and ages backwards either.
+            let snapshotGeneration = 0;
+            let appliedSnapshotGeneration = 0;
+            let appliedSnapshotTime = null;
+
+            function snapshotBuildTime(snapshot) {
+                const raw = snapshot && (snapshot.generated_at || snapshot.generatedAt);
+                const parsed = raw ? Date.parse(raw) : NaN;
+                return Number.isFinite(parsed) ? parsed : null;
+            }
+
+            function isNewerSnapshot(generation, snapshot) {
+                if (generation <= appliedSnapshotGeneration) {
+                    return false;
+                }
+                const built = snapshotBuildTime(snapshot);
+                if (built !== null && appliedSnapshotTime !== null && built < appliedSnapshotTime) {
+                    return false;
+                }
+                return true;
+            }
+
+            function applySnapshot(generation, snapshot) {
+                if (!isNewerSnapshot(generation, snapshot)) {
+                    return false;
+                }
+                appliedSnapshotGeneration = generation;
+                const built = snapshotBuildTime(snapshot);
+                if (built !== null) {
+                    appliedSnapshotTime = built;
+                }
+                state.snapshot = snapshot;
+                state.error = "";
+                // Live state and the persisted cache follow the same rule.
+                writeCachedSnapshot(snapshot);
+                return true;
+            }
+
+            // Every request gets a deadline. The daemon can accept the socket
+            // and never reply; without one the in-flight flag never clears,
+            // later show/focus refreshes are swallowed and the 60s tick piles
+            // up hung connections until the host's per-origin limit blocks
+            // preference saves. A timeout rejects like any other failure, so
+            // the last data stays on screen.
+            const MENUBAR_FETCH_TIMEOUT_MS = 20000;
+            function menubarFetch(url, options, timeoutMs) {
+                const opts = Object.assign({}, options || {});
+                const controller = new AbortController();
+                const external = opts.signal;
+                if (external) {
+                    if (external.aborted) {
+                        controller.abort();
+                    } else {
+                        external.addEventListener("abort", () => controller.abort(), { once: true });
+                    }
+                }
+                // jsdom/node keep the process alive for a pending timer, so a
+                // hung request must always be released (real browsers abort the
+                // fetch itself at this deadline).
+                const timer = setTimeout(() => {
+                    const timeout = new Error("request timed out");
+                    timeout.name = "TimeoutError";
+                    controller.abort(timeout);
+                }, timeoutMs > 0 ? timeoutMs : MENUBAR_FETCH_TIMEOUT_MS);
+                opts.signal = controller.signal;
+                return fetch(url, opts).finally(() => clearTimeout(timer));
+            }
+
             async function loadSnapshot(signal) {
-                state.loading = state.snapshot == null;
-                render();
+                const generation = ++snapshotGeneration;
+                if (generation > appliedSnapshotGeneration && state.snapshot == null && !state.loading) {
+                    // Only the very first load shows a placeholder; with data on
+                    // screen a refresh repaints once, when the answer arrives.
+                    state.loading = true;
+                    render();
+                }
                 try {
-                    const response = await fetch(API_BASE + "/api/menubar/summary", {
+                    const response = await menubarFetch(API_BASE + "/api/menubar/summary", {
                         signal,
                         credentials: "same-origin",
+                        cache: "no-store",
                         headers: { "Accept": "application/json" }
                     });
                     if (!response.ok) {
                         throw new Error(`summary ${response.status}`);
                     }
-                    state.snapshot = await response.json();
-                    state.error = "";
+                    if (response.headers && response.headers.get("X-Onwatch-Refreshing") === "1") {
+                        scheduleRefreshFollowUp();
+                    }
+                    applySnapshot(generation, await response.json());
                 } catch (error) {
                     if (signal) throw error;
-                    state.error = error && error.message ? error.message : "Unable to load menubar data.";
+                    // A superseded request's failure must not replace the error
+                    // state of a newer, already-applied snapshot.
+                    if (generation >= appliedSnapshotGeneration) {
+                        state.error = error && error.message ? error.message : "Unable to load menubar data.";
+                    }
                 } finally {
-                    state.loading = false;
+                    if (generation >= appliedSnapshotGeneration) {
+                        state.loading = false;
+                    }
                     render();
                 }
+            }
+
+            // The daemon answered from its cache while a rebuild runs: fetch
+            // once more shortly after to pick up the rebuilt snapshot. One
+            // pending follow-up at a time.
+            // A follow-up's own answer never schedules another one, so a
+            // daemon whose builds keep failing cannot drive a fetch loop.
+            let refreshFollowUpTimer = null;
+            let refreshFollowUpAt = 0;
+            function scheduleRefreshFollowUp() {
+                if (refreshFollowUpTimer || Date.now() - refreshFollowUpAt < 10000) {
+                    return;
+                }
+                refreshFollowUpTimer = window.setTimeout(() => {
+                    refreshFollowUpTimer = null;
+                    refreshFollowUpAt = Date.now();
+                    requestFreshSnapshot();
+                }, 1500);
             }
 
             async function refreshData() {
                 await Promise.all([loadPreferences(), loadSnapshot()]);
             }
 
+            // requestFreshSnapshot is the show/visibility path: every time the
+            // popover becomes visible (native show, window focus, tab
+            // visibility) ask for a summary, so a page whose timers were
+            // suspended catches up immediately. It rides the existing
+            // generation guard and coalesces with any in-flight fetch, so a
+            // burst of show/focus events cannot stack requests.
+            let pendingFreshSnapshot = false;
+            let freshSnapshotInFlight = false;
+            function requestFreshSnapshot() {
+                if (freshSnapshotInFlight) {
+                    pendingFreshSnapshot = true;
+                    return;
+                }
+                freshSnapshotInFlight = true;
+                pendingFreshSnapshot = false;
+                void loadSnapshot().finally(() => {
+                    freshSnapshotInFlight = false;
+                    if (pendingFreshSnapshot) {
+                        pendingFreshSnapshot = false;
+                        requestFreshSnapshot();
+                    }
+                });
+            }
+
+            // Native popover hosts: macOS registers one WKScriptMessageHandler per
+            // channel; Windows (WebView2) has a single string channel, so the
+            // message is wrapped with its channel name for the host to route.
+            function nativeHandler(name) {
+                const webkit = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[name];
+                if (webkit && typeof webkit.postMessage === "function") {
+                    return webkit;
+                }
+                const webview2 = window.chrome && window.chrome.webview;
+                if (webview2 && typeof webview2.postMessage === "function") {
+                    return { postMessage: (body) => webview2.postMessage(JSON.stringify({ channel: name, body })) };
+                }
+                return null;
+            }
+
             function sendNativeAction(action) {
                 try {
-                    const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.onwatchAction;
-                    if (handler && typeof handler.postMessage === "function") {
+                    const handler = nativeHandler("onwatchAction");
+                    if (handler) {
                         handler.postMessage(action);
                         return true;
                     }
@@ -1741,7 +2266,7 @@
 
             function closeMenubar() {
                 mistralRecovery.hide();
-                // Native hosts (macOS WKWebView / GNOME WebKitGTK) hide the popover.
+                // Native hosts (macOS WKWebView / Windows WebView2) hide the popover.
                 if (sendNativeAction("close")) {
                     return;
                 }
@@ -1768,6 +2293,7 @@
                     const response = await fetch(API_BASE + "/api/menubar/preferences", {
                         method: "PUT",
                         credentials: "same-origin",
+                        cache: "no-store",
                         headers: {
                             "Accept": "application/json",
                             "Content-Type": "application/json",
@@ -1823,6 +2349,7 @@
                     const response = await fetch(API_BASE + "/api/menubar/preferences", {
                         method: "PUT",
                         credentials: "same-origin",
+                        cache: "no-store",
                         headers: {
                             "Accept": "application/json",
                             "Content-Type": "application/json",
@@ -2062,42 +2589,59 @@
                 headerValue.classList.remove("hidden");
                 headerValue.setAttribute("aria-hidden", "false");
                 headerCount.textContent = `${providers.length} ${providers.length === 1 ? "provider" : "providers"}`;
-                headerUpdated.textContent = compactUpdatedLabel(state.snapshot && state.snapshot.updated_ago);
+                // Header age tracks the newest provider data (latest_at), not
+                // the snapshot build time, so it keeps growing when every
+                // provider has stopped polling.
+                headerUpdated.textContent = ageLabelFromTimestamp(
+                    state.snapshot && state.snapshot.latest_at,
+                    state.snapshot && state.snapshot.updated_ago
+                );
+            }
+
+            // setHTML writes markup only when it differs from what this
+            // element last received. A refresh that brings the same numbers
+            // (most of them) then costs no DOM work: no SVG rebuild, no layout,
+            // no repaint flicker. Ages updated in place between renders stay.
+            function setHTML(el, html) {
+                if (el.__onwatchHTML === html) {
+                    return;
+                }
+                el.innerHTML = html;
+                el.__onwatchHTML = html;
             }
 
             function renderBody() {
                 if (state.loading && !state.snapshot) {
-                    body.innerHTML = renderStateCard("Loading", "Fetching quota snapshot");
+                    setHTML(body, renderStateCard("Loading", "Fetching quota snapshot"));
                     return;
                 }
                 if (state.error && !state.snapshot) {
-                    body.innerHTML = renderStateCard("Unavailable", state.error);
+                    setHTML(body, renderStateCard("Unavailable", state.error));
                     return;
                 }
                 if (!state.snapshot || !Array.isArray(state.snapshot.providers) || state.snapshot.providers.length === 0) {
-                    body.innerHTML = renderStateCard("No Data", "Enable a provider to fill the tray.");
+                    setHTML(body, renderStateCard("No Data", "Enable a provider to fill the tray."));
                     return;
                 }
                 const providers = visibleProviders();
-                storeMenubarPromos(providers);
                 if (providers.length === 0) {
-                    body.innerHTML = renderStateCard("No Data", "Choose at least one provider.");
+                    setHTML(body, renderStateCard("No Data", "Choose at least one provider."));
                     return;
                 }
                 if (state.view === "minimal") {
-                    body.innerHTML = renderMinimalView(providers);
+                    setHTML(body, renderMinimalView(providers));
                     return;
                 }
                 if (state.view === "detailed") {
-                    body.innerHTML = renderDetailedView(providers);
+                    setHTML(body, renderDetailedView(providers));
                     return;
                 }
-                body.innerHTML = renderStandardView(providers);
+                setHTML(body, renderStandardView(providers));
             }
 
             function renderSettings() {
                 if (!state.settingsOpen || !state.draft) {
-                    settingsBody.innerHTML = "";
+                    setHTML(settingsBody, "");
                     document.getElementById("settings-save").disabled = false;
                     return;
                 }
@@ -2108,6 +2652,7 @@
                 const statusOptions = selectableStatusQuotaOptions();
                 const selectedKeys = new Set(draft.status_display.selected_quotas.map((selection) => statusSelectionKey(selection)));
                 const selectedCount = draft.status_display.selected_quotas.length;
+                settingsBody.__onwatchHTML = null;
                 settingsBody.innerHTML = `
                     <section class="settings-section">
                         <h2>Appearance</h2>
@@ -2226,10 +2771,56 @@
                 });
             }
 
+            const STANDARD_COLUMNS = 4;
+
+            // ringColumns keeps rings from orphaning on their own line: 4 fits
+            // one row, 5 splits 3+2 and 6 splits 3+3. Never exceeds 4. Above 6
+            // (rare) pick the widest column count that leaves no lone ring.
+            function ringColumns(count) {
+                if (count <= 1) return 1;
+                if (count === 2) return 2;
+                if (count === 3) return 3;
+                if (count === 4) return 4;
+                if (count === 5 || count === 6) return 3;
+                for (let columns = 4; columns >= 2; columns--) {
+                    if (count % columns !== 1) return columns;
+                }
+                return 4;
+            }
+
+            // packStandardRows greedily fills rows in the user's provider order
+            // without pulling later cards forward: a card joins the current row
+            // only if its span fits in the columns left, otherwise it starts a
+            // new row. Every row then stretches to the full width via flex-grow.
+            function packStandardRows(providers) {
+                const rows = [];
+                let row = [];
+                let used = 0;
+                providers.forEach((provider) => {
+                    const span = cardSpan(provider);
+                    if (row.length > 0 && used + span > STANDARD_COLUMNS) {
+                        rows.push(row);
+                        row = [];
+                        used = 0;
+                    }
+                    row.push({ provider, span });
+                    used += span;
+                });
+                if (row.length > 0) {
+                    rows.push(row);
+                }
+                return rows;
+            }
+
             function renderStandardView(providers) {
+                const rows = packStandardRows(providers);
                 return `
                     <section class="provider-grid provider-grid-standard">
-                        ${providers.map((provider) => renderStandardCard(provider)).join("")}
+                        ${rows.map((row) => `
+                            <div class="provider-row">
+                                ${row.map(({ provider, span }) => renderStandardCard(provider, span)).join("")}
+                            </div>
+                        `).join("")}
                     </section>
                 `;
             }
@@ -2265,15 +2856,233 @@
                 `;
             }
 
-            function renderStandardCard(provider) {
+            function renderStandardCard(provider, span) {
                 const quotas = providerQuotas(provider);
+                const columns = ringColumns(quotas.length);
+                const ringSize = ringSizeForColumns(columns);
                 return `
-                    <article class="provider-card provider-card-standard status-${escapeHTML(provider.status || "healthy")}" style="--card-span:${cardSpan(provider)};">
-                        ${providerHeaderMarkup(provider)}
-                        <div class="quota-grid" style="--quota-count:${Math.max(quotas.length, 1)};">
+                    <article class="provider-card provider-card-standard status-${escapeHTML(provider.status || "healthy")}" style="--card-span:${span || cardSpan(provider)};">
+                        ${standardHeaderMarkup(provider)}
+                        <div class="quota-grid" style="--quota-cols:${columns};--ring-size:${ringSize}px;">
                             ${quotas.map((quota) => renderStandardQuota(quota)).join("")}
                         </div>
                     </article>
+                `;
+            }
+
+            // ringSizeForColumns shrinks the ring when a card packs more quotas,
+            // so a four-quota card keeps clear space around every label at 360px.
+            function ringSizeForColumns(columns) {
+                if (columns >= 4) return 52;
+                if (columns === 3) return 56;
+                return 58;
+            }
+
+            function standardStatusLabel(provider) {
+                const status = String(provider && provider.status || "healthy");
+                if (status === "critical" || status === "danger") return "Critical";
+                if (status === "warning") return "Warning";
+                return "Healthy";
+            }
+
+            // providerStaleNow re-evaluates staleness against this client's
+            // wall clock, so a long-lived popover (or one whose daemon is
+            // unreachable) marks a card stale without a new response. The
+            // server's flag is authoritative; stale_after_seconds lets the 30s
+            // age ticker make the same decision locally.
+            function providerStaleNow(provider) {
+                if (!provider) {
+                    return false;
+                }
+                if (provider.stale === true) {
+                    return true;
+                }
+                const after = Number(provider.stale_after_seconds || 0);
+                if (!(after > 0)) {
+                    return false;
+                }
+                // stale_checked_at wins when present: Anthropic hybrid cards
+                // show the honest oldest quota age but judge freshness on the
+                // statusline-fed primary windows.
+                const checkedAt = String(provider.stale_checked_at || provider.staleCheckedAt || "");
+                const source = checkedAt || String(provider.updated_at_time || provider.updatedAtTime || "");
+                const then = Date.parse(source);
+                if (!Number.isFinite(then) || then <= 0) {
+                    return false;
+                }
+                return (Date.now() - then) / 1000 > after;
+            }
+
+            // providerStaleTooltip is the hover/focus text for a stale card.
+            // A class reason ("network error") is paired with the age; the
+            // generic server reason already reads as "no update in 14m".
+            function providerStaleTooltip(provider) {
+                const reason = String(provider && provider.stale_reason || "").trim();
+                if (!reason) {
+                    return "no update in " + providerAgeLabel(provider);
+                }
+                if (reason.indexOf("no update in") === 0) {
+                    return reason;
+                }
+                const age = providerAgeLabel(provider);
+                const ageText = age === "now" ? "just now" : age + " ago";
+                return "Last updated " + ageText + " - " + reason;
+            }
+
+            // providerAttention is the action a card needs from the user, or
+            // null when there is nothing to do. Staleness is a separate, age
+            // driven state (amber label, hollow dot): it is not an attention
+            // state, because old data usually needs no user action. Attention
+            // wins the dot tooltip wording when both apply.
+            function providerAttention(provider) {
+                if (!provider) {
+                    return null;
+                }
+                if (provider.connection && provider.connection.reason === "browser_access_denied") {
+                    return "Browser access required - allow access from the menu";
+                }
+                const connection = String(provider.connection_status || "");
+                if (connection === "reconnect") {
+                    return "Reconnect required - open the dashboard to reconnect";
+                }
+                if (connection === "paused") {
+                    const base = String(provider.base_provider || provider.id || "").split(":")[0];
+                    if (base === "codex") {
+                        return "Codex auth failed - run `codex auth`";
+                    }
+                    const label = String(provider.label || "Provider");
+                    return `${label} auth failed - re-authenticate to resume`;
+                }
+                return null;
+            }
+
+            // providerDotTitle is the dot's accessible label and tooltip text:
+            // the action the card needs when it has one, otherwise the usage
+            // severity the dot has always carried.
+            function providerDotTitle(provider) {
+                const attention = providerAttention(provider);
+                if (attention) {
+                    return attention;
+                }
+                if (providerStaleNow(provider)) {
+                    return providerStaleTooltip(provider);
+                }
+                const peak = Math.round(clampPercent(provider && provider.highest_percent));
+                return `${standardStatusLabel(provider)} - peak ${peak}%`;
+            }
+
+            // providerStatusMarkup is the right-hand status cluster: the dot
+            // plus its hover/focus tooltip. The tooltip is a custom element
+            // because native title tooltips do not show reliably inside the
+            // non-activating macOS WKWebView panel. The dot keeps an
+            // aria-label so the reason is announced without the tooltip.
+            function providerStatusMarkup(provider) {
+                const status = String(provider && provider.status || "healthy");
+                const dotTitle = providerDotTitle(provider);
+                const attention = providerAttention(provider);
+                const attentionClass = attention ? " status-attention" : "";
+                const stale = providerStaleNow(provider);
+                const staleClass = stale ? " is-stale" : "";
+                // The ticker re-evaluates from these attributes: updated time,
+                // cadence, and both candidate tooltip texts, so a card can go
+                // stale while the daemon is unreachable without a re-render.
+                const severityTitle = `${standardStatusLabel(provider)} - peak ${Math.round(clampPercent(provider.highest_percent))}%`;
+                return `
+                    <span class="provider-status" tabindex="0" role="img" aria-label="${escapeHTML(dotTitle)}" data-updated-at="${escapeHTML(provider.updated_at_time || '')}" data-stale-checked-at="${escapeHTML(provider.stale_checked_at || '')}" data-stale-after="${escapeHTML(String(provider.stale_after_seconds || 0))}" data-attention-title="${escapeHTML(attention || '')}" data-severity-title="${escapeHTML(severityTitle)}">
+                        <span class="provider-status-dot status-${escapeHTML(status)}${attentionClass}${staleClass}"></span>
+                        <span class="provider-status-tip" role="tooltip" aria-hidden="true">${escapeHTML(dotTitle)}</span>
+                    </span>
+                `;
+            }
+
+            // positionStatusTip flips a tip that would hang past the bottom of
+            // the scrollable body up above its dot, so the text is never
+            // clipped by the popover edge. The tip is display:none until it is
+            // shown, so this runs on hover/focus, when it has a real box.
+            function positionStatusTip(el) {
+                el.classList.remove("tip-above");
+                const tip = el.querySelector(".provider-status-tip");
+                if (!tip) {
+                    return;
+                }
+                const container = body.getBoundingClientRect();
+                if (tip.getBoundingClientRect().bottom > container.bottom - 2) {
+                    el.classList.add("tip-above");
+                }
+            }
+
+            // providerAgeMarkup renders the freshness label. A stale label is
+            // amber and gets the same custom tooltip as the dot (hover or
+            // focus), with no inline text added to the card.
+            function providerAgeMarkup(provider) {
+                const stale = providerStaleNow(provider);
+                const label = providerAgeLabel(provider);
+                if (!stale) {
+                    return `<span class="provider-updated" data-updated-at="${escapeHTML(provider.updated_at_time || '')}" data-updated-fallback="${escapeHTML(provider.updated_at || '')}" data-stale-after="${escapeHTML(String(provider.stale_after_seconds || 0))}">${escapeHTML(label)}</span>`;
+                }
+                const tooltip = providerStaleTooltip(provider);
+                return `<span class="provider-age" tabindex="0" role="img" aria-label="${escapeHTML(tooltip)}" data-updated-at="${escapeHTML(provider.updated_at_time || '')}" data-stale-after="${escapeHTML(String(provider.stale_after_seconds || 0))}" data-stale-tooltip="${escapeHTML(tooltip)}">
+                    <span class="provider-updated is-stale" data-updated-at="${escapeHTML(provider.updated_at_time || '')}" data-updated-fallback="${escapeHTML(provider.updated_at || '')}" data-stale-after="${escapeHTML(String(provider.stale_after_seconds || 0))}">${escapeHTML(label)}</span>
+                    <span class="provider-status-tip" role="tooltip" aria-hidden="true">${escapeHTML(tooltip)}</span>
+                </span>`;
+            }
+
+            // Peak chip: an inline helper so the header stays synchronous and
+            // the shared schedule lives in one place (peak-hours.js). Kept in
+            // the header-function region so the node tests that slice that
+            // region evaluate it with no extra stub.
+            function peakChipHTML(provider) {
+                if (!provider || !provider.peak || typeof window === "undefined" || !window.OnWatchPeak) {
+                    return "";
+                }
+                return window.OnWatchPeak.peakChipMarkup(provider.peak);
+            }
+
+            // Codex banked resets: a compact "1 reset" chip in the header,
+            // next to where the peak chip sits on other providers. The daemon
+            // only sends reset_credits when the count is positive.
+            function resetChipHTML(provider) {
+                const rc = provider && provider.reset_credits;
+                const count = rc && Number(rc.count);
+                if (!count || !Number.isFinite(count) || count <= 0) {
+                    return "";
+                }
+                const label = count === 1 ? "1 reset" : `${count} resets`;
+                let tip = count === 1 ? "1 banked reset" : `${count} banked resets`;
+                const expires = rc.next_expires_at ? Date.parse(rc.next_expires_at) : NaN;
+                if (Number.isFinite(expires)) {
+                    const seconds = Math.max(0, (expires - Date.now()) / 1000);
+                    const days = Math.floor(seconds / 86400);
+                    const hours = Math.floor((seconds % 86400) / 3600);
+                    const minutes = Math.floor((seconds % 3600) / 60);
+                    const left = days > 0 ? `${days}d ${hours}h` : (hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`);
+                    tip += ` - next expires in ${left}`;
+                }
+                return `<span class="peak-chip-wrap" tabindex="0" role="img" aria-label="${escapeHTML(label + ". " + tip)}">`
+                    + `<span class="peak-chip reset-chip">${escapeHTML(label)}</span>`
+                    + `<span class="peak-chip-tip" role="tooltip" aria-hidden="true">${escapeHTML(tip)}</span>`
+                    + "</span>";
+            }
+
+            // standardHeaderMarkup keeps the icon next to a normally colored
+            // name, then a compact right cluster with the freshness label and a
+            // status dot whose tooltip carries the status.
+            function standardHeaderMarkup(provider) {
+                return `
+                    <div class="provider-header">
+                        <div class="provider-copy">
+                            <span class="provider-icon ${escapeHTML(providerIconClass(provider))}" aria-hidden="true"></span>
+                            <span class="provider-name">${escapeHTML(provider.label)}</span>
+                            ${peakChipHTML(provider)}
+                            ${resetChipHTML(provider)}
+                        </div>
+                        <span class="provider-meta">
+                            ${providerAgeMarkup(provider)}
+                            ${providerStatusMarkup(provider)}
+                        </span>
+                    </div>
+ ${provider.base_provider === "mistral" && provider.subtitle ? `<div class="quota-detail-meta">${escapeHTML(provider.subtitle)}</div>` : ""}
+ ${provider.base_provider === 'mistral' ? mistralRecovery.markup(provider.connection, provider.connection_status) : ''}
                 `;
             }
 
@@ -2299,14 +3108,39 @@
             }
 
             function renderStandardQuota(quota) {
+                const percent = clampPercent(quota.percent);
                 const usage = usageSummary(quota);
+                const statusNote = quotaStatusNote(quota);
+                const label = fullQuotaLabel(quota);
+                const fullLabel = label + statusNote;
+                const fullValue = usage ? `${usage} used` : `${Math.round(percent)}%`;
+                const reset = compactResetLabel(quota);
+                const resetTitle = `Resets ${quota.time_until_reset || quota.reset_at || 'unknown'}`;
                 return `
-                    <div class="quota-item status-${escapeHTML(quota.status || "healthy")}">
-                        ${pieChartMarkup(quota)}
-                        <span class="quota-label">${escapeHTML(compactQuotaLabel(quota.label, quota.key))}</span>
-                        <span class="quota-reset-line">${icons.clock}<span>${escapeHTML(compactResetLabel(quota))}</span></span>
-                        ${usage ? `<span class="quota-usage-line">${escapeHTML(usage)} used</span>` : ''}
-                        ${sourceTagMarkup(quota)}
+                    <div class="quota-tile status-${escapeHTML(quota.status || "healthy")}">
+                        ${ringMarkup(percent, fullLabel, reset, resetTitle)}
+                        <span class="quota-tile-label" title="${escapeHTML(fullLabel)}">${escapeHTML(label)}</span>
+                        ${usage ? `<span class="quota-tile-usage" title="${escapeHTML(fullValue)}">${escapeHTML(usage)}</span>` : ''}
+                    </div>
+                `;
+            }
+
+            // ringMarkup draws the percent and the reset countdown inside the
+            // ring; the full label and usage live below the ring as tile text.
+            function ringMarkup(percent, fullLabel, reset, resetTitle) {
+                const circumference = 2 * Math.PI * 15.5;
+                const dash = (percent / 100) * circumference;
+                return `
+                    <div class="quota-ring">
+                        <svg class="quota-meter" viewBox="0 0 40 40" aria-hidden="true">
+                            <title>${escapeHTML(fullLabel)}: ${Math.round(percent)}%</title>
+                            <circle class="quota-track" cx="20" cy="20" r="15.5"></circle>
+                            <circle class="quota-fill" cx="20" cy="20" r="15.5" stroke-dasharray="${dash.toFixed(2)} ${circumference.toFixed(2)}"></circle>
+                        </svg>
+                        <span class="quota-ring-center">
+                            <span class="quota-ring-pct${Math.round(percent) >= 100 ? ' is-wide' : ''}">${Math.round(percent)}<span class="quota-ring-unit">%</span></span>
+                            <span class="quota-ring-reset" title="${escapeHTML(resetTitle)}">${escapeHTML(reset)}</span>
+                        </span>
                     </div>
                 `;
             }
@@ -2318,7 +3152,7 @@
                 return `
                     <section class="quota-detail-section status-${escapeHTML(quota.status || "healthy")}">
                         <div class="quota-detail-head">
-                            <span class="quota-detail-label">${escapeHTML(quota.label || compactQuotaLabel(quota.label, quota.key))} ${sourceTagMarkup(quota)}</span>
+                            <span class="quota-detail-label">${escapeHTML((quota.label || compactQuotaLabel(quota.label, quota.key)) + quotaStatusNote(quota))} ${sourceTagMarkup(quota)}</span>
                             <span class="quota-reset-line">${icons.clock}<span>${escapeHTML(compactResetLabel(quota))}</span></span>
                         </div>
 
@@ -2344,27 +3178,16 @@
                         <div class="provider-copy">
                             <span class="provider-icon ${escapeHTML(providerIconClass(provider))}" aria-hidden="true"></span>
                             <span class="provider-name">${escapeHTML(provider.label)}</span>
-                            ${provider.connection?.reason === 'browser_access_denied' ? '<span class="quota-source-tag">Browser access required</span>' : provider.connection_status === 'reconnect' ? '<span class="quota-source-tag">Reconnect required</span>' : provider.connection_status === 'stale' ? '<span class="quota-source-tag">Updates unavailable</span>' : ''}
-                            ${provider.promo ? `<a class="promo-tag ${isPromoOffPeak(provider.promo) ? 'promo-offpeak' : 'promo-peak'}" href="https://www.reddit.com/r/ClaudeAI/comments/1s4idaq/update_on_session_limits/" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${escapeHTML(promoLabel(provider.promo))}</a>` : ''}
+                            ${peakChipHTML(provider)}
+                            ${resetChipHTML(provider)}
                         </div>
-                        <span class="provider-updated">${escapeHTML(compactUpdatedLabel(provider.updated_at))}</span>
+                        <span class="provider-meta">
+                            ${providerAgeMarkup(provider)}
+                            ${providerStatusMarkup(provider)}
+                        </span>
                     </div>
  ${provider.base_provider === "mistral" && provider.subtitle ? `<div class="quota-detail-meta">${escapeHTML(provider.subtitle)}</div>` : ""}
  ${provider.base_provider === 'mistral' ? mistralRecovery.markup(provider.connection, provider.connection_status) : ''}
-                `;
-            }
-
-            function pieChartMarkup(quota) {
-                const percent = clampPercent(quota.percent);
-                const circumference = 97.389;
-                const dash = (percent / 100) * circumference;
-                return `
-                    <svg class="quota-meter" viewBox="0 0 40 40" width="40" height="40" aria-hidden="true">
-                        <circle class="quota-track" cx="20" cy="20" r="15.5"></circle>
-                        <circle class="quota-fill" cx="20" cy="20" r="15.5" stroke-dasharray="${dash.toFixed(2)} ${circumference.toFixed(2)}"></circle>
-                        <circle class="quota-center" cx="20" cy="20" r="10.5"></circle>
-                        <text class="quota-percent" x="20" y="23" text-anchor="middle">${Math.round(percent)}%</text>
-                    </svg>
                 `;
             }
 
@@ -2400,15 +3223,11 @@
                 return Array.isArray(provider && provider.quotas) ? provider.quotas : [];
             }
 
+            // cardSpan is how many of the 4 columns a card occupies:
+            // min(quotaCount, 4). Empty cards still take one column.
             function cardSpan(provider) {
                 const count = providerQuotas(provider).length;
-                if (count >= 3) {
-                    return 6;
-                }
-                if (count === 2) {
-                    return 4;
-                }
-                return 2;
+                return Math.max(1, Math.min(count, STANDARD_COLUMNS));
             }
 
             function buildAggregate(providers) {
@@ -2594,6 +3413,116 @@
                 }
             }
 
+            // isRenderableProviderCard checks the nested shape the renderer
+            // dereferences. A version-1 entry such as providers:[null] is
+            // valid JSON but throws on item.id during the first sort, so the
+            // cache must reject it before any render.
+            function isRenderableProviderCard(provider) {
+                return provider !== null && typeof provider === "object" && !Array.isArray(provider)
+                    && typeof provider.id === "string" && provider.id !== ""
+                    && Array.isArray(provider.quotas)
+                    && provider.quotas.every((quota) => quota !== null && typeof quota === "object" && !Array.isArray(quota));
+            }
+
+            // A provider with an empty quota list is legitimate; a missing or
+            // null quota list is not (the server always emits an array).
+            function isRenderableSnapshot(snapshot) {
+                return snapshot !== null && typeof snapshot === "object" && !Array.isArray(snapshot)
+                    && Array.isArray(snapshot.providers)
+                    && snapshot.providers.every(isRenderableProviderCard);
+            }
+
+            // readCachedSnapshot returns the last successful summary, or null
+            // when there is none, it is corrupt, or it was written by a
+            // different cache version. A bad entry is cleared so it cannot keep
+            // failing on every open.
+            function readCachedSnapshot() {
+                let raw;
+                try {
+                    raw = localStorage.getItem(SNAPSHOT_CACHE_KEY);
+                } catch (error) {
+                    return null;
+                }
+                if (!raw) {
+                    return null;
+                }
+                let parsed;
+                try {
+                    parsed = JSON.parse(raw);
+                } catch (error) {
+                    clearCachedSnapshot();
+                    return null;
+                }
+                const snapshot = parsed && parsed.snapshot;
+                if (!parsed || parsed.version !== SNAPSHOT_CACHE_VERSION
+                    || !isRenderableSnapshot(snapshot)) {
+                    clearCachedSnapshot();
+                    return null;
+                }
+                return snapshot;
+            }
+
+            function writeCachedSnapshot(snapshot) {
+                if (!isRenderableSnapshot(snapshot)) {
+                    return;
+                }
+                try {
+                    localStorage.setItem(SNAPSHOT_CACHE_KEY, JSON.stringify({
+                        version: SNAPSHOT_CACHE_VERSION,
+                        savedAt: new Date().toISOString(),
+                        snapshot
+                    }));
+                } catch (error) {
+                    // Ignore local storage errors inside the popover.
+                }
+            }
+
+            function clearCachedSnapshot() {
+                try {
+                    localStorage.removeItem(SNAPSHOT_CACHE_KEY);
+                } catch (error) {
+                    // Ignore local storage errors inside the popover.
+                }
+            }
+
+            // restoreCachedSnapshot paints the last-known data before the first
+            // fetch. It never replaces data already in memory, so a slow open
+            // cannot roll a fresher render back to an older snapshot.
+            function restoreCachedSnapshot() {
+                if (state.snapshot) {
+                    return;
+                }
+                const cached = readCachedSnapshot();
+                if (!cached) {
+                    return;
+                }
+                state.snapshot = cached;
+                state.loading = false;
+            }
+
+            // restoreCachedSnapshotSafely is the startup path: a cache entry
+            // that passes structural validation can still fail to render. If
+            // it does, drop the entry and reset to the empty loading state so
+            // initialization can fetch instead of wedging every open.
+            function restoreCachedSnapshotSafely() {
+                restoreCachedSnapshot();
+                if (!state.snapshot) {
+                    return;
+                }
+                try {
+                    render();
+                } catch (error) {
+                    clearCachedSnapshot();
+                    state.snapshot = null;
+                    state.loading = true;
+                    try {
+                        render();
+                    } catch (ignored) {
+                        // Normal initialization below still fetches.
+                    }
+                }
+            }
+
             function resolveThemeMode() {
                 const draft = state.settingsOpen && state.draft ? state.draft : state.preferences;
                 return normalizeTheme(draft && draft.theme);
@@ -2605,6 +3534,10 @@
                 const effective = mode === "system" ? (state.systemPrefersDark ? "dark" : "light") : mode;
                 root.setAttribute("data-theme", effective);
                 root.style.colorScheme = effective;
+                // Tell a native host the page's effective theme so it can match
+                // its own background layers, even when onWatch's theme differs
+                // from the OS. Hosts without the channel ignore this.
+                sendNativeAction({ action: "theme", theme: effective });
             }
 
             function queueResizeReport() {
@@ -2651,13 +3584,19 @@
                 const clientHeight = Math.ceil(element.clientHeight || 0);
                 const scrollHeight = Math.ceil(element.scrollHeight || 0);
                 const offsetHeight = Math.ceil(element.offsetHeight || 0);
+                // Children are positioned against their nearest offsetParent (the
+                // shell), so child.offsetTop includes the header and would be
+                // counted twice once the header height is added back. Measure the
+                // bottom edge relative to this element's own top instead.
+                const elementTop = element.getBoundingClientRect().top;
+                const padBottom = parseFloat(window.getComputedStyle(element).paddingBottom || "0") || 0;
                 let contentHeight = 0;
                 for (const child of element.children) {
                     if (child instanceof HTMLElement) {
-                        contentHeight = Math.max(contentHeight, Math.ceil(child.offsetTop + child.offsetHeight));
+                        contentHeight = Math.max(contentHeight, Math.ceil(child.getBoundingClientRect().bottom - elementTop));
                     }
                 }
-                contentHeight += measuredPaddingY(element);
+                contentHeight += padBottom;
                 if (scrollHeight > clientHeight + 1) {
                     return Math.max(scrollHeight, contentHeight);
                 }
@@ -2665,16 +3604,10 @@
             }
 
             function preferredResizeFloor() {
-                if (state.settingsOpen) {
-                    return 320;
-                }
-                if (state.view === "detailed") {
-                    return 500;
-                }
-                if (state.view === "minimal") {
-                    return 140;
-                }
-                return 320;
+                // A single sensible minimum for every layout: header, one card
+                // and the footer. Anything larger would leave empty space below
+                // the last card when a provider list is short.
+                return 140;
             }
 
             function measuredContentHeight() {
@@ -2690,16 +3623,50 @@
                     + (measuredGapY(shell) * 2);
             }
 
+            function preferredResizeCeiling() {
+                // Mirror the native clamp: never grow past the built-in ceiling or
+                // the screen's visible height minus a small margin.
+                let ceiling = 720;
+                const screenHeight = Number(window.screen && (window.screen.availHeight || window.screen.height));
+                if (Number.isFinite(screenHeight) && screenHeight > 0) {
+                    ceiling = Math.min(ceiling, Math.floor(screenHeight) - 24);
+                }
+                return Math.max(preferredResizeFloor(), ceiling);
+            }
+
+            // True once a report has actually reached a host channel. Until then
+            // the 2px debounce is disabled, because a report that fires before
+            // the native bridge / iframe parent listener is ready would be lost
+            // and a same-height retry would be suppressed forever.
+            let resizeReportDelivered = false;
+
+            function resizeHostPresent() {
+                return !!(nativeHandler("onwatchResize") || (window.parent && window.parent !== window));
+            }
+
             function reportPreferredHeight() {
                 const measured = Math.ceil(measuredContentHeight());
-                const height = Math.max(preferredResizeFloor(), Math.min(720, measured));
+                const height = Math.max(preferredResizeFloor(), Math.min(preferredResizeCeiling(), measured));
+                // Debounce: a sub-2px change is layout noise, not a real resize.
+                // Skipped until the first report has been delivered, so a report
+                // lost to a not-yet-ready host is retried on the next signal.
+                if (resizeReportDelivered && lastReportedHeight !== null && Math.abs(height - lastReportedHeight) < 2) {
+                    return;
+                }
+                lastReportedHeight = height;
                 const payload = { type: "resize", height };
                 window.postMessage(payload, "*");
                 if (window.parent && window.parent !== window) {
                     window.parent.postMessage(payload, "*");
                 }
-                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.onwatchResize) {
-                    window.webkit.messageHandlers.onwatchResize.postMessage({ height });
+                const resizeHandler = nativeHandler("onwatchResize");
+                if (resizeHandler) {
+                    resizeHandler.postMessage({ height });
+                }
+                // Consider the report delivered only when a host channel exists.
+                // A bare window.postMessage with no listener is not delivery.
+                if (resizeHostPresent()) {
+                    resizeReportDelivered = true;
                 }
             }
 
@@ -2859,7 +3826,23 @@
                 return value > 0 && value < 0.01 ? value.toFixed(3) : value.toFixed(2);
             }
 
+            // quotaStatusNote renders the provider's raw window status as a
+            // tooltip suffix. Empty for a healthy ("ok") or absent status so
+            // normal quotas stay uncluttered; an unknown value is shown as-is.
+            function quotaStatusNote(quota) {
+                const label = quota.status_label;
+                if (!label || String(label).toLowerCase() === "ok") return "";
+                return ` - ${label}`;
+            }
+
             function usageSummary(quota) {
+                // Percent-only quotas (OpenCode key mode) report a bare percent
+                // with a synthetic limit of 100. Showing "8/100 used" would be a
+                // fake fraction, so no usage line is drawn: the ring already
+                // carries the percent, exactly as for a quota with no used/limit.
+                if (quota.percent_only) {
+                    return "";
+                }
                 const limit = Number(quota.limit);
                 const used = Number(quota.used);
                 if (Number.isFinite(limit) && limit > 0 && Number.isFinite(used) && used >= 0) {
@@ -2919,6 +3902,44 @@
                 return label === "0m" ? "now" : label;
             }
 
+            // ageLabelFromTimestamp renders an age from a raw RFC3339 timestamp
+            // against this client's wall clock, so it keeps counting up even when
+            // the daemon is unreachable. Falls back to the server's pre-rendered
+            // string when no timestamp is available.
+            function ageLabelFromTimestamp(raw, fallback) {
+                if (!raw) {
+                    return compactUpdatedLabel(fallback);
+                }
+                const then = Date.parse(raw);
+                // Reject unparseable, non-positive, and absurdly old timestamps.
+                // A zero time.Time serializes as 0001-01-01, which would read as
+                // hundreds of thousands of days; fall back instead.
+                const minValid = Date.UTC(2000, 0, 1);
+                if (!Number.isFinite(then) || then <= 0 || then < minValid) {
+                    return compactUpdatedLabel(fallback);
+                }
+                const seconds = Math.max(0, (Date.now() - then) / 1000);
+                if (seconds < 60) {
+                    return "now";
+                }
+                if (seconds < 3600) {
+                    return Math.floor(seconds / 60) + "m";
+                }
+                if (seconds < 86400) {
+                    return Math.floor(seconds / 3600) + "h";
+                }
+                return Math.floor(seconds / 86400) + "d";
+            }
+
+            // providerAgeLabel counts from the provider's own last successful
+            // data time (updated_at_time), not the snapshot build time.
+            function providerAgeLabel(provider) {
+                if (!provider) {
+                    return "--";
+                }
+                return ageLabelFromTimestamp(provider.updated_at_time || provider.updatedAtTime, provider.updated_at);
+            }
+
             function compactResetLabel(quota) {
                 return compactTimeLabel(quota.time_until_reset || quota.reset_at);
             }
@@ -2942,7 +3963,10 @@
                 return normalized;
             }
 
-            function compactQuotaLabel(label, key) {
+            // quotaLabelSemantic maps a quota's key/label to a known short name,
+            // or "" when nothing matches. Shared by the truncating compact label
+            // and the wrapping full label so both agree on the wording.
+            function quotaLabelSemantic(label, key) {
                 const source = `${String(key || "").toLowerCase()} ${String(label || "").toLowerCase()}`;
                 if (source.includes("weekly sonnet") || source.includes("weekly_sonnet")) {
                     return "Wkly Son";
@@ -3028,8 +4052,34 @@
                 if (source.includes("requests")) {
                     return "Req";
                 }
+                return "";
+            }
+
+            function compactQuotaLabel(label, key) {
+                const semantic = quotaLabelSemantic(label, key);
+                if (semantic) {
+                    return semantic;
+                }
                 const text = String(label || key || "Quota").trim();
                 return text.length > 10 ? text.slice(0, 10) : text;
+            }
+
+            // fullQuotaLabel is the wrapping tile label: it keeps the semantic
+            // short names but never hard-truncates, so "Weekly Credits" and
+            // "Gemini Weekly" read in full. Claude + GPT windows keep their
+            // window suffix ("Cl+GPT Weekly").
+            function fullQuotaLabel(quota) {
+                const label = String(quota && quota.label || "").trim();
+                const key = String(quota && quota.key || "");
+                const source = `${key.toLowerCase()} ${label.toLowerCase()}`;
+                if (source.includes("claude + gpt") || source.includes("claude_+_gpt")) {
+                    return label.replace(/claude\s*\+\s*gpt/i, "Cl+GPT");
+                }
+                const semantic = quotaLabelSemantic(label, key);
+                if (semantic) {
+                    return semantic;
+                }
+                return label || key || "Quota";
             }
 
             function compactProviderName(label) {
@@ -3093,6 +4143,110 @@
                 return Math.max(0, Math.min(100, numeric));
             }
 
+            // updateAgeLabels refreshes every provider age label from its
+            // recorded timestamp without rebuilding the DOM, so a long-lived
+            // popover (or one whose daemon is unreachable) keeps counting up
+            // without a repaint.
+            function updateAgeLabels() {
+                // Staleness is re-evaluated locally on every tick from the
+                // recorded capture time and stale_after_seconds. That is what
+                // turns a card stale while the daemon is unreachable, when no
+                // new snapshot can arrive. If any card crossed the threshold,
+                // re-render once so the dot ring and stale tooltips match; the
+                // numbers themselves never change here.
+                let staleChanged = false;
+                document.querySelectorAll(".provider-status[data-updated-at]").forEach((el) => {
+                    const raw = el.getAttribute("data-updated-at") || "";
+                    if (!raw) {
+                        return;
+                    }
+                    const was = el.querySelector(".provider-status-dot.is-stale") !== null;
+                    const stale = providerStaleFromAttributes(raw, el.getAttribute("data-stale-after"), el.getAttribute("data-stale-checked-at"));
+                    if (was !== stale) {
+                        staleChanged = true;
+                    }
+                });
+                if (staleChanged) {
+                    render();
+                    return;
+                }
+                document.querySelectorAll(".provider-updated[data-updated-at]").forEach((el) => {
+                    const raw = el.getAttribute("data-updated-at") || "";
+                    const fallback = el.getAttribute("data-updated-fallback") || "";
+                    if (!raw) {
+                        return;
+                    }
+                    const text = ageLabelFromTimestamp(raw, fallback);
+                    el.textContent = text;
+                    // Keep the stale tooltip's age phrase current while it is
+                    // hovered, without rebuilding the DOM.
+                    const wrapper = el.closest(".provider-age");
+                    const tip = wrapper && wrapper.querySelector(".provider-status-tip");
+                    if (tip) {
+                        tip.textContent = staleTooltipText(raw, text, wrapper.getAttribute("data-stale-tooltip") || "");
+                    }
+                });
+                // Dot tooltips carry the same age phrase for stale cards.
+                document.querySelectorAll(".provider-status-dot.is-stale").forEach((dot) => {
+                    const status = dot.closest(".provider-status");
+                    if (!status) {
+                        return;
+                    }
+                    const tip = status.querySelector(".provider-status-tip");
+                    if (!tip) {
+                        return;
+                    }
+                    const existing = tip.textContent || "";
+                    if (!/^(Last updated |no update in )/.test(existing)) {
+                        // Attention wording wins; do not overwrite it.
+                        return;
+                    }
+                    const raw = status.getAttribute("data-updated-at") || "";
+                    tip.textContent = staleTooltipText(raw, ageLabelFromTimestamp(raw, ""), existing);
+                });
+                if (state.snapshot) {
+                    headerUpdated.textContent = ageLabelFromTimestamp(
+                        state.snapshot.latest_at,
+                        state.snapshot.updated_ago
+                    );
+                }
+                // Peak chips share the 30s age ticker: exact countdown from the
+                // page clock, no fetch.
+                if (window.OnWatchPeak) {
+                    window.OnWatchPeak.refreshPeakChips();
+                }
+            }
+
+            // providerStaleFromAttributes is the DOM-only staleness check used
+            // by the ticker (matches providerStaleNow without a card object).
+            // checkedAt, when non-empty, is stale_checked_at and wins; raw is
+            // updated_at_time, the fallback.
+            function providerStaleFromAttributes(raw, staleAfter, checkedAt) {
+                const after = Number(staleAfter || 0);
+                const source = checkedAt || raw;
+                if (!(after > 0) || !source) {
+                    return false;
+                }
+                const then = Date.parse(source);
+                if (!Number.isFinite(then) || then <= 0) {
+                    return false;
+                }
+                return (Date.now() - then) / 1000 > after;
+            }
+
+            // staleTooltipText refreshes the age inside an existing stale
+            // tooltip while keeping its original reason suffix.
+            function staleTooltipText(raw, currentLabel, existing) {
+                const suffixMatch = String(existing || "").match(/ - (.+)$/);
+                if (!suffixMatch) {
+                    // Generic reason ("no update in 14m"): rebuild from the age.
+                    const age = currentLabel === "now" ? "0m" : currentLabel;
+                    return "no update in " + age;
+                }
+                const ageText = currentLabel === "now" ? "just now" : currentLabel + " ago";
+                return "Last updated " + ageText + " - " + suffixMatch[1];
+            }
+
             function resetRefreshTimer() {
                 if (refreshTimer) {
                     window.clearInterval(refreshTimer);
@@ -3100,90 +4254,21 @@
                 refreshTimer = window.setInterval(() => {
                     void loadSnapshot();
                 }, Math.max(Number(state.preferences.refresh_seconds) || 60, 10) * 1000);
-            }
-
-            // Promo countdown: update tags every 30s without API calls
-            let _menubarPromos = [];
-            let _promoCountdownTimer = null;
-
-            function storeMenubarPromos(providers) {
-                _menubarPromos = (providers || []).filter(p => p.promo).map(p => p.promo);
-                if (_promoCountdownTimer) clearInterval(_promoCountdownTimer);
-                if (_menubarPromos.length > 0) {
-                    _promoCountdownTimer = setInterval(refreshMenubarPromoTags, 30000);
+                // Age labels are computed from client wall-clock time, so they
+                // must be refreshed between fetches: that is what lets them keep
+                // counting up when the daemon is unreachable and the fetch above
+                // fails. Update the text in place (no re-render, no flash) and
+                // make no API calls.
+                if (ageTickTimer) {
+                    window.clearInterval(ageTickTimer);
                 }
-            }
-
-            function refreshMenubarPromoTags() {
-                document.querySelectorAll(".promo-tag").forEach(el => {
-                    // Find parent provider card to get promo data
-                    const promo = _menubarPromos[0]; // Currently only Anthropic has promo
-                    if (!promo) return;
-                    const offpeak = isPromoOffPeak(promo);
-                    el.className = "promo-tag " + (offpeak ? "promo-offpeak" : "promo-peak");
-                    el.textContent = promoLabel(promo);
-                });
-            }
-
-            function isPromoOffPeak(promo) {
-                const now = new Date();
-                const etStr = now.toLocaleString("en-US", { timeZone: "America/New_York" });
-                const et = new Date(etStr);
-                const hour = et.getHours();
-                const day = et.getDay();
-                const isWeekday = day >= 1 && day <= 5;
-                const isPeak = promo.peak_weekdays_only ? (isWeekday && hour >= promo.peak_start_hour_et && hour < promo.peak_end_hour_et) : false;
-                return !isPeak;
-            }
-
-            function promoMinutesUntilTransition(promo) {
-                const now = new Date();
-                const etStr = now.toLocaleString("en-US", { timeZone: "America/New_York" });
-                const et = new Date(etStr);
-                const hour = et.getHours();
-                const min = et.getMinutes();
-                const day = et.getDay();
-                const isWeekday = day >= 1 && day <= 5;
-                const isPeak = promo.peak_weekdays_only ? (isWeekday && hour >= promo.peak_start_hour_et && hour < promo.peak_end_hour_et) : false;
-                let totalMin;
-                if (isPeak) {
-                    totalMin = (promo.peak_end_hour_et - hour - 1) * 60 + (60 - min);
-                } else if (isWeekday && hour < promo.peak_start_hour_et) {
-                    totalMin = (promo.peak_start_hour_et - hour - 1) * 60 + (60 - min);
-                } else {
-                    let daysToAdd;
-                    if (day === 5) daysToAdd = 3;
-                    else if (day === 6) daysToAdd = 2;
-                    else if (day === 0) daysToAdd = 1;
-                    else daysToAdd = 1;
-                    totalMin = (daysToAdd - 1) * 1440 + (24 - hour - 1) * 60 + (60 - min) + promo.peak_start_hour_et * 60;
+                ageTickTimer = window.setInterval(updateAgeLabels, 30000);
+                // Peak chips count down on the same cadence with no API call.
+                // The popover uses the chip's child tooltip; the dashboard's
+                // floating-tip helper is not initialized here to avoid two.
+                if (window.OnWatchPeak) {
+                    window.OnWatchPeak.refreshPeakChips();
                 }
-                if (promo.ends_at) {
-                    const promoEndMin = Math.floor((new Date(promo.ends_at) - now) / 60000);
-                    if (promoEndMin > 0 && promoEndMin < totalMin) totalMin = promoEndMin;
-                }
-                return Math.max(0, totalMin);
-            }
-
-            function formatPromoCountdown(minutes) {
-                if (minutes <= 0) return "";
-                if (minutes >= 1440) {
-                    const d = Math.floor(minutes / 1440);
-                    const h = Math.floor((minutes % 1440) / 60);
-                    return h > 0 ? d + "d " + h + "h" : d + "d";
-                }
-                if (minutes >= 60) {
-                    const h = Math.floor(minutes / 60);
-                    const m = minutes % 60;
-                    return m > 0 ? h + "h " + m + "m" : h + "h";
-                }
-                return minutes + "m";
-            }
-
-            function promoLabel(promo) {
-                const label = isPromoOffPeak(promo) ? "Off-peak" : "Peak hours";
-                const countdown = formatPromoCountdown(promoMinutesUntilTransition(promo));
-                return countdown ? label + " till " + countdown : label;
             }
 
             function escapeHTML(value) {
@@ -3194,6 +4279,14 @@
                     .replaceAll("\"", "&quot;")
                     .replaceAll("'", "&#39;");
             }
+
+            // Start last, after every top-level binding in this IIFE has been
+            // evaluated. init() renders before it fetches, and render() and the
+            // snapshot-restore path touch bindings declared further down (for
+            // example the snapshot generation counters). Calling it earlier
+            // threw a temporal-dead-zone ReferenceError and left the popover
+            // stuck on "Loading".
+            init();
         })();
     </script>
 </body>
