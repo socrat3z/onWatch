@@ -399,8 +399,8 @@ reviewable commit.
 1. Pick the new version and record both architectures' checksums:
 
    ```bash
-   CODEX_VERSION=0.162.1
-   CLAUDE_VERSION=2.1.296
+   CODEX_VERSION=0.164.0
+   CLAUDE_VERSION=2.1.310
    for u in \
      "https://registry.npmjs.org/@openai/codex/-/codex-${CODEX_VERSION}-linux-x64.tgz" \
      "https://registry.npmjs.org/@openai/codex/-/codex-${CODEX_VERSION}-linux-arm64.tgz" \
@@ -468,18 +468,18 @@ Both run in CI on every push and pull request, alongside a `linux/amd64` +
 
 ## Measured resource budget
 
-Measured **2026-08-10**, `linux/amd64`, Docker Desktop, with codex 0.147.0,
-claude-code 2.1.226, agy 1.1.11:
+Measured **2026-10-25**, `linux/amd64`, Docker Desktop, with codex 0.164.0,
+claude-code 2.1.310, agy 1.4.7:
 
 | Measurement | Value |
 |---|---|
-| Image size (`runtime` target) | 342 MB |
-| Daemon container, idle (onWatch + D-Bus + gnome-keyring) | 9.4 MiB |
-| `onwatch` process RSS | 19.8 MB |
-| `gnome-keyring-daemon` RSS | 8.2 MB |
+| Image size (`runtime` target) | 1.6 GB as reported by Docker Desktop's containerd image store (the 2026-08-10 figure of 342 MB came from the classic store and is not comparable) |
+| Daemon container, idle (onWatch + D-Bus + gnome-keyring) | 10.4 MiB |
+| `onwatch` process RSS | 23.3 MB |
+| `gnome-keyring-daemon` RSS | 8.3 MB |
 | `dbus-daemon` RSS | 2.4 MB |
-| `agy` binary on disk | 190 MB |
-| Peak RSS of one `agy --version` | 134 MB |
+| `agy` binary on disk | 228 MB |
+| Peak RSS of one `agy --version` | 134 MB (agy 1.1.11, 2026-08-10; not re-measured) |
 
 The daemon limit is **512M** rather than something near upstream's 64M for one
 reason: with `ANTIGRAVITY_SOURCE=cli` the daemon itself spawns `agy` and keeps the

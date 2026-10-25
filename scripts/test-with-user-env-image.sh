@@ -91,7 +91,7 @@ done
 
 echo "== credential dirs are writable by UID 65532 =="
 docker run --rm --user 65532 --entrypoint /bin/sh "$image" -c \
-  'set -e; for d in ~/.gemini ~/.codex ~/.claude ~/.local/share/keyrings; do touch "$d/.probe" && rm "$d/.probe"; done'
+  'set -e; for d in /auth/codex /auth/claude /auth/antigravity /tmp/onwatch-runtime/antigravity; do touch "$d/.probe" && rm "$d/.probe"; done'
 echo "ok:   all four credential dirs writable"
 
 if [[ "$all_arch" -eq 1 ]]; then
