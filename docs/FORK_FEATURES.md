@@ -30,7 +30,6 @@ Anthropic is **not** multi-account in this fork. Only the default Claude login i
 
 ## 3. Antigravity CLI fixes
 
-- `internal/api/antigravity_csrf_overlay.go` - passes `--csrf_token` to `agy` >= 1.2.2 and sends the matching header on local RPC (version-gated).
 - `internal/api/antigravity_procports.go` - resolves listening ports from `/proc`, needed in slim container images.
 - `internal/api/antigravity_cli.go`, `internal/agent/antigravity_agent.go`, `internal/agent/antigravity_overlay.go` - bounded resident `agy` sessions (`ANTIGRAVITY_MAX_RESIDENT_SESSIONS`), launch backoff after consecutive CLI failures, per-account `HOME` and `XDG_RUNTIME_DIR`.
 

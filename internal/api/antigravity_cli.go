@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -164,6 +166,9 @@ type agySession struct {
 	cmd    *pty.Cmd
 	conn   *AntigravityConnection
 	output *agyOutputBuffer
+	// csrfToken is the token agy was launched with. Its language server
+	// rejects Connect-RPC calls without it (missing CSRF token, HTTP 401).
+	csrfToken string
 }
 
 // AntigravityCLIRunner manages a bounded warm agy process so onWatch can read
@@ -186,8 +191,6 @@ type AntigravityCLIRunner struct {
 	failures int
 	watchdog sync.Once
 	env      []string
-
-	csrfToken string // fork overlay: see antigravity_csrf_overlay.go
 }
 
 // NewAntigravityCLIRunner creates a runner. It does not launch agy until the
@@ -306,8 +309,8 @@ func (r *AntigravityCLIRunner) Fetch(ctx context.Context) (*AntigravitySnapshot,
 		return nil, err
 	}
 
-	base := r.sess.conn.BaseURL
-	summary, status, err := r.post(ctx, base, agyQuotaSummaryRPC)
+	conn := r.sess.conn
+	summary, status, err := r.post(ctx, conn, agyQuotaSummaryRPC)
 	if err != nil || status != http.StatusOK {
 		r.recordFailureLocked()
 		if err == nil {
@@ -330,7 +333,7 @@ func (r *AntigravityCLIRunner) Fetch(ctx context.Context) (*AntigravitySnapshot,
 	}
 
 	// Identity/plan are best-effort; the quota summary already succeeded.
-	if statusBody, st, serr := r.post(ctx, base, agyUserStatusRPC); serr == nil && st == http.StatusOK {
+	if statusBody, st, serr := r.post(ctx, conn, agyUserStatusRPC); serr == nil && st == http.StatusOK {
 		if us, perr := ParseAntigravityResponse(statusBody); perr == nil && us.UserStatus != nil {
 			snap.Email = us.UserStatus.Email
 			if us.UserStatus.PlanStatus != nil {
@@ -379,13 +382,33 @@ func (r *AntigravityCLIRunner) ensureLocked(ctx context.Context) error {
 	return nil
 }
 
+// newAgyCSRFToken returns a fresh random token for one managed agy launch.
+func newAgyCSRFToken() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// agyLaunchArgs sets the CSRF token agy's language server will require. Without
+// it, agy on Windows rejects every call as "missing CSRF token" (HTTP 401), so
+// the session never becomes ready (issue #140).
+func agyLaunchArgs(csrfToken string) []string {
+	return []string{"--csrf_token", csrfToken}
+}
+
 // launch starts agy inside a pseudo-terminal and captures its output.
 func (r *AntigravityCLIRunner) launch(binPath string) (*agySession, error) {
+	token, err := newAgyCSRFToken()
+	if err != nil {
+		return nil, fmt.Errorf("antigravity cli: csrf token: %w", err)
+	}
 	p, err := pty.New()
 	if err != nil {
 		return nil, fmt.Errorf("antigravity cli: open pty: %w", err)
 	}
-	cmd := p.CommandContext(r.rootCtx, binPath, r.agyCSRFArgs(binPath)...)
+	cmd := p.CommandContext(r.rootCtx, binPath, agyLaunchArgs(token)...)
 	cmd.Env = append(r.env, "TERM=xterm-256color")
 	if err := cmd.Start(); err != nil {
 		_ = p.Close()
@@ -394,7 +417,7 @@ func (r *AntigravityCLIRunner) launch(binPath string) (*agySession, error) {
 	outBuf := newAgyOutputBuffer(8192)
 	go r.drainPTY(p, outBuf, cmd.Process.Pid)
 	r.logger.Debug("launched managed agy", "pid", cmd.Process.Pid, "path", binPath)
-	return &agySession{pty: p, cmd: cmd, output: outBuf}, nil
+	return &agySession{pty: p, cmd: cmd, output: outBuf, csrfToken: token}, nil
 }
 
 // drainPTY reads PTY output, writes to outBuf, and logs if agy requires interactive authentication.
@@ -446,11 +469,9 @@ func (r *AntigravityCLIRunner) awaitReady(ctx context.Context, sess *agySession)
 		}
 		ports, err := r.client.discoverPorts(ctx, pid)
 		if err == nil && len(ports) > 0 {
-			if conn, _ := r.client.probeForConnectAPI(ctx, ports, r.csrfToken); conn != nil {
-				if body, status, perr := r.post(ctx, conn.BaseURL, agyQuotaSummaryRPC); perr == nil && status == http.StatusOK {
+			if conn, _ := r.client.probeForConnectAPI(ctx, ports, sess.csrfToken); conn != nil {
+				if _, status, perr := r.post(ctx, conn, agyQuotaSummaryRPC); perr == nil && status == http.StatusOK {
 					return conn, nil
-				} else if perr == nil && isAgyCSRFRejection(status, body) {
-					return nil, ErrAgyCSRFRejected
 				}
 			}
 		}
@@ -475,20 +496,22 @@ func (r *AntigravityCLIRunner) sessionHealthy(ctx context.Context) bool {
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	_, status, err := r.post(checkCtx, r.sess.conn.BaseURL, agyQuotaSummaryRPC)
+	_, status, err := r.post(checkCtx, r.sess.conn, agyQuotaSummaryRPC)
 	return err == nil && status == http.StatusOK
 }
 
-// post issues a Connect-RPC POST against the agy language server. agy >= 1.2.2
-// requires the session CSRF token (see antigravity_csrf_overlay.go).
-func (r *AntigravityCLIRunner) post(ctx context.Context, baseURL, rpcPath string) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+rpcPath, strings.NewReader(agyMetadataBody))
+// post issues a Connect-RPC POST against the agy language server, with the
+// CSRF token the managed agy was launched with.
+func (r *AntigravityCLIRunner) post(ctx context.Context, conn *AntigravityConnection, rpcPath string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, conn.BaseURL+rpcPath, strings.NewReader(agyMetadataBody))
 	if err != nil {
 		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Connect-Protocol-Version", "1")
-	setAgyCSRFHeader(req, r.csrfToken)
+	if conn.CSRFToken != "" {
+		req.Header.Set("X-Codeium-Csrf-Token", conn.CSRFToken)
+	}
 
 	resp, err := r.client.httpClient.Do(req)
 	if err != nil {
