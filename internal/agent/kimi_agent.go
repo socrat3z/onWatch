@@ -95,8 +95,7 @@ func (a *KimiAgent) poll(ctx context.Context) {
 			return
 		}
 		if errors.Is(err, api.ErrKimiRateLimited) {
-			cycles := a.backoff.RateLimited()
-			a.logger.Warn("Kimi Code rate limited, backing off", "skip_cycles", cycles)
+			a.backoff.rateLimited("kimi", err, a.logger)
 			return
 		}
 		a.logger.Error("Failed to fetch Kimi Code usages", "error", err)

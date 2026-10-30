@@ -285,19 +285,19 @@ function oldestSnapshotAt(payloads) {
 
 function freshnessChipHTML(freshness) {
   if (!freshness || freshness.state === 'unknown') return '';
-  return `<span class="homepage-harness-freshness" data-freshness="${escapeHTML(freshness.state)}" title="${escapeHTML(freshness.title)}">${escapeHTML(freshness.label)}</span>`;
+  return `<span class="homepage-harness-freshness" data-freshness="${escapeHTML(freshness.state)}" data-snapshot-at="${escapeHTML(freshness.snapshotAt || '')}" title="${escapeHTML(freshness.title)}">${escapeHTML(freshness.label)}</span>`;
 }
 
-// Banner summarising every card that is not fresh, so the problem is visible
-// without scanning each card.
-function renderFreshnessBannerHTML(entries) {
+// freshnessBannerContent is the shared decision for the banner: which level it
+// reports and the two lines of text. The initial render (HTML string) and the
+// in-place aging pass (DOM nodes) both use it so they cannot disagree.
+function freshnessBannerContent(entries) {
   const degraded = (Array.isArray(entries) ? entries : [])
-    .filter(entry => entry.freshness && (entry.freshness.state === 'stale' || entry.freshness.state === 'error'));
-  if (degraded.length === 0) return '';
+    .filter(entry => entry && entry.freshness && (entry.freshness.state === 'stale' || entry.freshness.state === 'error'));
+  if (degraded.length === 0) return null;
 
   const failing = degraded.filter(entry => entry.freshness.state === 'error');
   const slipping = degraded.length - failing.length;
-  const level = failing.length > 0 ? 'error' : 'stale';
   const parts = [];
   if (failing.length > 0) {
     parts.push(`${failing.length} provider${failing.length === 1 ? '' : 's'} not updating`);
@@ -307,18 +307,50 @@ function renderFreshnessBannerHTML(entries) {
       ? `${slipping} with stale data`
       : `${slipping} provider${slipping === 1 ? '' : 's'} with stale data`);
   }
-  const headline = parts.join(', ');
-  const detail = degraded
-    .map(entry => `${entry.title} (${entry.freshness.label})`)
-    .join(', ');
+  return {
+    level: failing.length > 0 ? 'error' : 'stale',
+    headline: parts.join(', '),
+    detail: degraded.map(entry => `${entry.title} (${entry.freshness.label})`).join(', '),
+  };
+}
 
-  return `<div class="freshness-banner" data-freshness="${level}" role="status">
+// Banner summarising every card that is not fresh, so the problem is visible
+// without scanning each card.
+function renderFreshnessBannerHTML(entries) {
+  const content = freshnessBannerContent(entries);
+  if (!content) return '';
+  return `<div class="freshness-banner" data-freshness="${content.level}" role="status">
     <span class="freshness-banner-dot" aria-hidden="true"></span>
     <div class="freshness-banner-text">
-      <strong>${escapeHTML(headline)}</strong>
-      <span>${escapeHTML(detail)}</span>
+      <strong>${escapeHTML(content.headline)}</strong>
+      <span>${escapeHTML(content.detail)}</span>
     </div>
   </div>`;
+}
+
+// buildFreshnessBanner is the same banner as DOM nodes, for the in-place pass
+// where replacing container.innerHTML would drop focus and scroll position.
+function buildFreshnessBanner(entries) {
+  const content = freshnessBannerContent(entries);
+  if (!content) return null;
+  const banner = document.createElement('div');
+  banner.className = 'freshness-banner';
+  banner.dataset.freshness = content.level;
+  banner.setAttribute('role', 'status');
+  const dot = document.createElement('span');
+  dot.className = 'freshness-banner-dot';
+  dot.setAttribute('aria-hidden', 'true');
+  const text = document.createElement('div');
+  text.className = 'freshness-banner-text';
+  const headline = document.createElement('strong');
+  headline.textContent = content.headline;
+  const detail = document.createElement('span');
+  detail.textContent = content.detail;
+  text.appendChild(headline);
+  text.appendChild(detail);
+  banner.appendChild(dot);
+  banner.appendChild(text);
+  return banner;
 }
 
 // Multi-account providers ship one payload per profile under these keys once a
@@ -386,21 +418,55 @@ function homepageResetChipHTML(quota) {
   return `<span class="homepage-harness-reset"${attr} title="Resets in ${escapeHTML(text)}">${escapeHTML(text)}</span>`;
 }
 
-// Recomputes the chips in place so a card that sits on screen between polls
-// still counts down. Cheap enough at a minute's cadence: it only touches text.
+function applyFreshnessChip(chip) {
+  const freshness = providerFreshness(chip.dataset.snapshotAt || null);
+  chip.dataset.freshness = freshness.state;
+  chip.textContent = freshness.label;
+  chip.title = freshness.title;
+  const account = chip.closest('.homepage-harness-account');
+  if (account) account.dataset.freshness = freshness.state;
+  return freshness;
+}
+
+// Ages cached timestamps in place. No DOM is replaced and no provider fetch is
+// triggered, so focus, hover and scroll remain stable during an outage.
+function updateHomepageHealth() {
+  const container = document.getElementById('all-providers-container');
+  if (!container) return;
+  const entries = [];
+  container.querySelectorAll('.homepage-harness-card').forEach((card) => {
+    const title = card.querySelector('.provider-card-title span')?.textContent || card.dataset.provider || 'Provider';
+    const accountChips = Array.from(card.querySelectorAll('.homepage-harness-account .homepage-harness-freshness'));
+    const headerChip = card.querySelector('.homepage-harness-header-meta .homepage-harness-freshness');
+    let freshness = headerChip ? applyFreshnessChip(headerChip) : null;
+    if (accountChips.length > 0) {
+      accountChips.forEach(applyFreshnessChip);
+      // Same rule as the render: the oldest account decides the card.
+      const snapshots = accountChips.map(chip => ({ snapshotAt: chip.dataset.snapshotAt || null }));
+      freshness = providerFreshness(oldestSnapshotAt(snapshots));
+    }
+    card.dataset.freshness = freshness ? freshness.state : 'unknown';
+    entries.push({ title, freshness });
+  });
+  const previous = container.querySelector('.freshness-banner');
+  const next = buildFreshnessBanner(entries);
+  if (previous && next) previous.replaceWith(next);
+  else if (previous) previous.remove();
+  else if (next) container.prepend(next);
+}
+
+function tickHomepageHealthAndResets() {
+  updateHomepageHealth();
+  document.querySelectorAll('.homepage-harness-reset[data-reset-at]').forEach((chip) => {
+    const text = formatHomepageReset(homepageResetSeconds({ resetsAt: chip.dataset.resetAt }));
+    chip.textContent = text || 'due';
+    chip.title = text ? `Resets in ${text}` : 'Reset due';
+  });
+}
+
 function startHomepageResetTicks() {
   if (State.homepageResetInterval) return;
-  State.homepageResetInterval = setInterval(() => {
-    const chips = document.querySelectorAll('.homepage-harness-reset[data-reset-at]');
-    if (chips.length === 0) return;
-    chips.forEach((chip) => {
-      const text = formatHomepageReset(homepageResetSeconds({ resetsAt: chip.dataset.resetAt }));
-      // Past the reset the poller has not confirmed the new window yet, so say
-      // "due" instead of counting into negatives.
-      chip.textContent = text || 'due';
-      chip.title = text ? `Resets in ${text}` : 'Reset due';
-    });
-  }, 60000);
+  State.homepageResetInterval = setInterval(tickHomepageHealthAndResets, 60000);
 }
 
 
@@ -410,6 +476,8 @@ function renderHomepageAccountsHTML(provider, accounts) {
     const accountName = account.accountName || account.name || `Account ${accountId}`;
     const quotas = normalizeBothQuotas(provider, account);
     const freshness = providerFreshness(account.snapshotAt);
+    // The aging pass reads the stored time back from the chip.
+    freshness.snapshotAt = account.snapshotAt || null;
     return `<div class="homepage-harness-account" data-account-id="${escapeHTML(accountId)}" data-freshness="${escapeHTML(freshness.state)}" role="button" tabindex="0" aria-label="Open ${escapeHTML(accountName)}">
       <div class="homepage-harness-account-name">
         <span>${escapeHTML(accountName)}</span>

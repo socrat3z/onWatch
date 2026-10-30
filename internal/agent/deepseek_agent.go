@@ -93,8 +93,7 @@ func (a *DeepSeekAgent) poll(ctx context.Context) {
 			return
 		}
 		if errors.Is(err, api.ErrDeepSeekRateLimited) {
-			cycles := a.backoff.RateLimited()
-			a.logger.Warn("DeepSeek rate limited, backing off", "skip_cycles", cycles)
+			a.backoff.rateLimited("deepseek", err, a.logger)
 			return
 		}
 		a.logger.Error("Failed to fetch DeepSeek balance", "error", err)

@@ -99,8 +99,7 @@ func (a *OpenRouterAgent) poll(ctx context.Context) {
 			return
 		}
 		if errors.Is(err, api.ErrOpenRouterRateLimited) {
-			cycles := a.backoff.RateLimited()
-			a.logger.Warn("OpenRouter rate limited, backing off", "skip_cycles", cycles)
+			a.backoff.rateLimited("openrouter", err, a.logger)
 			return
 		}
 		a.logger.Error("Failed to fetch OpenRouter usage", "error", err)

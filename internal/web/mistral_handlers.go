@@ -46,6 +46,7 @@ func (h *Handler) buildMistralCurrentOK() (result map[string]interface{}, readOK
 		result["status"] = snap.Status
 	}
 	result["capturedAt"] = snap.CapturedAt.Format(time.RFC3339)
+	result["snapshotAt"] = snap.CapturedAt.Format(time.RFC3339)
 	result["accountType"] = "subscription"
 	allowancesFresh := len(snap.Quotas) == 2
 	for _, q := range snap.Quotas {

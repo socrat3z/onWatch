@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -43,6 +45,66 @@ func TestAgyResidentSessionsAreCappedIndependentOfAccountCount(t *testing.T) {
 	defer last.mu.Unlock()
 	if last.sess == nil {
 		t.Fatal("the most recently admitted runner lost its session")
+	}
+}
+
+func TestAgyAdmissionPrecedesLaunchAndFailureReleasesReservation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start func() (*agySession, error)
+		ready func(context.Context, *agySession) (*AntigravityConnection, error)
+	}{
+		{
+			name:  "launch failure",
+			start: func() (*agySession, error) { return nil, errors.New("synthetic launch failure") },
+			ready: func(context.Context, *agySession) (*AntigravityConnection, error) {
+				t.Fatal("readiness must not run after a failed launch")
+				return nil, nil
+			},
+		},
+		{
+			name:  "readiness failure",
+			start: func() (*agySession, error) { return &agySession{}, nil },
+			ready: func(context.Context, *agySession) (*AntigravityConnection, error) {
+				return nil, ErrAgyNotReady
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restore := agyResidentSnapshotForTest()
+			defer restore()
+
+			resident := NewAntigravityCLIRunner(nil)
+			resident.sess = &agySession{}
+			agyAdmitResident(resident)
+			candidate := NewAntigravityCLIRunner(nil)
+
+			overlapped := false
+			start := func() (*agySession, error) {
+				// The eviction has to happen before any live process exists,
+				// otherwise readiness latency runs at cap + 1.
+				if agyResidentCountForTest() > agyMaxResidentSessions() {
+					t.Fatalf("reservations at launch = %d, cap = %d", agyResidentCountForTest(), agyMaxResidentSessions())
+				}
+				resident.mu.Lock()
+				overlapped = resident.sess != nil
+				resident.mu.Unlock()
+				return tc.start()
+			}
+
+			if err := candidate.launchReservedSession(context.Background(), start, tc.ready); err == nil {
+				t.Fatal("expected the synthetic startup failure to be returned")
+			}
+			if overlapped {
+				t.Fatal("resident was still live when the candidate launched")
+			}
+			if got := agyResidentCountForTest(); got != 0 {
+				t.Fatalf("failed startup retained %d reservations", got)
+			}
+			if candidate.sess != nil {
+				t.Fatal("failed startup left a session attached to the runner")
+			}
+		})
 	}
 }
 

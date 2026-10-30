@@ -9944,7 +9944,7 @@ func (h *Handler) currentAntigravity(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	respondJSON(w, http.StatusOK, h.buildAntigravityCurrentForAccount(accountID))
+	respondJSON(w, http.StatusOK, h.buildAntigravityCurrent(accountID))
 }
 
 // buildAntigravityCurrent builds the Antigravity current quota response map.

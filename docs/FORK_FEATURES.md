@@ -31,17 +31,17 @@ Anthropic is **not** multi-account in this fork. Only the default Claude login i
 ## 3. Antigravity CLI fixes
 
 - `internal/api/antigravity_procports.go` - resolves listening ports from `/proc`, needed in slim container images.
-- `internal/api/antigravity_cli.go`, `internal/agent/antigravity_agent.go`, `internal/agent/antigravity_overlay.go` - bounded resident `agy` sessions (`ANTIGRAVITY_MAX_RESIDENT_SESSIONS`), launch backoff after consecutive CLI failures, per-account `HOME` and `XDG_RUNTIME_DIR`.
+- `internal/api/antigravity_cli.go`, `internal/api/antigravity_residency_overlay.go`, `internal/agent/antigravity_agent.go`, `internal/agent/antigravity_overlay.go` - bounded resident `agy` sessions (`ANTIGRAVITY_MAX_RESIDENT_SESSIONS`), launch backoff after consecutive CLI failures, per-account `HOME` and `XDG_RUNTIME_DIR`. The cap is reserved before a process starts and released if startup fails, so readiness latency cannot put a second `agy` beside the session it is replacing.
 
 ## 4. Provider correctness
 
 - **No-data states**: DeepSeek and Moonshot return `null` amounts and `snapshotAvailable: false` instead of a healthy-looking zero before the first poll (`internal/web/deepseek_handlers.go`, `moonshot_handlers.go`), with a neutral `unknown` badge in `style.css`.
 - **OpenRouter**: uses `/api/v1/key` and adds account-wide credits from `/api/v1/credits` when the key allows it (`internal/api/openrouter_client.go`, `openrouter_types.go`, `internal/store/openrouter_store.go`).
-- **Rate-limit backoff**: `internal/agent/backoff.go` skips a growing, capped number of poll cycles after a 429 for DeepSeek, Kimi, Moonshot, OpenRouter and OpenCode Go. It is deterministic; there is no jitter.
+- **Rate-limit backoff**: `internal/agent/backoff.go` skips a growing, capped number of poll cycles after a 429 for DeepSeek, Kimi, Moonshot, OpenRouter and OpenCode Go. It is deterministic; there is no jitter. `internal/agent/backoff_overlay.go` publishes the classified `rate_limit` outcome for the failed attempt, so the menubar explains the pause instead of showing an old or missing reason; the reason persists through the skipped cycles and clears on the next successful poll.
 
 ## 5. Dashboard
 
-- `internal/web/static/fork_overlay.js`, `fork_overlay.css`, linked from `templates/layout.html` - account picker and rename dialog, provider freshness banner, reset countdowns, balanced cards.
+- `internal/web/static/fork_overlay.js`, `fork_overlay.css`, linked from `templates/layout.html` - account picker and rename dialog, provider freshness banner, reset countdowns, balanced cards. Freshness chips and the banner age in place from the stored snapshot timestamp once a minute, so they stay truthful when polling stops without re-rendering the cards (focus, hover and scroll position survive an outage).
 - `internal/web/static/app.js`, `internal/web/dashboard_tabs.go`, `templates/dashboard.html` - the combined view is the first tab, labelled "Home" and titled "Harness Overview".
 
 ## 6. Small fixes and repo hygiene

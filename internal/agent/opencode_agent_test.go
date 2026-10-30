@@ -77,9 +77,16 @@ func TestOpenCodeAgent_Poll_RateLimitBackoffGrowsAndResets(t *testing.T) {
 	}
 	client := &stubOpenCodeClient{err: api.ErrOpenCodeRateLimited}
 	ag := NewOpenCodeAgent(client, st, nil, cfg, time.Second, slog.Default(), nil)
+	registry := NewPollStatusRegistry()
+	previous := GetPollStatusRegistry()
+	SetPollStatusRegistry(registry)
+	defer SetPollStatusRegistry(previous)
 
-	// First 429 arms one skipped cycle.
+	// First 429 arms one skipped cycle and preserves the reason in health state.
 	ag.poll(context.Background())
+	if outcome, ok := registry.Get("opencode", ""); !ok || outcome != PollOutcomeRateLimit {
+		t.Fatalf("outcome = %q, %v; want rate_limit", outcome, ok)
+	}
 	if client.scrapeCalls != 1 || ag.backoff.failCount != 1 || ag.backoff.skipRemaining != 1 {
 		t.Fatalf("after first 429: calls=%d failCount=%d skipRemaining=%d", client.scrapeCalls, ag.backoff.failCount, ag.backoff.skipRemaining)
 	}
@@ -105,6 +112,9 @@ func TestOpenCodeAgent_Poll_RateLimitBackoffGrowsAndResets(t *testing.T) {
 	ag.poll(context.Background())
 	if client.scrapeCalls != 3 || ag.backoff.failCount != 0 || ag.backoff.skipRemaining != 0 {
 		t.Fatalf("after success: calls=%d failCount=%d skipRemaining=%d", client.scrapeCalls, ag.backoff.failCount, ag.backoff.skipRemaining)
+	}
+	if outcome, ok := registry.Get("opencode", ""); ok {
+		t.Fatalf("successful poll retained failure outcome %q", outcome)
 	}
 }
 

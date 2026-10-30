@@ -365,21 +365,11 @@ func (r *AntigravityCLIRunner) ensureLocked(ctx context.Context) error {
 		return err
 	}
 
-	sess, err := r.launch(binPath)
-	if err != nil {
-		return err
-	}
-
-	conn, err := r.awaitReady(ctx, sess)
-	if err != nil {
-		r.killSession(sess)
-		return err
-	}
-	sess.conn = conn
-	r.sess = sess
-	agyAdmitResident(r)
-	r.logger.Info("agy session ready", "pid", sess.cmd.Process.Pid, "port", conn.Port)
-	return nil
+	// Admission includes startup: evict before launch so readiness latency can
+	// never take the live process count above the configured cap.
+	return r.launchReservedSession(ctx, func() (*agySession, error) {
+		return r.launch(binPath)
+	}, r.awaitReady)
 }
 
 // newAgyCSRFToken returns a fresh random token for one managed agy launch.

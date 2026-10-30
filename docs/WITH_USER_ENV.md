@@ -500,7 +500,10 @@ limit; nothing actually bounded memory by account count.
 `agyMaxResidentSessions` (`internal/api/antigravity_cli.go`) now caps the
 process-wide count of live `agy` sessions independent of how many accounts are
 configured. A poll that needs the slot evicts the least-recently-admitted
-session rather than starting a second process. Verified both by
+session rather than starting a second process. The slot is reserved **before**
+the new process starts and released again if launch or readiness fails, so the
+cap holds during startup as well as afterwards
+(`TestAgyAdmissionPrecedesLaunchAndFailureReleasesReservation`). Verified both by
 `TestAgyResidentSessionsAreCappedIndependentOfAccountCount` (unit-level, cap
 never exceeded across 5 runners) and against a live container:
 

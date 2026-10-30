@@ -7461,6 +7461,7 @@ function buildAllProviderEntries() {
   order.forEach(addProviderEntry);
   entries.forEach((entry) => {
     entry.freshness = entry.summaryOnly ? null : providerFreshness(entry.snapshotAt);
+    if (entry.freshness) entry.freshness.snapshotAt = entry.snapshotAt || null;
   });
   return entries;
 }

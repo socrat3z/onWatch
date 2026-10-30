@@ -108,8 +108,7 @@ func (a *OpenCodeAgent) poll(ctx context.Context) {
 			return
 		}
 		if errors.Is(err, api.ErrOpenCodeRateLimited) {
-			cycles := a.backoff.RateLimited()
-			a.logger.Warn("OpenCode Go status API rate-limited; skipping this cycle", "skip_cycles", cycles)
+			a.backoff.rateLimited("opencode", err, a.logger)
 			return
 		}
 		a.logger.Error("Failed to fetch OpenCode quotas", "error", err)

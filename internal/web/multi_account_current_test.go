@@ -48,6 +48,59 @@ func TestCurrentResolvesTheDefaultAccountForAntigravity(t *testing.T) {
 	})
 }
 
+func TestCurrentAntigravityUsesCanonicalAccountAwarePayload(t *testing.T) {
+	t.Parallel()
+
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	account, err := s.CreateOrRestoreProviderAccount("antigravity", "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured := time.Now().UTC().Truncate(time.Second)
+	reset := captured.Add(2 * time.Hour)
+	if _, err := s.InsertAntigravitySnapshot(&api.AntigravitySnapshot{
+		AccountID: account.ID, CapturedAt: captured, Email: "work@example.com",
+		PlanName: "Pro", PromptCredits: 12.5, MonthlyCredits: 100, Source: api.AntigravitySourceIDE,
+		Models: []api.AntigravityModelQuota{{
+			ModelID: "claude-4-5-sonnet", Label: "Claude Sonnet", RemainingFraction: 0.5,
+			RemainingPercent: 50, ResetTime: &reset, TimeUntilReset: 2 * time.Hour,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(s, nil, nil, nil, createTestConfigWithAntigravity())
+	response := currentResponse(t, h, "/api/current?provider=antigravity&account="+itoa(account.ID))
+	for _, field := range []string{"snapshotAt", "promptCredits", "monthlyCredits", "lowestPool", "account"} {
+		if _, ok := response[field]; !ok {
+			t.Errorf("canonical field %q missing: %+v", field, response)
+		}
+	}
+	quotas, ok := response["quotas"].([]interface{})
+	if !ok {
+		t.Fatalf("quotas = %+v", response["quotas"])
+	}
+	foundReset := false
+	for _, raw := range quotas {
+		quota := raw.(map[string]interface{})
+		if quota["modelId"] != "antigravity_claude_gpt" {
+			continue
+		}
+		foundReset = true
+		for _, field := range []string{"resetTime", "timeUntilReset", "timeUntilResetSeconds"} {
+			if _, ok := quota[field]; !ok {
+				t.Errorf("quota field %q missing: %+v", field, quota)
+			}
+		}
+	}
+	if !foundReset {
+		t.Errorf("Claude quota with reset fields missing: %+v", quotas)
+	}
+}
+
 func itoa(id int64) string {
 	return strconv.FormatInt(id, 10)
 }
@@ -70,4 +123,3 @@ func currentField(t *testing.T, h *Handler, target, field string) interface{} {
 	t.Helper()
 	return currentResponse(t, h, target)[field]
 }
-

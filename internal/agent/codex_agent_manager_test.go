@@ -972,7 +972,7 @@ func TestCodexAgentManager_NativeAccountCollidingWithLegacyProfileIsReported(t *
 	}
 	waitUntil(t, time.Second, func() bool { return fx.instance("personal") != nil }, "non-colliding native account to start")
 
-	if got := fx.instance("work"); got == nil || got.Profile.Native {
+	if got := fx.instance("work"); got == nil || fx.manager.profileIsNative(got.Profile) {
 		t.Fatalf("the legacy profile must keep the alias, got %+v", got)
 	}
 	if !strings.Contains(logs.String(), "legacy profile of the same name") || !strings.Contains(logs.String(), "account=work") {
@@ -990,4 +990,176 @@ func TestCodexAgentManager_NativeAccountCollidingWithLegacyProfileIsReported(t *
 	if after := strings.Count(logs.String(), "legacy profile of the same name"); after != before {
 		t.Fatalf("collision warning repeated on rescan: %d then %d", before, after)
 	}
+}
+
+func TestCodexAgentManager_IgnoredNativeCollisionCannotReplaceOrRemoveLegacy(t *testing.T) {
+	fx := newCodexManagerFixture(t)
+	legacy := CodexProfile{Name: "work", AccountID: "acct-legacy", UserID: "user-legacy", SavedAt: time.Now().UTC()}
+	legacy.Tokens.AccessToken = "legacy-token"
+	profilePath := fx.writeProfile(t, legacy)
+	if err := fx.manager.loadAndStartProfile(profilePath); err != nil {
+		t.Fatalf("loadAndStartProfile: %v", err)
+	}
+
+	authRoot := t.TempDir()
+	writeCodexAuthHome(t, authRoot, "work", "native-token")
+	fx.manager.SetAuthRoot(authRoot)
+	if err := fx.manager.loadAndStartNativeAccounts(); err != nil {
+		t.Fatalf("loadAndStartNativeAccounts: %v", err)
+	}
+	original := fx.instance("work")
+	if original == nil || fx.manager.profileIsNative(original.Profile) || original.Profile.AccountID != "acct-legacy" {
+		t.Fatalf("legacy owner was not retained: %+v", original)
+	}
+
+	nativePath := filepath.Join(authRoot, "work", "auth.json")
+	future := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(nativePath, future, future); err != nil {
+		t.Fatalf("touch native auth: %v", err)
+	}
+	fx.manager.scanForNativeAccountChanges()
+	if got := fx.instance("work"); got != original || got.Profile.AccountID != "acct-legacy" {
+		t.Fatalf("ignored native update replaced legacy owner: original=%p current=%+v", original, got)
+	}
+
+	if err := os.RemoveAll(filepath.Join(authRoot, "work")); err != nil {
+		t.Fatalf("remove native home: %v", err)
+	}
+	fx.manager.scanForNativeAccountChanges()
+	if got := fx.instance("work"); got != original {
+		t.Fatalf("ignored native removal stopped legacy owner: original=%p current=%+v", original, got)
+	}
+	accounts, err := fx.store.QueryActiveProviderAccounts("codex")
+	if err != nil || len(accounts) != 1 || accounts[0].Name != "work" {
+		t.Fatalf("legacy DB account changed: accounts=%+v err=%v", accounts, err)
+	}
+}
+
+func TestCodexAgentManager_SourceRemovalAffectsOnlyItsOwner(t *testing.T) {
+	t.Run("deleted legacy is not shielded by ignored native home", func(t *testing.T) {
+		fx := newCodexManagerFixture(t)
+		legacy := CodexProfile{Name: "work", AccountID: "acct-legacy"}
+		legacy.Tokens.AccessToken = "legacy-token"
+		profilePath := fx.writeProfile(t, legacy)
+		if err := fx.manager.loadAndStartProfile(profilePath); err != nil {
+			t.Fatal(err)
+		}
+		authRoot := t.TempDir()
+		writeCodexAuthHome(t, authRoot, "work", "native-token")
+		fx.manager.SetAuthRoot(authRoot)
+		if err := fx.manager.loadAndStartNativeAccounts(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(profilePath); err != nil {
+			t.Fatal(err)
+		}
+		fx.manager.scanForProfileChanges()
+		if got := fx.instance("work"); got != nil {
+			t.Fatalf("deleted legacy still running: %+v", got)
+		}
+	})
+
+	t.Run("different native identity cannot inherit deleted legacy history", func(t *testing.T) {
+		fx := newCodexManagerFixture(t)
+		legacy := CodexProfile{Name: "work", AccountID: "acct-legacy"}
+		legacy.Tokens.AccessToken = "legacy-token"
+		profilePath := fx.writeProfile(t, legacy)
+		if err := fx.manager.loadAndStartProfile(profilePath); err != nil {
+			t.Fatal(err)
+		}
+		authRoot := t.TempDir()
+		writeCodexAuthHome(t, authRoot, "work", "native-token")
+		fx.manager.SetAuthRoot(authRoot)
+		if err := fx.manager.loadAndStartNativeAccounts(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(profilePath); err != nil {
+			t.Fatal(err)
+		}
+		fx.manager.scanForProfileChanges()
+		if got := fx.instance("work"); got != nil {
+			t.Fatalf("replacement native account inherited the alias: %+v", got)
+		}
+		accounts, err := fx.store.QueryProviderAccounts("codex")
+		if err != nil || len(accounts) != 1 || accounts[0].ExternalID != "acct-legacy" || accounts[0].DeletedAt == nil {
+			t.Fatalf("legacy identity/history was not preserved: accounts=%+v err=%v", accounts, err)
+		}
+
+		// The refusal is logged once per login, not on every 30s rescan.
+		logs := &lockedBuffer{}
+		fx.manager.logger = slog.New(slog.NewTextHandler(logs, nil))
+		fx.manager.scanForProfileChanges()
+		fx.manager.scanForProfileChanges()
+		if n := strings.Count(logs.String(), "failed to reload native Codex account"); n != 0 {
+			t.Fatalf("unchanged refused login retried %d times:\n%s", n, logs.String())
+		}
+		future := time.Now().Add(2 * time.Hour)
+		if err := os.Chtimes(filepath.Join(authRoot, "work", "auth.json"), future, future); err != nil {
+			t.Fatal(err)
+		}
+		fx.manager.scanForProfileChanges()
+		if n := strings.Count(logs.String(), "failed to reload native Codex account"); n != 1 {
+			t.Fatalf("a new login must be re-checked once, got %d:\n%s", n, logs.String())
+		}
+	})
+
+	t.Run("seeded default row without identity is claimed by native default", func(t *testing.T) {
+		fx := newCodexManagerFixture(t)
+		accounts, err := fx.store.QueryProviderAccounts("codex")
+		if err != nil || len(accounts) != 1 || accounts[0].Name != "default" || accounts[0].ExternalID != "" {
+			t.Fatalf("precondition: want upstream's seeded default row without identity, got %+v err=%v", accounts, err)
+		}
+		authRoot := t.TempDir()
+		writeCodexAuthHome(t, authRoot, "default", "default-token")
+		writeCodexAuthHome(t, authRoot, "work", "work-token")
+		fx.manager.SetAuthRoot(authRoot)
+		if err := fx.manager.loadAndStartNativeAccounts(); err != nil {
+			t.Fatal(err)
+		}
+		got := fx.instance("default")
+		if got == nil || !fx.manager.profileIsNative(got.Profile) {
+			t.Fatalf("container default login was refused: %+v", got)
+		}
+		if fx.instance("work") == nil {
+			t.Fatal("second native account did not start")
+		}
+	})
+
+	t.Run("removing last native directory retires its owner", func(t *testing.T) {
+		fx := newCodexManagerFixture(t)
+		authRoot := t.TempDir()
+		writeCodexAuthHome(t, authRoot, "work", "native-token")
+		fx.manager.SetAuthRoot(authRoot)
+		if err := fx.manager.loadAndStartNativeAccounts(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(filepath.Join(authRoot, "work")); err != nil {
+			t.Fatal(err)
+		}
+		fx.manager.scanForNativeAccountChanges()
+		if got := fx.instance("work"); got != nil {
+			t.Fatalf("removed native account still running: %+v", got)
+		}
+	})
+
+	t.Run("missing native root preserves running native accounts", func(t *testing.T) {
+		fx := newCodexManagerFixture(t)
+		authRoot := t.TempDir()
+		writeCodexAuthHome(t, authRoot, "work", "native-token")
+		fx.manager.SetAuthRoot(authRoot)
+		if err := fx.manager.loadAndStartNativeAccounts(); err != nil {
+			t.Fatal(err)
+		}
+		original := fx.instance("work")
+		if original == nil || !fx.manager.profileIsNative(original.Profile) {
+			t.Fatalf("native owner did not start: %+v", original)
+		}
+		if err := os.RemoveAll(authRoot); err != nil {
+			t.Fatal(err)
+		}
+		fx.manager.scanForNativeAccountChanges()
+		if got := fx.instance("work"); got != original {
+			t.Fatalf("unmounted root retired native owner: original=%p current=%+v", original, got)
+		}
+	})
 }

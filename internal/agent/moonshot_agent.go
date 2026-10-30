@@ -93,8 +93,7 @@ func (a *MoonshotAgent) poll(ctx context.Context) {
 			return
 		}
 		if errors.Is(err, api.ErrMoonshotRateLimited) {
-			cycles := a.backoff.RateLimited()
-			a.logger.Warn("Moonshot rate limited, backing off", "skip_cycles", cycles)
+			a.backoff.rateLimited("moonshot", err, a.logger)
 			return
 		}
 		a.logger.Error("Failed to fetch Moonshot balance", "error", err)

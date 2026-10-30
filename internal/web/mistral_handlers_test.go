@@ -27,6 +27,9 @@ func TestMistralReporting(t *testing.T) {
 	}
 	h := NewHandler(db, nil, nil, nil, &config.Config{MistralEnabled: true, SyntheticAPIKey: "syn_test", PollInterval: 120 * time.Second})
 	current := h.buildMistralCurrent()
+	if got := current["snapshotAt"]; got != now.Format(time.RFC3339) {
+		t.Fatalf("snapshotAt = %v, want stored capture time %s", got, now.Format(time.RFC3339))
+	}
 	qs := current["quotas"].([]interface{})
 	if len(qs) != 2 || qs[0].(map[string]interface{})["currency"] != "EUR" {
 		t.Fatalf("current=%v", current)
