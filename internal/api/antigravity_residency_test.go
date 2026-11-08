@@ -49,6 +49,7 @@ func TestAgyResidentSessionsAreCappedIndependentOfAccountCount(t *testing.T) {
 }
 
 func TestAgyAdmissionPrecedesLaunchAndFailureReleasesReservation(t *testing.T) {
+	t.Setenv("ANTIGRAVITY_MAX_RESIDENT_SESSIONS", "1")
 	for _, tc := range []struct {
 		name  string
 		start func() (*agySession, error)
@@ -105,6 +106,26 @@ func TestAgyAdmissionPrecedesLaunchAndFailureReleasesReservation(t *testing.T) {
 				t.Fatal("failed startup left a session attached to the runner")
 			}
 		})
+	}
+}
+
+func TestAgyDefaultCapKeepsTwoAccountsWarm(t *testing.T) {
+	restore := agyResidentSnapshotForTest()
+	defer restore()
+	t.Setenv("ANTIGRAVITY_MAX_RESIDENT_SESSIONS", "")
+
+	first := NewAntigravityCLIRunner(nil)
+	defer first.Stop()
+	second := NewAntigravityCLIRunner(nil)
+	defer second.Stop()
+	first.sess = &agySession{}
+	second.sess = &agySession{}
+	for range 3 {
+		agyAdmitResident(first)
+		agyAdmitResident(second)
+		if first.sess == nil || second.sess == nil {
+			t.Fatal("default cap evicted one of two warm account sessions")
+		}
 	}
 }
 

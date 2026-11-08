@@ -46,15 +46,15 @@ var agyPollSerial = make(chan struct{}, 1)
 
 // defaultAgyMaxResidentSessions is the resident cap used when
 // ANTIGRAVITY_MAX_RESIDENT_SESSIONS is unset or invalid.
-const defaultAgyMaxResidentSessions = 1
+const defaultAgyMaxResidentSessions = 2
 
 // agyMaxResidentSessions caps how many agy processes stay alive at once. Each
 // one costs roughly 190 MiB resident, so this cap - not the number of
 // configured accounts - determines the daemon's memory ceiling. With more
 // accounts than slots, a poll evicts another account's warm session instead of
-// adding a second process.
+// adding another process.
 //
-// By default, holding it at 1 ensures two or more accounts fit the 512M
+// By default, two accounts can stay warm between polls within the 768M
 // container budget documented in
 // docs/WITH_USER_ENV.md#measured-resource-budget. Raising it via
 // ANTIGRAVITY_MAX_RESIDENT_SESSIONS is only safe alongside a matching raise
@@ -574,5 +574,9 @@ func (r *AntigravityCLIRunner) killSession(sess *agySession) {
 	}
 	if sess.pty != nil {
 		_ = sess.pty.Close()
+	}
+	if sess.cmd != nil && sess.cmd.Process != nil {
+		// Killing alone leaves a zombie; collect it before releasing the slot.
+		_ = sess.cmd.Wait()
 	}
 }

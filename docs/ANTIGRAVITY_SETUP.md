@@ -67,7 +67,7 @@ install locations (`~/.local/bin/agy`, `/opt/homebrew/bin/agy`,
 
 #### Multi-account residency cap (`ANTIGRAVITY_MAX_RESIDENT_SESSIONS`)
 
-Each warm `agy` process costs ~190 MiB RSS. By default, onWatch caps resident `agy` processes to `1` to fit within the standard 512M container memory budget. If you configure multiple Antigravity accounts and have sufficient RAM, set `ANTIGRAVITY_MAX_RESIDENT_SESSIONS=2` (or higher) in your `.env` to keep multiple accounts warm and prevent per-poll cold-start process evictions - and raise the container's `mem_limit` in `docker-compose.yml` (or the with-user-env override) by roughly 190 MiB per extra session, per the with-user-env budget in [WITH_USER_ENV.md](WITH_USER_ENV.md#measured-resource-budget).
+Each warm `agy` process costs ~190 MiB RSS. By default, onWatch caps resident `agy` processes to `2`, and the with-user-env overlay budgets 768M so two accounts can stay warm between polls. If you configure more accounts, match `ANTIGRAVITY_MAX_RESIDENT_SESSIONS` to the active account count to prevent per-poll cold starts, and raise `deploy.resources.limits.memory` in your Compose configuration by roughly 190 MiB per extra session. Setting the cap to `1` restores the former memory tradeoff but causes eviction churn with multiple accounts. Recheck actual usage with authenticated sessions; see [WITH_USER_ENV.md](WITH_USER_ENV.md#measured-resource-budget).
 
 ---
 

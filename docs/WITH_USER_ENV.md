@@ -481,45 +481,49 @@ claude-code 2.1.310, agy 1.4.7:
 | `agy` binary on disk | 228 MB |
 | Peak RSS of one `agy --version` | 134 MB (agy 1.1.11, 2026-08-10; not re-measured) |
 
-The daemon limit is **512M** rather than something near upstream's 64M for one
-reason: with `ANTIGRAVITY_SOURCE=cli` the daemon itself spawns `agy` and keeps the
-process warm for five minutes. A warm session costs more than the 134 MB one-shot
-figure above, so the ceiling has to accommodate it.
+The daemon limit is **768M**: with CLI polling the daemon keeps up to two `agy`
+sessions warm for five minutes by default. Each warm process costs roughly
+190 MiB, with additional memory needed for the daemon and page cache.
 
-**If you do not use `ANTIGRAVITY_SOURCE=cli`, no `agy` process ever starts in the
-daemon and you can drop that limit to 128M.**
+On **2026-11-08**, px-debian-210 reported 417.6 MiB used with a 768 MiB limit
+and one warm session. This is an observation from the reported deployment,
+not a measurement of the new two-session default. Recheck memory after updating;
+the extra session trades memory for less startup CPU and disk I/O.
+
+**With CLI polling disabled (`ANTIGRAVITY_SOURCE=ide`), no managed `agy` process
+starts in the daemon and you can drop that limit to 128M.** The default source
+`both` also enables CLI polling.
 
 ### Multi-account residency cap
 
-Before **2026-08-10**, each configured Antigravity account owned its own
-`AntigravityCLIRunner`, and only fetches were serialized (`agyPollSerial`) - the
-warm-session TTL (5m) against a 120s poll interval meant every account's `agy`
-process stayed resident at once. Two accounts could plausibly exceed the 512M
-limit; nothing actually bounded memory by account count.
+`ANTIGRAVITY_MAX_RESIDENT_SESSIONS` caps the process-wide number of managed
+`agy` sessions. The default is **2**, allowing the reported two-account workload
+to reuse both healthy sessions on each 120-second poll. Accounts use separate
+credential homes, so their sessions cannot be shared. More accounts than slots
+still cause eviction churn: match the cap to the active account count and
+increase the memory budget accordingly. Set it to `1` for the former memory
+budget if you accept that tradeoff.
 
-`agyMaxResidentSessions` (`internal/api/antigravity_cli.go`) now caps the
-process-wide count of live `agy` sessions independent of how many accounts are
-configured. A poll that needs the slot evicts the least-recently-admitted
-session rather than starting a second process. The slot is reserved **before**
-the new process starts and released again if launch or readiness fails, so the
-cap holds during startup as well as afterwards
-(`TestAgyAdmissionPrecedesLaunchAndFailureReleasesReservation`). Verified both by
-`TestAgyResidentSessionsAreCappedIndependentOfAccountCount` (unit-level, cap
-never exceeded across 5 runners) and against a live container:
+Admission evicts before startup, and a failed launch or readiness check releases
+the reservation. Cleanup kills the process tree, closes its PTY, and calls
+`Wait()` before releasing the slot. This applies to eviction, idle timeout,
+unhealthy sessions, failed readiness, and shutdown, preventing zombie children.
+The overlay also sets `pids_limit: 256` as a backstop. Deploy it with the cleanup
+fix; applying that limit to the old leaking image can break polling within hours.
 
-| Accounts configured | Live `agy` processes (docker exec ps) | Container RSS |
-|---|---|---|
-| 1 (default only) | 1 | 140 MiB |
-| 4 (default + 3 named) | 1 (the other 2 already exited `<defunct>`, evicted per the cap) | 131.6 MiB |
+After deploying, restart/recreate the container once to clear existing zombies.
+Check over several poll cycles:
 
-Measured **2026-08-10** on the same build (`docker stats --no-stream onwatch`
-after each account's agent had a poll cycle). RSS does not grow with account
-count and stays well under the 512M limit, so no gating or limit change was
-needed. This did not require real Antigravity logins: any subdirectory under
-`AntigravityAuthRoot` registers as an account (`internal/account/antigravity_source.go`),
-so the extra accounts here have no real credentials and every fetch fails -
-which does not matter for this measurement, since the cap acts before a fetch
-ever succeeds.
+```bash
+docker exec onwatch sh -c 'ps -eo stat,comm | awk '\''$1 ~ /^Z/ && $2 == "agy" {n++} END {print n+0}'\'''
+docker stats --no-stream --format '{{.Name}} mem={{.MemUsage}} pids={{.PIDs}}' onwatch
+docker logs --since 10m onwatch 2>&1 | grep -c 'session evicted'
+```
+
+Expect zero zombie `agy` processes, a stable PID count, and no evictions during
+healthy polling when the cap covers all active accounts. Monitor memory with
+real authenticated sessions before reducing the limit. The checked-in Compose
+files omit `--debug`; remove `command: ["--debug"]` from any local override too.
 
 The 512M on each `*-login` service is a ceiling for the interactive TUIs and has
 **not** been profiled - those flows need a terminal, so they were not measured.
