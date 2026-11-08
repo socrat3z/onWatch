@@ -9980,8 +9980,19 @@ func (h *Handler) buildAntigravityCurrentOK(accountID int64) (response map[strin
 		return response, true, false
 	}
 
-	response["capturedAt"] = latest.CapturedAt.Format(time.RFC3339)
-	response["snapshotAt"] = latest.CapturedAt.Format(time.RFC3339)
+	capturedAt := latest.CapturedAt.UTC()
+	response["capturedAt"] = capturedAt.Format(time.RFC3339)
+	response["snapshotAt"] = capturedAt.Format(time.RFC3339)
+	age := now.Sub(capturedAt)
+	if age < 0 {
+		age = 0
+	}
+	response["ageSeconds"] = int64(age.Seconds())
+	response["lastUpdatedAt"] = capturedAt.Format(time.RFC3339)
+	stale := snapshotStale(now, capturedAt)
+	if stale {
+		response["isStale"] = true
+	}
 	if latest.Email != "" {
 		response["email"] = latest.Email
 	}
@@ -9999,7 +10010,7 @@ func (h *Handler) buildAntigravityCurrentOK(accountID int64) (response map[strin
 	// The agy CLI source reports bucket rows (weekly + 5h per group); render them
 	// directly rather than collapsing into the IDE's logical model groups.
 	if latest.Source == api.AntigravitySourceCLI {
-		quotas := h.buildAntigravityCLIQuotas(latest.Models)
+		quotas := h.buildAntigravityCLIQuotas(latest.Models, age, capturedAt, stale)
 		response["quotas"] = quotas
 		response["pools"] = quotas
 		if lowest := lowestAntigravityPool(quotas); lowest != nil {
@@ -10026,13 +10037,18 @@ func (h *Handler) buildAntigravityCurrentOK(accountID int64) (response map[strin
 			"models":            g.ModelIDs,
 			"modelLabels":       g.Labels,
 			"color":             g.Color,
+			"ageSeconds":        int64(age.Seconds()),
+			"lastUpdatedAt":     capturedAt.Format(time.RFC3339),
+			"isStale":           stale,
 		}
 		if g.ResetTime != nil {
 			timeUntilReset := g.TimeUntilReset
 			if timeUntilReset < 0 {
 				timeUntilReset = 0
 			}
-			qMap["resetTime"] = g.ResetTime.Format(time.RFC3339)
+			resetRFC := g.ResetTime.UTC().Format(time.RFC3339)
+			qMap["resetTime"] = resetRFC
+			qMap["resetsAt"] = resetRFC
 			qMap["timeUntilReset"] = formatDuration(timeUntilReset)
 			qMap["timeUntilResetSeconds"] = int64(timeUntilReset.Seconds())
 		}
@@ -10064,7 +10080,7 @@ func (h *Handler) buildAntigravityCurrentOK(accountID int64) (response map[strin
 
 // buildAntigravityCLIQuotas renders agy CLI bucket rows (one card per bucket,
 // e.g. Gemini Weekly/5h, Claude+GPT Weekly/5h) in stable display order.
-func (h *Handler) buildAntigravityCLIQuotas(models []api.AntigravityModelQuota) []map[string]interface{} {
+func (h *Handler) buildAntigravityCLIQuotas(models []api.AntigravityModelQuota, age time.Duration, capturedAt time.Time, stale bool) []map[string]interface{} {
 	ordered := make([]api.AntigravityModelQuota, len(models))
 	copy(ordered, models)
 	sort.SliceStable(ordered, func(i, j int) bool {
@@ -10093,13 +10109,18 @@ func (h *Handler) buildAntigravityCLIQuotas(models []api.AntigravityModelQuota) 
 			"models":            []string{m.ModelID},
 			"modelLabels":       []string{m.Label},
 			"color":             api.AgyBucketColor(m.ModelID),
+			"ageSeconds":        int64(age.Seconds()),
+			"lastUpdatedAt":     capturedAt.Format(time.RFC3339),
+			"isStale":           stale,
 		}
 		if m.ResetTime != nil {
 			timeUntilReset := m.TimeUntilReset
 			if timeUntilReset < 0 {
 				timeUntilReset = 0
 			}
-			qMap["resetTime"] = m.ResetTime.Format(time.RFC3339)
+			resetRFC := m.ResetTime.UTC().Format(time.RFC3339)
+			qMap["resetTime"] = resetRFC
+			qMap["resetsAt"] = resetRFC
 			qMap["timeUntilReset"] = formatDuration(timeUntilReset)
 			qMap["timeUntilResetSeconds"] = int64(timeUntilReset.Seconds())
 		}

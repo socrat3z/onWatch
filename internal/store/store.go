@@ -1232,6 +1232,13 @@ func (s *Store) migrateSchema() error {
 		}
 	}
 
+	// Normalize any non-UTC timestamps in antigravity_snapshots to UTC so lexical sorting works reliably.
+	_, _ = s.db.Exec(`
+		UPDATE antigravity_snapshots
+		SET captured_at = strftime('%Y-%m-%dT%H:%M:%SZ', captured_at)
+		WHERE captured_at NOT LIKE '%Z' AND captured_at LIKE '%-%-%T%:%:%'
+	`)
+
 	// Migrate notification_log to provider-scoped dedupe keys.
 	if err := s.migrateNotificationLogProviderScope(); err != nil {
 		return fmt.Errorf("failed to migrate notification_log provider scope: %w", err)

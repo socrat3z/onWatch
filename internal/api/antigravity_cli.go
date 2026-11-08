@@ -326,7 +326,7 @@ func (r *AntigravityCLIRunner) Fetch(ctx context.Context) (*AntigravitySnapshot,
 	}
 
 	snap := &AntigravitySnapshot{
-		CapturedAt: time.Now(),
+		CapturedAt: time.Now().UTC(),
 		Source:     AntigravitySourceCLI,
 		Models:     models,
 		RawJSON:    string(summary),

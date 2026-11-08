@@ -9227,6 +9227,82 @@ func TestHandler_Current_Antigravity_WithSnapshotData(t *testing.T) {
 	if !ok || len(quotas) == 0 {
 		t.Error("expected non-empty quotas array")
 	}
+	if _, ok := resp["ageSeconds"].(float64); !ok {
+		t.Errorf("expected ageSeconds in response, got %v", resp["ageSeconds"])
+	}
+	if _, ok := resp["lastUpdatedAt"].(string); !ok {
+		t.Errorf("expected lastUpdatedAt in response, got %v", resp["lastUpdatedAt"])
+	}
+	qMap, ok := quotas[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected quota map, got %T", quotas[0])
+	}
+	if _, ok := qMap["ageSeconds"].(float64); !ok {
+		t.Errorf("expected ageSeconds in quota, got %v", qMap["ageSeconds"])
+	}
+	if _, ok := qMap["lastUpdatedAt"].(string); !ok {
+		t.Errorf("expected lastUpdatedAt in quota, got %v", qMap["lastUpdatedAt"])
+	}
+	if _, ok := qMap["resetsAt"].(string); !ok {
+		t.Errorf("expected resetsAt in quota, got %v", qMap["resetsAt"])
+	}
+}
+
+// TestHandler_Current_Antigravity_CLISourceWithData exercises buildAntigravityCurrent
+// with an agy CLI snapshot containing bucket rows.
+func TestHandler_Current_Antigravity_CLISourceWithData(t *testing.T) {
+	t.Parallel()
+	s, _ := store.New(":memory:")
+	defer s.Close()
+
+	now := time.Now().UTC()
+	resetTime := now.Add(5 * time.Hour)
+
+	s.InsertAntigravitySnapshot(&api.AntigravitySnapshot{
+		CapturedAt: now,
+		Source:     api.AntigravitySourceCLI,
+		Email:      "cli@example.com",
+		Models: []api.AntigravityModelQuota{
+			{ModelID: "gemini-5h", Label: "Gemini 5h", RemainingFraction: 0.8, RemainingPercent: 80, ResetTime: &resetTime},
+			{ModelID: "gemini-weekly", Label: "Gemini Weekly", RemainingFraction: 0.9, RemainingPercent: 90, ResetTime: &resetTime},
+		},
+	})
+
+	h := NewHandler(s, nil, nil, nil, createTestConfigWithAntigravity())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/current?provider=antigravity", nil)
+	rr := httptest.NewRecorder()
+	h.Current(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+
+	if resp["source"] != api.AntigravitySourceCLI {
+		t.Errorf("expected source %q, got %v", api.AntigravitySourceCLI, resp["source"])
+	}
+	if _, ok := resp["ageSeconds"].(float64); !ok {
+		t.Errorf("expected ageSeconds in response, got %v", resp["ageSeconds"])
+	}
+	quotas, ok := resp["quotas"].([]interface{})
+	if !ok || len(quotas) != 2 {
+		t.Fatalf("expected 2 quotas, got %d", len(quotas))
+	}
+	qMap, ok := quotas[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected quota map, got %T", quotas[0])
+	}
+	if _, ok := qMap["ageSeconds"].(float64); !ok {
+		t.Errorf("expected ageSeconds in quota, got %v", qMap["ageSeconds"])
+	}
+	if _, ok := qMap["resetsAt"].(string); !ok {
+		t.Errorf("expected resetsAt in quota, got %v", qMap["resetsAt"])
+	}
+	if _, ok := qMap["resetTime"].(string); !ok {
+		t.Errorf("expected resetTime in quota, got %v", qMap["resetTime"])
+	}
 }
 
 // TestHandler_Current_Antigravity_NilStore exercises nil store branch.

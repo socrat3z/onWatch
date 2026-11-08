@@ -51,7 +51,7 @@ func (s *Store) InsertAntigravitySnapshot(snapshot *api.AntigravitySnapshot) (in
 		`INSERT INTO antigravity_snapshots (account_id, captured_at, email, plan_name, prompt_credits, monthly_credits, raw_json, model_count, source)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		snapshot.AccountID,
-		snapshot.CapturedAt.Format(time.RFC3339Nano),
+		snapshot.CapturedAt.UTC().Format(time.RFC3339Nano),
 		snapshot.Email,
 		snapshot.PlanName,
 		snapshot.PromptCredits,
@@ -72,7 +72,7 @@ func (s *Store) InsertAntigravitySnapshot(snapshot *api.AntigravitySnapshot) (in
 	for _, m := range snapshot.Models {
 		var resetTimeVal interface{}
 		if m.ResetTime != nil {
-			resetTimeVal = m.ResetTime.Format(time.RFC3339Nano)
+			resetTimeVal = m.ResetTime.UTC().Format(time.RFC3339Nano)
 		}
 
 		exhausted := 0
@@ -122,6 +122,7 @@ func (s *Store) QueryLatestAntigravity(accountIDs ...int64) (*api.AntigravitySna
 	}
 
 	snapshot.CapturedAt, _ = time.Parse(time.RFC3339Nano, capturedAt)
+	snapshot.CapturedAt = snapshot.CapturedAt.UTC()
 	if source.Valid {
 		snapshot.Source = source.String
 	}
@@ -159,6 +160,7 @@ func (s *Store) QueryLatestAntigravity(accountIDs ...int64) (*api.AntigravitySna
 		m.IsExhausted = exhausted == 1
 		if resetTime.Valid && resetTime.String != "" {
 			t, _ := time.Parse(time.RFC3339Nano, resetTime.String)
+			t = t.UTC()
 			m.ResetTime = &t
 			m.TimeUntilReset = time.Until(t)
 			if m.TimeUntilReset < 0 {
@@ -341,7 +343,8 @@ func (s *Store) attachAntigravityModels(snapshots []*api.AntigravitySnapshot) er
 			m.IsExhausted = exhausted == 1
 			if resetTime.Valid && resetTime.String != "" {
 				t, _ := time.Parse(time.RFC3339Nano, resetTime.String)
-				m.ResetTime = &t
+				t = t.UTC()
+			m.ResetTime = &t
 			}
 			if snap := byID[snapshotID]; snap != nil {
 				snap.Models = append(snap.Models, m)
@@ -785,6 +788,7 @@ func (s *Store) QueryAntigravitySnapshotAtOrBefore(t time.Time, accountIDs ...in
 	}
 
 	snapshot.CapturedAt, _ = time.Parse(time.RFC3339Nano, capturedAt)
+	snapshot.CapturedAt = snapshot.CapturedAt.UTC()
 	if email.Valid {
 		snapshot.Email = email.String
 	}

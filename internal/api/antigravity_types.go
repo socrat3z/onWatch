@@ -398,7 +398,7 @@ func ParseAgyQuotaSummary(data []byte) ([]AntigravityModelQuota, error) {
 		return nil, fmt.Errorf("agy quota summary: missing response body")
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	var rows []AntigravityModelQuota
 	for _, g := range resp.Response.Groups {
 		for _, b := range g.Buckets {
@@ -418,8 +418,9 @@ func ParseAgyQuotaSummary(data []byte) ([]AntigravityModelQuota, error) {
 			}
 			if b.ResetTime != "" {
 				if t, err := time.Parse(time.RFC3339, b.ResetTime); err == nil {
-					row.ResetTime = &t
-					if d := t.Sub(now); d > 0 {
+					utc := t.UTC()
+					row.ResetTime = &utc
+					if d := utc.Sub(now); d > 0 {
 						row.TimeUntilReset = d
 					}
 				}
@@ -645,7 +646,7 @@ func (r AntigravityUserStatusResponse) ToSnapshot(capturedAt time.Time) *Antigra
 	}
 
 	if r.UserStatus.CascadeModelConfigData != nil {
-		now := time.Now()
+		now := time.Now().UTC()
 		for _, cfg := range r.UserStatus.CascadeModelConfigData.ClientModelConfigs {
 			if cfg.QuotaInfo == nil {
 				continue
