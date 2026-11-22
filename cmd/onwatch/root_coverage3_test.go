@@ -227,7 +227,7 @@ func TestFreshSetup_AllProviders(t *testing.T) {
 	t.Setenv("PATH", "")
 
 	input := strings.Join([]string{
-		"14",           // All providers
+		"16",           // All providers
 		"syn_abc12345", // synthetic key
 		"zai-key",      // zai key
 		"y",            // use default zai URL
@@ -242,7 +242,10 @@ func TestFreshSetup_AllProviders(t *testing.T) {
 		"n",            // muse: do not enable without credentials
 		"",             // commandcode: no key, auto-detect later
 		"n",            // commandcode: do not enable without credentials
+		"zenmux-key",   // zenmux Management API Key
 		"",             // opencode go: skip
+		"",             // alibaba cookies file: none, configure from the dashboard
+		"",             // alibaba region: default
 		"1",            // antigravity source: both
 		"",             // admin user (default)
 		"",             // auto-generate password
@@ -253,7 +256,7 @@ func TestFreshSetup_AllProviders(t *testing.T) {
 	reader := bufio.NewReader(strings.NewReader(input))
 	cfg, err := freshSetup(reader)
 	if err != nil {
-		t.Fatalf("freshSetup choice 12 error: %v", err)
+		t.Fatalf("freshSetup all providers error: %v", err)
 	}
 	if cfg.syntheticKey == "" {
 		t.Fatal("expected synthetic key to be set")
@@ -280,7 +283,7 @@ func TestFreshSetup_MultipleProviders_Choice6(t *testing.T) {
 	t.Setenv("PATH", "")
 
 	input := strings.Join([]string{
-		"13",           // Multiple
+		"15",           // Multiple
 		"y",            // add synthetic
 		"syn_abc12345", // synthetic key
 		"n",            // skip zai
@@ -293,7 +296,9 @@ func TestFreshSetup_MultipleProviders_Choice6(t *testing.T) {
 		"n",            // skip ollama
 		"n",            // skip muse
 		"n",            // skip commandcode
+		"n",            // skip zenmux
 		"n",            // skip opencode go
+		"n",            // skip alibaba
 		"1",            // antigravity source: both
 		"",             // admin user (default)
 		"",             // auto-generate password
@@ -304,7 +309,7 @@ func TestFreshSetup_MultipleProviders_Choice6(t *testing.T) {
 	reader := bufio.NewReader(strings.NewReader(input))
 	cfg, err := freshSetup(reader)
 	if err != nil {
-		t.Fatalf("freshSetup choice 11 error: %v", err)
+		t.Fatalf("freshSetup multiple error: %v", err)
 	}
 	if cfg.syntheticKey == "" {
 		t.Fatal("expected synthetic key")
@@ -1875,10 +1880,11 @@ func TestCollectMultipleProviders_AllNo(t *testing.T) {
 		"n", // skip ollama
 		"n", // skip muse
 		"n", // skip commandcode
+		"n", // skip zenmux
 	}, "\n") + "\n"
 
 	reader := bufio.NewReader(strings.NewReader(input))
-	syn, zai, zaiURL, anth, codex, _, anti, gemini, _, ollama, _, _, _, _ := collectMultipleProviders(reader, testLogger())
+	syn, zai, zaiURL, anth, codex, _, anti, gemini, _, ollama, _, _, _, _, _ := collectMultipleProviders(reader, testLogger())
 
 	if syn != "" || zai != "" || zaiURL != "" || anth != "" || codex != "" || anti || gemini || ollama != "" {
 		t.Fatalf("expected all empty/false: syn=%q zai=%q zaiURL=%q anth=%q codex=%q anti=%v gemini=%v ollama=%q",
@@ -1906,10 +1912,11 @@ func TestCollectMultipleProviders_AnthropicAndCodexAdded(t *testing.T) {
 		"n",         // skip ollama
 		"n",         // skip muse
 		"n",         // skip commandcode
+		"n",         // skip zenmux
 	}, "\n") + "\n"
 
 	reader := bufio.NewReader(strings.NewReader(input))
-	_, _, _, anth, codex, _, _, _, _, _, _, _, _, _ := collectMultipleProviders(reader, testLogger())
+	_, _, _, anth, codex, _, _, _, _, _, _, _, _, _, _ := collectMultipleProviders(reader, testLogger())
 
 	if anth == "" {
 		t.Fatal("expected anthropic token")

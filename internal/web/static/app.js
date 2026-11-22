@@ -83,8 +83,11 @@ function getCurrentProvider() {
   if (ollamaGrid) return 'ollama';
   const museGrid = document.getElementById('quota-grid-muse');
   if (museGrid) return 'muse';
+  if (document.getElementById('quota-grid-zenmux')) return 'zenmux';
   const commandCodeGrid = document.getElementById('quota-grid-commandcode');
   if (commandCodeGrid) return 'commandcode';
+  const alibabaGrid = document.getElementById('quota-grid-alibaba');
+  if (alibabaGrid) return 'alibaba';
   const grid = document.getElementById('quota-grid');
   return (grid && grid.dataset.provider) || 'synthetic';
 }
@@ -99,6 +102,8 @@ function providerParam() {
     param += minimaxAccountParam();
   } else if (provider === 'anthropic' || provider === 'antigravity') {
     param += providerAccountParam(provider);
+  } else if (provider === 'alibaba') {
+    param += alibabaAccountParam();
   }
   return param;
 }
@@ -108,20 +113,21 @@ function providerParam() {
 // (sessions/cycles/overview/insights) do not apply in this mode.
 function isAccountsOverviewMode(provider = getCurrentProvider()) {
   return (provider === 'codex' && State.codexAccount === 'all') ||
-         (provider === 'minimax' && State.minimaxAccount === 'all');
+         (provider === 'minimax' && State.minimaxAccount === 'all') ||
+         (provider === 'alibaba' && State.alibabaAccount === 'all');
 }
 
 function shouldShowSessionsTable(provider = getCurrentProvider()) {
-  return provider !== 'both' && provider !== 'cursor' && provider !== 'api-integrations' && !isAccountsOverviewMode(provider);
+  return provider !== 'both' && provider !== 'cursor' && provider !== 'zenmux' && provider !== 'api-integrations' && !isAccountsOverviewMode(provider);
   // grok (like synthetic/codex/etc) shows sessions
 }
 
 function shouldShowCyclesTable(provider = getCurrentProvider()) {
-  return provider !== 'both' && provider !== 'api-integrations';
+  return provider !== 'both' && provider !== 'zenmux' && provider !== 'api-integrations';
 }
 
 function shouldShowOverviewTable(provider = getCurrentProvider()) {
-  return provider !== 'both' && provider !== 'gemini' && provider !== 'api-integrations';
+  return provider !== 'both' && provider !== 'gemini' && provider !== 'zenmux' && provider !== 'api-integrations';
 }
 
 function shouldShowHistoryTables(provider = getCurrentProvider()) {
@@ -632,6 +638,190 @@ function minimaxAccountParam() {
   return `&account=${encodeURIComponent(State.minimaxAccount)}`;
 }
 
+// ── Alibaba Account Persistence (multi-account) ──
+
+function loadAlibabaAccount() {
+  try {
+    const stored = localStorage.getItem('onwatch-alibaba-account');
+    if (stored === 'all') {
+      State.alibabaAccount = 'all';
+    } else if (stored) {
+      const parsed = parseInt(stored, 10);
+      State.alibabaAccount = isNaN(parsed) ? null : parsed;
+    }
+  } catch (e) {
+    State.alibabaAccount = null;
+  }
+}
+
+function saveAlibabaAccount(account) {
+  State.alibabaAccount = account;
+  try {
+    localStorage.setItem('onwatch-alibaba-account', account);
+  } catch (e) {
+    // silent
+  }
+}
+
+async function loadAlibabaAccounts() {
+  try {
+    const res = await authFetch(`${API_BASE}/api/alibaba/accounts`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.accounts && data.accounts.length > 0) {
+      let activeAccounts = data.accounts.filter(a => !a.deletedAt);
+      // The seeded empty "default" account is only a placeholder; hide it as
+      // soon as another account has cookies.
+      const withCookies = activeAccounts.filter(a => a.hasCookies);
+      if (withCookies.length > 0) activeAccounts = withCookies;
+      State.alibabaAccounts = activeAccounts;
+      applyDefaultAlibabaSelection();
+      populateAlibabaAccountTabs();
+      updateAlibabaAccountTabsVisibility();
+    }
+  } catch (e) {
+    // silent
+  }
+}
+
+// Mirror of applyDefaultCodexSelection for Alibaba accounts.
+function applyDefaultAlibabaSelection() {
+  let stored = null;
+  try { stored = localStorage.getItem('onwatch-alibaba-account'); } catch (e) { stored = null; }
+  if (stored === 'all') { State.alibabaAccount = 'all'; return; }
+  const storedId = stored != null ? parseInt(stored, 10) : NaN;
+  if (!isNaN(storedId) && State.alibabaAccounts.find(a => a.id === storedId)) {
+    State.alibabaAccount = storedId;
+    return;
+  }
+  if (State.alibabaAccounts.length > 1) {
+    State.alibabaAccount = 'all';
+  } else if (State.alibabaAccounts.length === 1) {
+    State.alibabaAccount = State.alibabaAccounts[0].id;
+  }
+}
+
+function populateAlibabaAccountTabs() {
+  const dropdown = document.getElementById('alibaba-profile-dropdown');
+  const menu = document.getElementById('alibaba-profile-menu');
+  if (!dropdown || !menu) return;
+
+  if (!State.alibabaAccounts || State.alibabaAccounts.length <= 1) {
+    dropdown.style.display = 'none';
+    return;
+  }
+
+  menu.innerHTML = '';
+
+  const allItem = document.createElement('li');
+  allItem.className = 'codex-profile-item' + (State.alibabaAccount === 'all' ? ' active' : '');
+  allItem.dataset.accountId = 'all';
+  allItem.textContent = 'All accounts';
+  allItem.setAttribute('role', 'option');
+  allItem.setAttribute('aria-selected', State.alibabaAccount === 'all' ? 'true' : 'false');
+  allItem.addEventListener('click', () => {
+    switchAlibabaAccount('all');
+    closeAlibabaAccountDropdown();
+  });
+  menu.appendChild(allItem);
+
+  for (const account of State.alibabaAccounts) {
+    const li = document.createElement('li');
+    li.className = 'codex-profile-item' + (account.id === State.alibabaAccount ? ' active' : '');
+    li.dataset.accountId = account.id;
+    li.textContent = account.name;
+    li.setAttribute('role', 'option');
+    li.setAttribute('aria-selected', account.id === State.alibabaAccount ? 'true' : 'false');
+    li.addEventListener('click', () => {
+      switchAlibabaAccount(account.id);
+      closeAlibabaAccountDropdown();
+    });
+    menu.appendChild(li);
+  }
+
+  if (State.alibabaAccount !== 'all' && !State.alibabaAccounts.find(a => a.id === State.alibabaAccount)) {
+    State.alibabaAccount = State.alibabaAccounts[0].id;
+    saveAlibabaAccount(State.alibabaAccount);
+    updateAlibabaAccountTabsActive();
+  }
+
+  updateAlibabaAccountTabsActive();
+}
+
+function switchAlibabaAccount(accountId) {
+  if (State.alibabaAccount === accountId) return;
+  State.alibabaAccount = accountId;
+  saveAlibabaAccount(accountId);
+  updateAlibabaAccountTabsActive();
+  refreshAll();
+}
+
+function updateAlibabaAccountTabsActive() {
+  const label = document.getElementById('alibaba-profile-label');
+  const menu = document.getElementById('alibaba-profile-menu');
+  if (!menu) return;
+
+  if (label) {
+    if (State.alibabaAccount === 'all') {
+      label.textContent = 'All accounts';
+    } else {
+      const active = State.alibabaAccounts && State.alibabaAccounts.find(a => a.id === State.alibabaAccount);
+      if (active) label.textContent = active.name;
+    }
+  }
+
+  menu.querySelectorAll('.codex-profile-item').forEach(item => {
+    const isActive = item.dataset.accountId === 'all'
+      ? State.alibabaAccount === 'all'
+      : parseInt(item.dataset.accountId, 10) === State.alibabaAccount;
+    item.classList.toggle('active', isActive);
+    item.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
+}
+
+function closeAlibabaAccountDropdown() {
+  const trigger = document.getElementById('alibaba-profile-trigger');
+  const menu = document.getElementById('alibaba-profile-menu');
+  if (trigger) trigger.setAttribute('aria-expanded', 'false');
+  if (menu) menu.classList.remove('open');
+}
+
+function updateAlibabaAccountTabsVisibility() {
+  const dropdown = document.getElementById('alibaba-profile-dropdown');
+  if (!dropdown) return;
+
+  const provider = getCurrentProvider();
+  const show = provider === 'alibaba' && State.alibabaAccounts && State.alibabaAccounts.length > 1;
+  dropdown.style.display = show ? '' : 'none';
+}
+
+function initAlibabaAccountTabs() {
+  const trigger = document.getElementById('alibaba-profile-trigger');
+  const menu = document.getElementById('alibaba-profile-menu');
+  if (!trigger || !menu) return;
+
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isOpen = menu.classList.toggle('open');
+    trigger.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#alibaba-profile-dropdown')) {
+      closeAlibabaAccountDropdown();
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeAlibabaAccountDropdown();
+  });
+}
+
+function alibabaAccountParam() {
+  if (!State.alibabaAccount || State.alibabaAccount === 'all') return '';
+  return `&account=${encodeURIComponent(State.alibabaAccount)}`;
+}
+
 // ── Insight Visibility (DB-persisted) ──
 
 // Cross-provider insight correlation map (mirrors backend)
@@ -1032,6 +1222,7 @@ function quotaOrderForProvider(provider) {
   if (provider === 'ollama') return ollamaQuotaOrder;
   if (provider === 'muse') return museQuotaOrder;
   if (provider === 'commandcode') return commandCodeQuotaOrder;
+  if (provider === 'alibaba') return alibabaQuotaOrder;
   return [];
 }
 
@@ -1281,6 +1472,11 @@ const renewalCategories = {
     { label: '5-Hour', groupBy: 'five_hour' },
     { label: 'Weekly', groupBy: 'weekly' },
     { label: 'Monthly', groupBy: 'monthly' }
+  ],
+  alibaba: [
+    { label: '5-Hour', groupBy: 'five_hour' },
+    { label: 'Weekly', groupBy: 'weekly' },
+    { label: 'Monthly', groupBy: 'monthly' }
   ]
 };
 
@@ -1335,6 +1531,11 @@ const providerQuotaDisplayOverrides = {
     five_hour: '5-Hour Credits',
     weekly: 'Weekly Credits',
     monthly: 'Monthly Credits'
+  },
+  alibaba: {
+    five_hour: '5-Hour',
+    weekly: 'Weekly',
+    monthly: 'Monthly'
   },
   moonshot: {
     available_balance: 'Available',
@@ -3826,6 +4027,17 @@ function startCountdowns() {
         }
       }
     });
+    document.querySelectorAll('.zenmux-countdown[data-reset-at]').forEach(el => {
+      const seconds = Math.floor((new Date(el.dataset.resetAt).getTime() - Date.now()) / 1000);
+      if (seconds > 0) {
+        el.textContent = formatDuration(seconds);
+        el.classList.toggle('imminent', seconds < 1800);
+      } else {
+        el.hidden = true;
+        const reset = el.closest('.quota-card')?.querySelector('.reset-time');
+        if (reset) reset.hidden = true;
+      }
+    });
   }, 1000);
 }
 
@@ -4559,6 +4771,277 @@ const commandCodeChartColorFallback = [
   { border: '#ec4899', bg: 'rgba(236, 72, 153, 0.08)' }
 ];
 
+// Zenmux publishes rolling utilization and monthly caps, but no monthly usage.
+function zenmuxCardsHTML(quotas) {
+  if (!Array.isArray(quotas) || quotas.length === 0) return '<p class="insight-text">No Zenmux data available yet.</p>';
+  return quotas.map(q => {
+    const hasPercent = typeof q.utilization === 'number' && Number.isFinite(q.utilization);
+    const shown = hasPercent && typeof q.cardPercent === 'number' ? q.cardPercent : q.utilization;
+    const pct = hasPercent ? shown.toFixed(1) + '% ' + (q.cardLabel || 'Used') : 'Usage unavailable';
+    const value = v => typeof v === 'number' && Number.isFinite(v) ? v.toLocaleString('en-US', { maximumFractionDigits: 4 }) : 'Unknown';
+    const usd = v => typeof v === 'number' && Number.isFinite(v) ? v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : 'Unknown';
+    const fraction = q.name === 'monthly' ? 'Limit: ' + value(q.limit) + ' flows' : value(q.used) + ' / ' + value(q.limit) + ' flows';
+    const barPercent = Math.max(0, Math.min(shown, 100));
+    const bar = hasPercent ? `<div class="progress-wrapper"><div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${barPercent}"><div class="progress-fill" data-status="${getQuotaStatus(q.utilization)}" style="width:${barPercent}%"></div></div></div>` : '';
+    const seconds = q.resetsAt ? Math.floor((new Date(q.resetsAt).getTime() - Date.now()) / 1000) : 0;
+    const reset = seconds > 0 ? `<span class="reset-time" data-reset-at="${escapeHTML(q.resetsAt)}">${escapeHTML(formatResetTime(q.resetsAt))}</span>` : '';
+    const countdown = seconds > 0 ? `<span class="countdown zenmux-countdown" data-reset-at="${escapeHTML(q.resetsAt)}">${escapeHTML(formatDuration(seconds))}</span>` : '';
+    const details = [];
+    if (q.remaining != null) details.push(value(q.remaining) + ' flows remaining');
+    if (q.usedValueUsd != null) details.push('Used value: $' + usd(q.usedValueUsd));
+    if (q.name === 'five_hour' && q.remainingResets != null) details.push('Early resets remaining: ' + value(q.remainingResets));
+    if (q.maxValueUsd != null) details.push('Limit value: $' + usd(q.maxValueUsd));
+    if (typeof q.ratePerHour === 'number' && Number.isFinite(q.ratePerHour)) {
+      details.push('~' + Number(q.ratePerHour.toPrecision(2)) + '%/h' + (q.exhaustHours > 0 ? ' | ~' + Number(q.exhaustHours.toPrecision(2)) + 'h to 100%' : ''));
+    }
+    return `<article class="quota-card" data-quota="${escapeHTML(q.name)}"><header class="card-header"><h2 class="quota-title">${escapeHTML(q.displayName || q.name)}</h2>${countdown}</header><div class="progress-stats"><span class="usage-percent">${escapeHTML(pct)}</span><span class="usage-fraction">${escapeHTML(fraction)}</span></div>${bar}<footer class="card-footer"><span>${escapeHTML(details.join(' | '))}</span>${reset}</footer></article>`;
+  }).join('');
+}
+
+function renderZenmuxCards(data, containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = zenmuxCardsHTML(data.quotas);
+  const info = document.getElementById('zenmux-plan-info');
+  if (info) {
+    const parts = [];
+    if (data.plan && data.plan.tier) parts.push('Plan: ' + data.plan.tier);
+    if (data.plan && data.plan.expires_at) parts.push('Subscription expires: ' + formatDateTime(data.plan.expires_at));
+    if (data.accountStatus) parts.push('Account: ' + data.accountStatus);
+    info.textContent = parts.join(' | ');
+  }
+}
+
+// Account analytics rows are model/time aggregates, never individual requests.
+function zenmuxUsageNumber(value) {
+  if (value == null) return 'Unknown';
+  const parts = String(value).split('.');
+  parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return parts.join('.');
+}
+function zenmuxUsageBucketLabel(value) {
+  const s = String(value || '');
+  if (s.length < 8) return s;
+  return `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}${s.length >= 10 ? ' ' + s.slice(8,10) + ':' + (s.length >= 12 ? s.slice(10,12) : '00') : ''}`;
+}
+// Decimal metrics can exceed Number's exact integer range.
+function zenmuxDecimalParts(value) {
+  const parts = value.split('.');
+  return { digits: BigInt(parts.join('')), scale: (parts[1] || '').length };
+}
+function zenmuxDecimalString(digits, scale) {
+  const text = digits.toString().padStart(scale + 1, '0');
+  if (!scale) return text;
+  const fraction = text.slice(-scale).replace(/0+$/, '');
+  return text.slice(0, -scale) + (fraction ? '.' + fraction : '');
+}
+function zenmuxDecimalAdd(a, b) {
+  if (a == null || b == null) return null;
+  const left = zenmuxDecimalParts(a), right = zenmuxDecimalParts(b);
+  const scale = Math.max(left.scale, right.scale);
+  return zenmuxDecimalString(left.digits * 10n ** BigInt(scale - left.scale) + right.digits * 10n ** BigInt(scale - right.scale), scale);
+}
+function zenmuxDecimalCompare(a, b) {
+  if (a == null || b == null) return a == null ? (b == null ? 0 : -1) : 1;
+  const left = zenmuxDecimalParts(a), right = zenmuxDecimalParts(b);
+  const scale = Math.max(left.scale, right.scale);
+  const x = left.digits * 10n ** BigInt(scale - left.scale);
+  const y = right.digits * 10n ** BigInt(scale - right.scale);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+function zenmuxGroupUsage(rows) {
+  const models = new Map();
+  rows.forEach(row => {
+    if (!models.has(row.modelSlug)) {
+      models.set(row.modelSlug, {modelSlug: row.modelSlug, requestCounts: row.requestCounts, tokens: row.tokens});
+    } else {
+      const model = models.get(row.modelSlug);
+      model.requestCounts = zenmuxDecimalAdd(model.requestCounts, row.requestCounts);
+      model.tokens = zenmuxDecimalAdd(model.tokens, row.tokens);
+    }
+  });
+  return [...models.values()].sort((a,b) => zenmuxDecimalCompare(b.requestCounts, a.requestCounts) || zenmuxDecimalCompare(b.tokens, a.tokens) || a.modelSlug.localeCompare(b.modelSlug));
+}
+function zenmuxUsageRowsHTML(rows, view = 'interval') {
+  if (!rows.length) return '<p class="insight-text">No model usage was returned for this period and billing filter.</p>';
+  const interval = view === 'interval';
+  const body = rows.map(row => `<tr>${interval ? `<td>${escapeHTML(zenmuxUsageBucketLabel(row.bizTime))}</td>` : ''}<td>${escapeHTML(row.modelSlug)}</td><td>${escapeHTML(zenmuxUsageNumber(row.requestCounts))}</td><td>${escapeHTML(zenmuxUsageNumber(row.tokens))}</td></tr>`).join('');
+  return `<div class="table-wrapper"><table class="data-table"><thead><tr>${interval ? '<th>Time bucket</th>' : ''}<th>Model</th><th>Requests</th><th>Tokens</th></tr></thead><tbody>${body}</tbody></table></div>`;
+}
+function zenmuxFractionPercent(value) {
+  if (value == null || zenmuxDecimalCompare(value, '1') > 0) return 'Unknown';
+  const decimal = zenmuxDecimalParts(value);
+  return zenmuxDecimalString(decimal.digits * 100n, decimal.scale) + '%';
+}
+function zenmuxEndpointRowsHTML(rows, data = {}) {
+  if (!rows.length) return '<p class="insight-text">No endpoint details were returned.</p>';
+  const success = data.uptime == null ? '' : `<span>Success rate: ${escapeHTML(zenmuxFractionPercent(data.uptime))}</span>`;
+  const body = rows.map(row => {
+    const labels = (row.endpointSlug === data.mainEndpointSlug ? ' <span>Main</span>' : '') + (row.endpointSlug === data.fastestEndpointSlug ? ' <span>Fastest</span>' : '');
+    return `<tr><td>${escapeHTML(row.endpointSlug)}${labels}</td><td>${escapeHTML(zenmuxUsageNumber(row.requestCounts))}</td><td>${escapeHTML(zenmuxFractionPercent(row.requestRatio))}</td><td>${escapeHTML(zenmuxUsageNumber(row.tokens))}</td><td>${escapeHTML(zenmuxUsageNumber(row.medianLatency))}</td><td>${escapeHTML(zenmuxUsageNumber(row.medianThroughput))}</td></tr>`;
+  }).join('');
+  return `${success}<div class="table-wrapper"><table class="data-table"><thead><tr><th>Endpoint</th><th>Requests</th><th>Request share</th><th>Tokens</th><th>Median latency (ms)</th><th>Median throughput (tokens/s)</th></tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function setupZenmuxUsage() {
+  const form = document.getElementById('zenmux-usage-form');
+  if (!form) return;
+  const dimension = document.getElementById('zenmux-usage-dimension');
+  const month = document.getElementById('zenmux-usage-month');
+  const day = document.getElementById('zenmux-usage-day');
+  const hour = document.getElementById('zenmux-usage-hour');
+  const billing = document.getElementById('zenmux-usage-billing');
+  const status = document.getElementById('zenmux-usage-status');
+  const staleDot = document.getElementById('zenmux-usage-stale-dot');
+  const results = document.getElementById('zenmux-usage-results');
+  const endpoints = document.getElementById('zenmux-endpoint-results');
+  // markStale keeps the rendered rows honest after a failed refresh: the dot
+  // and its tooltip say the numbers are old without adding another text line.
+  const markStale = reason => {
+    if (!staleDot) return;
+    staleDot.classList.add('stale');
+    staleDot.setAttribute('title', reason);
+    staleDot.setAttribute('aria-label', reason);
+  };
+  const clearStale = () => {
+    if (!staleDot) return;
+    staleDot.classList.remove('stale');
+    staleDot.removeAttribute('title');
+    staleDot.removeAttribute('aria-label');
+  };
+  const now = new Date();
+  const localDay = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  month.value = localDay.slice(0,7); day.value = localDay; hour.value = now.toISOString().slice(0,13) + ':00';
+  dimension.addEventListener('change', () => {
+    document.getElementById('zenmux-usage-month-label').hidden = dimension.value !== 'BIZ_MTH';
+    document.getElementById('zenmux-usage-day-label').hidden = dimension.value !== 'BIZ_DT';
+    document.getElementById('zenmux-usage-hour-label').hidden = dimension.value !== 'BIZ_HOUR';
+  });
+  let activeQuery = null;
+  let page = 0;
+  let rows = [];
+  let modelRows = [];
+  let intervalRows = [];
+  let view = 'model';
+  let selectedModel = '';
+  const pageSize = 50;
+  let requestSeq = 0;
+  let inFlight = false;
+  // Do not leave results under filter controls that no longer describe them.
+  [dimension, month, day, hour, billing].forEach(control => control.addEventListener('change', () => {
+    requestSeq++;
+    activeQuery = null;
+    results.innerHTML = '';
+    endpoints.innerHTML = '';
+    clearStale();
+    status.textContent = 'Filters changed. Select Show usage.';
+  }));
+  function renderPage() {
+    const ordered = view === 'model' ? modelRows : intervalRows;
+    const totalPages = Math.max(1, Math.ceil(ordered.length / pageSize));
+    page = Math.max(0, Math.min(page, totalPages - 1));
+    const models = modelRows.map(row => row.modelSlug);
+    if (!models.includes(selectedModel)) selectedModel = models[0] || '';
+    const options = models.map(model => `<option value="${escapeHTML(model)}"${model === selectedModel ? ' selected' : ''}>${escapeHTML(model)}</option>`).join('');
+    const paging = totalPages > 1 ? `<div class="zenmux-usage-actions"><button type="button" class="page-size-select" data-page="prev" ${page === 0 ? 'disabled' : ''}>Previous</button><span>Page ${page + 1} of ${totalPages}</span><button type="button" class="page-size-select" data-page="next" ${page + 1 >= totalPages ? 'disabled' : ''}>Next</button></div>` : '';
+    const choice = rows.length ? `<div class="zenmux-usage-actions"><label>View <select class="page-size-select" id="zenmux-usage-view"><option value="model"${view === 'model' ? ' selected' : ''}>By model</option><option value="interval"${view === 'interval' ? ' selected' : ''}>By interval</option></select></label></div>` : '';
+    const selection = models.length ? `<div class="zenmux-usage-actions"><label for="zenmux-model-select">Provider endpoints for model</label><select class="page-size-select" id="zenmux-model-select">${options}</select><button type="button" class="page-size-select" data-endpoints>Show endpoints</button></div>` : '';
+    results.innerHTML = `${choice}${zenmuxUsageRowsHTML(ordered.slice(page * pageSize, (page + 1) * pageSize), view)}${paging}${selection}`;
+  }
+  async function query(params) {
+    inFlight = true;
+    form.setAttribute('aria-busy', 'true');
+    const sequence = ++requestSeq;
+    status.textContent = 'Loading account usage...';
+    try {
+      const response = await authFetch(`${API_BASE}/api/zenmux/usage?${params}`);
+      const payload = await response.json();
+      if (sequence !== requestSeq) return null;
+      if (!response.ok) {
+        const reason = payload.error || 'Account usage is unavailable.';
+        status.textContent = reason;
+        if (results.innerHTML) markStale(reason);
+        return null;
+      }
+      status.textContent = '';
+      clearStale();
+      return payload;
+    } catch (_) {
+      if (sequence === requestSeq) {
+        status.textContent = 'Account usage is unavailable. Try again later.';
+        if (results.innerHTML) markStale('Last refresh failed. Showing the previous results.');
+      }
+      return null;
+    } finally {
+      inFlight = false;
+      form.setAttribute('aria-busy', 'false');
+    }
+  }
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (inFlight) { status.textContent = 'Request in progress. Please wait.'; return; }
+    const value = dimension.value === 'BIZ_MTH' ? month.value : dimension.value === 'BIZ_DT' ? day.value : hour.value;
+    if (!value) { status.textContent = 'Select a valid period.'; return; }
+    const time = value.replace(/[-:T]/g, '').slice(0, dimension.value === 'BIZ_MTH' ? 6 : dimension.value === 'BIZ_DT' ? 8 : 10);
+    const params = new URLSearchParams({dimension: dimension.value, time});
+    if (billing.value) params.set('bill_type', billing.value);
+    // Keep the previous results on screen while this request runs: a failed
+    // refresh must leave the last-known rows visible rather than blanking the
+    // panel to an error line.
+    const payload = await query(params);
+    if (!payload) return;
+    activeQuery = params; endpoints.innerHTML = ''; rows = payload.data.tokensByModel || []; page = 0; selectedModel = '';
+    modelRows = zenmuxGroupUsage(rows);
+    intervalRows = [...rows].sort((a,b) => b.bizTime.localeCompare(a.bizTime) || a.modelSlug.localeCompare(b.modelSlug));
+    renderPage();
+  });
+  results.addEventListener('change', event => {
+    if (event.target.id === 'zenmux-usage-view') {
+      requestSeq++;
+      view = event.target.value;
+      page = 0;
+      endpoints.innerHTML = '';
+      status.textContent = '';
+      renderPage();
+    } else if (event.target.id === 'zenmux-model-select') {
+      requestSeq++;
+      selectedModel = event.target.value;
+      endpoints.innerHTML = '';
+      status.textContent = 'Model changed. Select Show endpoints.';
+    }
+  });
+  results.addEventListener('click', async event => {
+    const button = event.target.closest('button');
+    if (!button || !activeQuery) return;
+    if (button.dataset.page) { requestSeq++; endpoints.innerHTML = ''; page += button.dataset.page === 'next' ? 1 : -1; renderPage(); return; }
+    if (button.hasAttribute('data-endpoints')) {
+      if (inFlight) return;
+      const model = document.getElementById('zenmux-model-select').value;
+      const params = new URLSearchParams(activeQuery); params.set('model', model);
+      endpoints.innerHTML = '';
+      const payload = await query(params);
+      if (!payload) return;
+      endpoints.innerHTML = `<h4>Endpoint totals for ${escapeHTML(model)}</h4>${zenmuxEndpointRowsHTML(payload.data.endpointUsages || [], payload.data)}`;
+    }
+  });
+  form.requestSubmit();
+}
+
+function zenmuxHistoryDatasets(rows, range) {
+  const configs = [
+    {name: 'five_hour', label: '5-Hour Flows', color: '#0D9488'},
+    {name: 'weekly', label: '7-Day Flows', color: '#F59E0B'},
+  ];
+  return configs.filter(c => rows.some(row => (row.quotas || []).some(q => q.name === c.name && typeof q.utilization === 'number'))).map(c => {
+    const points = rows.map(row => {
+      const q = (row.quotas || []).find(v => v.name === c.name);
+      return {x: new Date(row.capturedAt), y: q && typeof q.utilization === 'number' ? q.utilization : null};
+    });
+    const processed = processDataWithGaps(points, range);
+    return {label: c.label, data: processed.data, borderColor: c.color, fill: false, tension: 0, borderWidth: 2, pointRadius: processed.pointRadii, spanGaps: false, hidden: State.hiddenQuotas.has(c.name)};
+  });
+}
+
 // commandCodePercent resolves the figure the card shows, honouring the
 // Remaining display mode that buildCommandCodeCurrent emits.
 function commandCodePercent(quota) {
@@ -4694,6 +5177,187 @@ function updateCommandCodeCard(quota) {
   if (countdownEl && resetsAt) {
     const secs = Math.max(0, Math.floor((new Date(resetsAt).getTime() - Date.now()) / 1000));
     State.currentQuotas['commandcode-' + name] = { timeUntilResetSeconds: secs };
+    countdownEl.dataset.resetAt = resetsAt;
+    countdownEl.style.display = '';
+    countdownEl.textContent = secs > 0 ? formatDuration(secs) : '--:--';
+  }
+}
+
+// ── Alibaba Token Plan Card Rendering ──
+// Percent-window provider: 5-Hour, Weekly and Monthly utilization, scoped per account.
+const alibabaQuotaOrder = ['five_hour', 'weekly', 'monthly'];
+const alibabaDisplayNames = {
+  five_hour: '5-Hour',
+  weekly: 'Weekly',
+  monthly: 'Monthly'
+};
+const alibabaChartColorMap = {
+  five_hour: { border: '#FF6A00', bg: 'rgba(255, 106, 0, 0.08)' },
+  weekly: { border: '#3B82F6', bg: 'rgba(59, 130, 246, 0.08)' },
+  monthly: { border: '#10b981', bg: 'rgba(16, 185, 129, 0.08)' }
+};
+const alibabaChartColorFallback = [
+  { border: '#a855f7', bg: 'rgba(168, 85, 247, 0.08)' },
+  { border: '#ec4899', bg: 'rgba(236, 72, 153, 0.08)' }
+];
+
+// alibabaPercent resolves the figure the card shows, honouring the Remaining
+// display mode that buildAlibabaCurrent emits.
+function alibabaPercent(quota) {
+  return quota.cardPercent != null ? quota.cardPercent : (quota.utilization || 0);
+}
+
+function alibabaCardLabel(quota) {
+  if (quota.cardLabel) return quota.cardLabel;
+  const used = Number(quota.utilization) || 0;
+  return used.toFixed(1) + '% of window used';
+}
+
+// alibabaEffectiveQuotas resolves what gets rendered. Before the first
+// successful poll the payload has no quotas and nothing is rendered: a
+// placeholder 0% would show a made-up "healthy" state. The match check below
+// compares against this same list so cards are rebuilt exactly once.
+function alibabaEffectiveQuotas(quotas) {
+  return Array.isArray(quotas) ? quotas : [];
+}
+
+// alibabaCanRenderPayload reports whether a /api/current payload should touch
+// the grid. A failed storage read (readOK false) carries no rows and must leave
+// the last-known cards in place; a successful read with no rows shows the empty
+// state once.
+function alibabaCanRenderPayload(data) {
+  return Boolean(data) && data.quotas != null && data.readOK !== false;
+}
+
+// alibabaGridHasContent reports whether the grid already shows anything (quota
+// cards, account overview cards or an empty state). A failed read must never
+// replace existing content, but on the very first load there is none.
+function alibabaGridHasContent(container) {
+  if (!container) return false;
+  if (container.querySelector('.alibaba-card')
+    || container.querySelector('.account-overview-card')
+    || container.querySelector('.empty-state')) return true;
+  if (container.children && container.children.length > 0) return true;
+  return String(container.innerHTML || '').trim() !== '';
+}
+
+// alibabaShowReadError explains a blank Alibaba panel when the first load's
+// storage read failed. It is skipped when cards are already rendered, so a
+// refresh error keeps the last-known values. The data-read-error marker keeps
+// the message distinct from the real empty state, so a later successful load
+// redraws the grid instead of leaving "retrying" on screen.
+function alibabaShowReadError(containerId) {
+  const container = document.getElementById(containerId);
+  if (!container || alibabaGridHasContent(container)) return;
+  container.innerHTML = '<p class="empty-state" data-read-error="1">' + escapeHTML('Could not load Alibaba data - retrying') + '</p>';
+}
+
+function renderAlibabaQuotaCards(quotas, containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = '';
+  const list = alibabaEffectiveQuotas(quotas);
+  if (list.length === 0) {
+    container.innerHTML = '<p class="empty-state">No Alibaba data yet. Tracking begins after the first successful poll.</p>';
+    return;
+  }
+  list.forEach((q, idx) => {
+    const pct = alibabaPercent(q);
+    const pctStr = pct.toFixed(1);
+    const status = q.status || getQuotaStatus(q.utilization || 0);
+    const name = (q.name || 'five_hour');
+    const label = q.displayName || alibabaDisplayNames[name] || name;
+    const resetsAt = q.resets_at || q.resetsAt || '';
+    const cdSecs = resetsAt ? Math.max(0, Math.floor((new Date(resetsAt).getTime() - Date.now()) / 1000)) : 0;
+    const cdText = cdSecs > 0 ? formatDuration(cdSecs) : '--:--';
+    if (resetsAt) State.currentQuotas['alibaba-' + name] = { timeUntilResetSeconds: cdSecs };
+    const statusCfg = statusConfig[status] || statusConfig.healthy;
+    const card = document.createElement('article');
+    card.className = 'quota-card alibaba-card';
+    card.dataset.quota = name;
+    card.dataset.provider = 'alibaba';
+    card.style.animationDelay = (idx * 60) + 'ms';
+    card.innerHTML = `
+      <header class="card-header">
+        <div class="quota-title-block">
+          <h2 class="quota-title">
+            <svg class="quota-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
+            ${escapeHTML(label)}
+          </h2>
+        </div>
+        <span class="countdown" id="countdown-alibaba-${name}"${resetsAt ? ` data-reset-at="${resetsAt}"` : ' style="display:none"'}>${cdText}</span>
+      </header>
+      <div class="progress-stats">
+        <span class="usage-percent" id="percent-alibaba-${name}">${pctStr}%</span>
+        <span class="usage-fraction" id="fraction-alibaba-${name}">${escapeHTML(alibabaCardLabel(q))}</span>
+      </div>
+      <div class="progress-wrapper">
+        <div class="progress-bar" role="progressbar" aria-valuenow="${Math.round(pct)}" aria-valuemin="0" aria-valuemax="100">
+          <div class="progress-fill" id="progress-alibaba-${name}" style="width:${pctStr}%" data-status="${status}"></div>
+        </div>
+      </div>
+      <footer class="card-footer">
+        <span class="status-badge" id="status-alibaba-${name}" data-status="${status}">
+          <svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${statusCfg.icon}"/></svg>
+          ${statusCfg.label}
+        </span>
+        <span class="reset-time" id="reset-alibaba-${name}"${resetsAt ? ` data-reset-at="${resetsAt}"` : ''}>${resetsAt ? formatResetTime(resetsAt) : ''}</span>
+      </footer>
+    `;
+    container.appendChild(card);
+  });
+}
+
+function alibabaQuotaSetsMatch(container, quotas) {
+  if (!container) return false;
+  // Overview cards (all-accounts mode) share the grid; never treat them as quota cards.
+  if (container.querySelector('.account-overview-card')) return false;
+  const expected = alibabaEffectiveQuotas(quotas);
+  const renderedCards = Array.from(container.querySelectorAll('.alibaba-card[data-quota]'));
+  // An empty payload needs the empty state rendered once; a bare grid does not
+  // yet match it. The first-load read-error message is not the empty state, so
+  // a later successful load replaces it.
+  if (expected.length === 0) {
+    return container.querySelector('.empty-state') !== null
+      && container.querySelector('.empty-state[data-read-error]') === null;
+  }
+  if (renderedCards.length !== expected.length) return false;
+  const rendered = new Set(renderedCards.map(c => c.dataset.quota));
+  return expected.every(q => rendered.has(q.name));
+}
+
+function updateAlibabaCard(quota) {
+  const name = quota.name || 'five_hour';
+  const pct = alibabaPercent(quota);
+  const pctStr = pct.toFixed(1);
+  const status = quota.status || getQuotaStatus(quota.utilization || 0);
+  const progressEl = document.getElementById(`progress-alibaba-${name}`);
+  const percentEl = document.getElementById(`percent-alibaba-${name}`);
+  const fractionEl = document.getElementById(`fraction-alibaba-${name}`);
+  const statusEl = document.getElementById(`status-alibaba-${name}`);
+  const resetEl = document.getElementById(`reset-alibaba-${name}`);
+  const countdownEl = document.getElementById(`countdown-alibaba-${name}`);
+  if (percentEl) percentEl.textContent = pctStr + '%';
+  if (fractionEl) fractionEl.textContent = alibabaCardLabel(quota);
+  if (progressEl) {
+    progressEl.style.width = pctStr + '%';
+    progressEl.dataset.status = status;
+    const bar = progressEl.parentElement;
+    if (bar) bar.setAttribute('aria-valuenow', Math.round(pct));
+  }
+  const resetsAt = quota.resets_at || quota.resetsAt || '';
+  if (resetEl) {
+    resetEl.textContent = resetsAt ? formatResetTime(resetsAt) : '';
+    if (resetsAt) resetEl.dataset.resetAt = resetsAt;
+  }
+  if (statusEl) {
+    const cfg = statusConfig[status] || statusConfig.healthy;
+    statusEl.dataset.status = status;
+    statusEl.innerHTML = `<svg class="status-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${cfg.icon}"/></svg> ${cfg.label}`;
+  }
+  if (countdownEl && resetsAt) {
+    const secs = Math.max(0, Math.floor((new Date(resetsAt).getTime() - Date.now()) / 1000));
+    State.currentQuotas['alibaba-' + name] = { timeUntilResetSeconds: secs };
     countdownEl.dataset.resetAt = resetsAt;
     countdownEl.style.display = '';
     countdownEl.textContent = secs > 0 ? formatDuration(secs) : '--:--';
@@ -4914,6 +5578,8 @@ async function fetchCurrent() {
           }
         }
 
+      } else if (provider === 'zenmux') {
+        renderZenmuxCards(data, 'quota-grid-zenmux');
       } else if (provider === 'commandcode') {
         if (data.quotas) {
           const container = document.getElementById('quota-grid-commandcode');
@@ -4923,6 +5589,23 @@ async function fetchCurrent() {
           if (Array.isArray(data.quotas) && data.quotas.length > 0) {
             data.quotas.forEach(q => updateCommandCodeCard(q));
           }
+        }
+      } else if (provider === 'alibaba') {
+        // A failed storage read (readOK false) leaves whatever was rendered in
+        // place: never blank the grid on a refresh error. On the very first
+        // load there is nothing to keep, so say the read failed instead of
+        // leaving a silent empty panel. The empty state is only for a
+        // successful read with no data.
+        if (alibabaCanRenderPayload(data)) {
+          const container = document.getElementById('quota-grid-alibaba');
+          if (container && !alibabaQuotaSetsMatch(container, data.quotas)) {
+            renderAlibabaQuotaCards(data.quotas, 'quota-grid-alibaba');
+          }
+          if (Array.isArray(data.quotas) && data.quotas.length > 0) {
+            data.quotas.forEach(q => updateAlibabaCard(q));
+          }
+        } else if (data && data.readOK === false) {
+          alibabaShowReadError('quota-grid-alibaba');
         }
 
       } else if (isBalanceProvider(provider)) {
@@ -5055,6 +5738,15 @@ function accountOverviewQuotas(provider, account) {
       resetAt: q.resetAt || null,
     }));
   }
+  if (provider === 'alibaba') {
+    return (account.quotas || []).map(q => ({
+      label: q.displayName || alibabaDisplayNames[q.name] || q.name,
+      quotaName: q.name || null,
+      percent: typeof q.cardPercent === 'number' ? q.cardPercent : (q.utilization || 0),
+      status: q.status || 'healthy',
+      resetAt: q.resetsAt || null,
+    }));
+  }
   const visible = filterCodexQuotasForPlan(account.quotas || [], account.planType);
   return visible.map(q => ({
     label: q.displayName || codexDisplayNames[q.name] || q.name,
@@ -5121,6 +5813,7 @@ function renderAccountsOverview(provider, accounts) {
 
   const drill = (accountId) => {
     if (provider === 'minimax') switchMiniMaxAccount(accountId);
+    else if (provider === 'alibaba') switchAlibabaAccount(accountId);
     else switchCodexProfile(accountId);
   };
   container.querySelectorAll('.account-overview-card').forEach(card => {
@@ -5136,7 +5829,9 @@ function renderAccountsOverview(provider, accounts) {
 async function fetchAccountsOverview(provider, requestSeq) {
   const endpoint = provider === 'minimax'
     ? `${API_BASE}/api/minimax/accounts/usage`
-    : `${API_BASE}/api/codex/accounts/usage`;
+    : (provider === 'alibaba'
+      ? `${API_BASE}/api/alibaba/accounts/usage`
+      : `${API_BASE}/api/codex/accounts/usage`);
   try {
     const res = await authFetch(endpoint);
     if (!res.ok) throw new Error('Failed to fetch account usage');
@@ -5167,6 +5862,7 @@ function overviewAccounts(provider) {
     return State.accountsOverview.accounts.map(a => ({ id: a.accountId || a.id, name: a.accountName || a.name }));
   }
   if (provider === 'minimax') return (State.minimaxAccounts || []).map(a => ({ id: a.id, name: a.name }));
+  if (provider === 'alibaba') return (State.alibabaAccounts || []).map(a => ({ id: a.id, name: a.name }));
   return (State.codexProfiles || []).map(p => ({ id: p.id, name: p.name }));
 }
 
@@ -5195,6 +5891,14 @@ function buildOverviewWindows(provider, accounts) {
     if (hasWeekly) windows.push({ key: 'weekly', label: 'Weekly Limit', extract: (d) => maxOver(d, k => k.startsWith('Wkly ')) });
     return windows;
   }
+  if (provider === 'alibaba') {
+    // Fixed windows; history entries are flat rows keyed by quota name.
+    return alibabaQuotaOrder.map((key) => ({
+      key,
+      label: alibabaDisplayNames[key] || key,
+      extract: (d) => (typeof d[key] === 'number' ? d[key] : null),
+    }));
+  }
   // Codex: one window per distinct quota name across accounts. History entries
   // are keyed by the same normalized quota name.
   const seen = new Map();
@@ -5220,7 +5924,9 @@ async function renderMultiAccountChart(provider, range, requestSeq) {
   if (accounts.length === 0) {
     const endpoint = provider === 'minimax'
       ? `${API_BASE}/api/minimax/accounts/usage`
-      : `${API_BASE}/api/codex/accounts/usage`;
+      : (provider === 'alibaba'
+        ? `${API_BASE}/api/alibaba/accounts/usage`
+        : `${API_BASE}/api/codex/accounts/usage`);
     try {
       const res = await authFetch(endpoint);
       if (res.ok) {
@@ -5968,8 +6674,10 @@ function initChart() {
     defaultDatasets = []; // OpenCode datasets are dynamic
   } else if (provider === 'ollama') {
     defaultDatasets = []; // Ollama datasets are dynamic
-  } else if (provider === 'commandcode') {
+  } else if (provider === 'zenmux' || provider === 'commandcode') {
     defaultDatasets = []; // Command Code datasets are dynamic (five_hour/weekly/monthly)
+  } else if (provider === 'alibaba') {
+    defaultDatasets = []; // Alibaba datasets are dynamic (five_hour/weekly/monthly)
   } else if (isBalanceProvider(provider)) {
     defaultDatasets = []; // Balance datasets are built when history data arrives
   } else if (provider === 'zai') {
@@ -6171,6 +6879,7 @@ function warnHistoryFailure(provider, range, reason, status) {
 function chartAccountKey(provider) {
   if (provider === 'codex') return State.codexAccount == null ? null : State.codexAccount;
   if (provider === 'minimax') return State.minimaxAccount == null ? null : State.minimaxAccount;
+  if (provider === 'alibaba') return State.alibabaAccount == null ? null : State.alibabaAccount;
   return null;
 }
 
@@ -6179,7 +6888,7 @@ function chartAccountLabel(provider) {
   if (id == null || id === 'all') return id === 'all' ? 'All accounts' : '';
   const list = provider === 'codex'
     ? (State.codexProfiles || [])
-    : (provider === 'minimax' ? (State.minimaxAccounts || []) : []);
+    : (provider === 'minimax' ? (State.minimaxAccounts || []) : (provider === 'alibaba' ? (State.alibabaAccounts || []) : []));
   const match = list.find(item => String(item.id) === String(id));
   if (match) return match.name || match.accountName || `Account ${id}`;
   return `Account ${id}`;
@@ -6191,7 +6900,7 @@ function chartAccountLabelFor(provider, account) {
   if (account == null || account === 'all') return account === 'all' ? 'All accounts' : '';
   const list = provider === 'codex'
     ? (State.codexProfiles || [])
-    : (provider === 'minimax' ? (State.minimaxAccounts || []) : []);
+    : (provider === 'minimax' ? (State.minimaxAccounts || []) : (provider === 'alibaba' ? (State.alibabaAccounts || []) : []));
   const match = list.find(item => String(item.id) === String(account));
   if (match) return match.name || match.accountName || `Account ${account}`;
   return `Account ${account}`;
@@ -6311,7 +7020,7 @@ function mergeAllProvidersHistory(previous, data) {
     if (parts[1]) {
       const arrayKey = provider === 'codex'
         ? 'codexAccounts'
-        : (provider === 'minimax' ? 'minimaxAccounts' : null);
+        : (provider === 'minimax' ? 'minimaxAccounts' : (provider === 'alibaba' ? 'alibabaAccounts' : null));
       const id = parts[1];
       if (arrayKey !== null) {
         const current = Array.isArray(merged[arrayKey]) ? merged[arrayKey].slice() : [];
@@ -6336,6 +7045,9 @@ function mergeAllProvidersHistory(previous, data) {
     }
     if (provider === 'minimax' && merged.minimaxAccounts == null && prior.minimaxAccounts != null) {
       merged.minimaxAccounts = prior.minimaxAccounts;
+    }
+    if (provider === 'alibaba' && merged.alibabaAccounts == null && prior.alibabaAccounts != null) {
+      merged.alibabaAccounts = prior.alibabaAccounts;
     }
   });
 
@@ -6800,6 +7512,15 @@ async function fetchHistory(range) {
       return;
     }
 
+    if (provider === 'zenmux') {
+      State.chart.data.datasets = zenmuxHistoryDatasets(historyRows, range);
+      updateTimeScale(State.chart, range);
+      State.chartYMax = computeYMax(State.chart.data.datasets, State.chart);
+      State.chart.options.scales.y.max = State.chartYMax;
+      State.chart.update();
+      recordChartRendered(provider, range);
+      return;
+    }
     if (provider === 'commandcode') {
       // Command Code history: array of { capturedAt, quotas: [{ name, utilization }] }.
       // Plot the three credit windows the cards show - five_hour, weekly and
@@ -6817,6 +7538,42 @@ async function fetchHistory(range) {
         const color = commandCodeChartColorMap[key] || commandCodeChartColorFallback[0];
         return {
           label: commandCodeDisplayNames[key] || key,
+          key: key,
+          hiddenKey: key,
+          color: color.border,
+          bg: color.bg,
+        };
+      });
+      configs.forEach(cfg => {
+        const rawData = flattenedRows.map(d => ({ x: new Date(d.capturedAt), y: d[cfg.key] }));
+        const { data, gapSegments, pointRadii } = processDataWithGaps(rawData, range);
+        datasets.push({ label: cfg.label, data: data, borderColor: cfg.color, backgroundColor: cfg.bg, fill: true, tension: 0.4, borderWidth: 2, pointRadius: pointRadii, pointHoverRadius: 4, hidden: State.hiddenQuotas.has(cfg.hiddenKey), spanGaps: true, segment: getSegmentStyle(gapSegments, cfg.color) });
+      });
+      State.chart.data.datasets = datasets;
+      updateTimeScale(State.chart, range);
+      State.chartYMax = computeYMax(State.chart.data.datasets, State.chart);
+      State.chart.options.scales.y.max = State.chartYMax;
+      State.chart.update();
+      recordChartRendered(provider, range);
+      return;
+    }
+
+    if (provider === 'alibaba') {
+      // Alibaba history: array of { capturedAt, quotas: [{ name, utilization }] }.
+      // Plot the three windows the cards show - five_hour, weekly and monthly -
+      // as utilization percentages.
+      const flattenedRows = historyRows.map(row => {
+        const flat = { capturedAt: row.capturedAt };
+        if (Array.isArray(row.quotas)) {
+          row.quotas.forEach(q => { flat[q.name] = q.utilization || 0; });
+        }
+        return flat;
+      });
+      const datasets = [];
+      const configs = alibabaQuotaOrder.map((key) => {
+        const color = alibabaChartColorMap[key] || alibabaChartColorFallback[0];
+        return {
+          label: alibabaDisplayNames[key] || key,
           key: key,
           hiddenKey: key,
           color: color.border,
@@ -6973,6 +7730,8 @@ const bothProviderNames = {
   ollama: 'Ollama',
   muse: 'Muse',
   commandcode: 'Command Code',
+  zenmux: 'Zenmux',
+  alibaba: 'Alibaba Token Plan',
   'api-integrations': 'API Integrations',
 };
 
@@ -7212,6 +7971,7 @@ function normalizeBothQuotas(provider, payload) {
   }
 
   if (!Array.isArray(payload.quotas)) return [];
+  if (provider === 'zenmux') return payload.quotas;
   const rawQuotas = provider === 'codex'
     ? filterCodexQuotasForPlan(payload.quotas, payload.planType || State.codexPlanType)
     : sortQuotaEntriesForProvider(payload.quotas, provider);
@@ -7265,6 +8025,10 @@ function buildAllProviderEntries() {
     const grouped = MULTI_ACCOUNT_PROVIDER_FROM_KEY[key];
     if (grouped) {
       providerSet.add(grouped);
+      return;
+    }
+    if (key === 'alibaba' || key === 'alibabaAccounts') {
+      providerSet.add('alibaba');
       return;
     }
     if (bothProviderNames[key]) {
@@ -7420,6 +8184,66 @@ function buildAllProviderEntries() {
       return;
     }
 
+    if (provider === 'alibaba') {
+      const currentAccounts = Array.isArray(current.alibabaAccounts)
+        ? current.alibabaAccounts
+        : (current.alibaba ? [current.alibaba] : []);
+      if (currentAccounts.length === 0) return;
+
+      const insightAccounts = Array.isArray(insights.alibabaAccounts) ? insights.alibabaAccounts : [];
+      const historyAccounts = Array.isArray(history.alibabaAccounts) ? history.alibabaAccounts : [];
+
+      // Single account - render as a normal provider entry
+      if (currentAccounts.length === 1 && !currentAccounts[0].accountId) {
+        const payload = currentAccounts[0];
+        if (!isProviderTelemetryEnabled('alibaba')) return;
+        entries.push({
+          provider: 'alibaba',
+          cardKey: sanitizeProviderCardKey('alibaba'),
+          title: bothProviderNames.alibaba || 'Alibaba Token Plan',
+          badge: '',
+          snapshotAt: payload.snapshotAt || null,
+          quotas: normalizeBothQuotas('alibaba', payload),
+          insights: insights.alibaba || { stats: [], insights: [] },
+          historyRows: Array.isArray(history.alibaba) ? history.alibaba : [],
+          historyErrorKey: 'alibaba',
+        });
+        return;
+      }
+
+      // Multiple accounts: group into one compact card.
+      if (currentAccounts.length > 1) {
+        const grouped = groupedAccountEntry('alibaba', currentAccounts);
+        if (grouped) entries.push(grouped);
+        return;
+      }
+
+      currentAccounts.forEach((account, idx) => {
+        const accountID = account.accountId || account.id || idx + 1;
+        if (!isProviderTelemetryEnabled('alibaba', accountID)) return;
+        const accountName = account.accountName || account.name || `Account ${idx + 1}`;
+        const cardKey = sanitizeProviderCardKey(`alibaba-${accountID}`);
+        const insightPayload = insightAccounts.find(acc => String(acc.accountId || '') === String(accountID))
+          || insights.alibaba
+          || { stats: [], insights: [] };
+        const historyPayload = historyAccounts.find(acc => String(acc.accountId || '') === String(accountID));
+        entries.push({
+          provider: 'alibaba',
+          cardKey,
+          title: `Alibaba - ${accountName}`,
+          snapshotAt: account.snapshotAt || null,
+          badge: '',
+          quotas: normalizeBothQuotas('alibaba', account),
+          insights: insightPayload,
+          historyRows: Array.isArray(historyPayload?.history)
+            ? historyPayload.history
+            : (Array.isArray(history.alibaba) ? history.alibaba : []),
+          historyErrorKey: `alibaba:${accountID}`,
+        });
+      });
+      return;
+    }
+
     // One widget per profile, grouped into the provider's card so the homepage
     // stays a single row per provider however many accounts are logged in.
     const groupedAccounts = current[MULTI_ACCOUNT_PROVIDER_KEYS[provider]];
@@ -7467,6 +8291,7 @@ function buildAllProviderEntries() {
 }
 
 function renderProviderKPIHTML(quotas, provider) {
+  if (provider === 'zenmux') return zenmuxCardsHTML(quotas);
   if (!Array.isArray(quotas) || quotas.length === 0) {
     return '<p class="insight-text">No KPI data available yet.</p>';
   }
@@ -7973,6 +8798,7 @@ function buildDynamicDatasetsForRows(rows, range, labelMap, colorMap, colorFallb
 }
 
 function buildProviderCardDatasets(provider, rows, range) {
+  if (provider === 'zenmux') return zenmuxHistoryDatasets(rows, range);
   const style = getComputedStyle(document.documentElement);
   if (provider === 'synthetic') {
     return buildFixedDatasetsForRows(rows, range, [
@@ -8006,7 +8832,7 @@ function buildProviderCardDatasets(provider, rows, range) {
   if (provider === 'gemini') {
     return buildDynamicDatasetsForRows(rows, range, geminiDisplayNames, geminiChartColorMap, geminiChartColorFallback, 'gemini');
   }
-  if (provider === 'mistral' || provider === 'cursor' || provider === 'opencode' || provider === 'ollama' || provider === 'muse' || provider === 'commandcode') {
+  if (provider === 'mistral' || provider === 'cursor' || provider === 'opencode' || provider === 'ollama' || provider === 'muse' || provider === 'commandcode' || provider === 'alibaba') {
     const normalizedRows = rows.map((row) => {
       if (!Array.isArray(row.quotas)) return row;
       const entry = { capturedAt: row.capturedAt };
@@ -8027,6 +8853,9 @@ function buildProviderCardDatasets(provider, rows, range) {
     }
     if (provider === 'commandcode') {
       return buildDynamicDatasetsForRows(normalizedRows, range, commandCodeDisplayNames, commandCodeChartColorMap, commandCodeChartColorFallback, 'commandcode');
+    }
+    if (provider === 'alibaba') {
+      return buildDynamicDatasetsForRows(normalizedRows, range, alibabaDisplayNames, alibabaChartColorMap, alibabaChartColorFallback, 'alibaba');
     }
     return buildDynamicDatasetsForRows(normalizedRows, range, opencodeDisplayNames, opencodeChartColorMap, opencodeChartColorFallback, 'opencode');
   }
@@ -8585,7 +9414,7 @@ async function fetchCycles() {
   const requestSeq = (State.cyclesRequestSeq || 0) + 1;
   State.cyclesRequestSeq = requestSeq;
   const provider = requestProvider;
-  const loggingHistoryProviders = new Set(['synthetic', 'zai', 'anthropic', 'copilot', 'codex', 'antigravity', 'minimax', 'gemini', 'cursor', 'grok', 'kimi', 'mistral', 'opencode', 'ollama', 'muse', 'commandcode', 'moonshot', 'deepseek']);
+  const loggingHistoryProviders = new Set(['synthetic', 'zai', 'anthropic', 'copilot', 'codex', 'antigravity', 'minimax', 'gemini', 'cursor', 'grok', 'kimi', 'mistral', 'opencode', 'ollama', 'muse', 'commandcode', 'alibaba', 'moonshot', 'deepseek']);
 
   // All-accounts overview: fetch each account's logging history and merge,
   // tagging every row with its account name for the combined table.
@@ -8636,7 +9465,7 @@ async function fetchCycles() {
     // Calculate limit based on range: 1 minute polling = rangeDays * 24 * 60 records
     // Cap at 50000 for performance (enough for ~35 days of 1-minute data)
     const dynamicLimit = Math.min(50000, rangeDays * 24 * 60);
-    const accountParam = provider === 'codex' ? codexAccountParam() : provider === 'minimax' ? minimaxAccountParam() : providerAccountParam(provider);
+    const accountParam = provider === 'codex' ? codexAccountParam() : provider === 'minimax' ? minimaxAccountParam() : provider === 'alibaba' ? alibabaAccountParam() : providerAccountParam(provider);
     const url = `/api/logging-history?provider=${provider}&limit=${dynamicLimit}&range=${rangeDays}${accountParam}`;
     try {
       const res = await authFetch(url);
@@ -8791,9 +9620,9 @@ function renderCyclesTable() {
   if (!thead || !tbody) return;
 
   const provider = getCurrentProvider();
-  const windowProvider = provider === 'opencode' || provider === 'commandcode';
+  const windowProvider = provider === 'opencode' || provider === 'commandcode' || provider === 'alibaba';
   const quotaNames = State.cyclesQuotaNames;
-  const usePercent = provider === 'anthropic' || provider === 'copilot' || provider === 'codex' || provider === 'antigravity' || provider === 'minimax' || provider === 'gemini' || provider === 'openrouter' || provider === 'cursor' || provider === 'grok' || provider === 'kimi' || provider === 'mistral' || provider === 'opencode' || provider === 'ollama';
+  const usePercent = provider === 'anthropic' || provider === 'copilot' || provider === 'codex' || provider === 'antigravity' || provider === 'minimax' || provider === 'gemini' || provider === 'openrouter' || provider === 'cursor' || provider === 'grok' || provider === 'kimi' || provider === 'mistral' || provider === 'opencode' || provider === 'ollama' || provider === 'alibaba';
   const deltaUsesPercent = usePercent && provider !== 'minimax';
   const isLoggingHistory = State.isLoggingHistory === true;
   const showAccount = isAccountsOverviewMode(provider);
@@ -9037,7 +9866,7 @@ async function fetchSessions() {
   const requestProvider = getCurrentProvider();
   // Hide sessions section for providers without session tracking.
   const sessionsEl = document.getElementById('sessions-section');
-  if (requestProvider === 'minimax') {
+  if (requestProvider === 'minimax' || requestProvider === 'alibaba') {
     if (sessionsEl) sessionsEl.hidden = true;
     return;
   }
@@ -9820,7 +10649,7 @@ async function loadModalCycles(quotaType, effectiveProvider) {
     apiType = quotaType === 'toolCalls' ? 'toolcall' : quotaType;
   }
   try {
-    const accountParam = provider === 'codex' ? codexAccountParam() : provider === 'minimax' ? minimaxAccountParam() : '';
+    const accountParam = provider === 'codex' ? codexAccountParam() : provider === 'minimax' ? minimaxAccountParam() : provider === 'alibaba' ? alibabaAccountParam() : '';
     const res = await authFetch(`${API_BASE}/api/cycles?type=${apiType}&provider=${provider}${accountParam}`);
     if (!res.ok) return;
     const cycles = await res.json();
@@ -10131,7 +10960,7 @@ async function fetchCycleOverview() {
         break;
       }
     }
-    const accountParam = effectiveProvider === 'codex' ? codexAccountParam() : effectiveProvider === 'minimax' ? minimaxAccountParam() : '';
+    const accountParam = effectiveProvider === 'codex' ? codexAccountParam() : effectiveProvider === 'minimax' ? minimaxAccountParam() : effectiveProvider === 'alibaba' ? alibabaAccountParam() : '';
     url = `/api/cycle-overview?provider=${effectiveProvider}&groupBy=${requestGroupBy}&limit=50${accountParam}`;
   } else {
     url = `/api/cycle-overview?${providerParam()}&groupBy=${requestGroupBy}&limit=50`;
@@ -10164,9 +10993,9 @@ function renderOverviewTable() {
 
   const quotaNames = State.overviewQuotaNames;
   const overviewProv = getOverviewProvider();
-  const usePercent = overviewProv === 'anthropic' || overviewProv === 'codex' || overviewProv === 'antigravity' || overviewProv === 'minimax' || overviewProv === 'gemini' || overviewProv === 'openrouter' || overviewProv === 'cursor' || overviewProv === 'grok' || overviewProv === 'kimi' || overviewProv === 'mistral' || overviewProv === 'opencode' || overviewProv === 'ollama' || overviewProv === 'muse' || overviewProv === 'commandcode';
+  const usePercent = overviewProv === 'anthropic' || overviewProv === 'codex' || overviewProv === 'antigravity' || overviewProv === 'minimax' || overviewProv === 'gemini' || overviewProv === 'openrouter' || overviewProv === 'cursor' || overviewProv === 'grok' || overviewProv === 'kimi' || overviewProv === 'mistral' || overviewProv === 'opencode' || overviewProv === 'ollama' || overviewProv === 'muse' || overviewProv === 'commandcode' || overviewProv === 'alibaba';
   const deltaUsesPercent = usePercent && overviewProv !== 'minimax';
-  const windowProvider = overviewProv === 'opencode' || overviewProv === 'commandcode';
+  const windowProvider = overviewProv === 'opencode' || overviewProv === 'commandcode' || overviewProv === 'alibaba';
   const showDurationDelta = overviewProv !== 'minimax' && !windowProvider;
   const showAccount = isAccountsOverviewMode(getCurrentProvider());
   const accountTh = showAccount ? '<th data-sort-key="account" role="button" tabindex="0">Account <span class="sort-arrow"></span></th>' : '';
@@ -11072,6 +11901,74 @@ function createMiniMaxProviderSection(accounts, minimaxStatus, baseVisibility) {
   return wrapper;
 }
 
+// createAlibabaProviderSection creates a consolidated Alibaba card with sub-accounts.
+// Mirrors createMiniMaxProviderSection.
+function createAlibabaProviderSection(accounts, alibabaStatus, baseVisibility) {
+  if (accounts.length <= 1) {
+    const vis = baseVisibility.alibaba || {
+      polling: alibabaStatus ? alibabaStatus.pollingEnabled !== false : true,
+      dashboard: alibabaStatus ? alibabaStatus.dashboardVisible !== false : true
+    };
+    return createProviderToggleRow({
+      key: 'alibaba',
+      name: 'Alibaba Token Plan',
+      desc: alibabaStatus?.description || 'Alibaba Token Plan usage tracking',
+      vis,
+      configured: alibabaStatus ? alibabaStatus.configured !== false : true,
+      autoDetectable: false,
+      isPolling: alibabaStatus ? !!alibabaStatus.isPolling : accounts.length === 1,
+    });
+  }
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'alibaba-provider-section';
+
+  const headerVis = baseVisibility.alibaba || {
+    polling: alibabaStatus ? alibabaStatus.pollingEnabled !== false : true,
+    dashboard: alibabaStatus ? alibabaStatus.dashboardVisible !== false : true
+  };
+
+  const headerRow = createProviderToggleRow({
+    key: 'alibaba',
+    name: 'Alibaba Token Plan',
+    desc: `${accounts.length} accounts configured`,
+    vis: headerVis,
+    configured: alibabaStatus ? alibabaStatus.configured !== false : true,
+    autoDetectable: false,
+    isPolling: accounts.some(a => !a.deletedAt),
+  });
+  wrapper.appendChild(headerRow);
+
+  const subProfilesDiv = document.createElement('div');
+  subProfilesDiv.className = 'alibaba-subprofiles';
+
+  accounts.forEach(account => {
+    const isDeleted = !!account.deletedAt;
+    const key = `alibaba:${account.id}`;
+    const vis = isDeleted
+      ? { polling: false, dashboard: false }
+      : (baseVisibility[key] || baseVisibility.alibaba || headerVis);
+
+    const subRow = createProviderToggleRow({
+      key,
+      name: escapeHtml(account.name),
+      desc: isDeleted
+        ? 'Account deleted'
+        : `Alibaba account: ${escapeHtml(account.name)}${account.region ? ' (' + escapeHTML(account.region) + ')' : ''}`,
+      vis,
+      configured: !isDeleted && account.hasCookies,
+      autoDetectable: false,
+      isPolling: false,
+      isDeleted,
+    });
+    subRow.classList.add('alibaba-subprofile-row');
+    subProfilesDiv.appendChild(subRow);
+  });
+
+  wrapper.appendChild(subProfilesDiv);
+  return wrapper;
+}
+
 async function populateProviderToggles(visibility) {
   const container = document.getElementById('provider-toggles');
   if (!container) return;
@@ -11121,6 +12018,7 @@ async function populateProviderToggles(visibility) {
   const providerByKey = new Map(providers.map(p => [p.key, p]));
   const codexStatus = providerByKey.get('codex') || null;
   const minimaxStatus = providerByKey.get('minimax') || null;
+  const alibabaStatus = providerByKey.get('alibaba') || null;
 
   // Providers that are not set up yet are not actionable here, and there are
   // usually more of them than configured ones, so they collapse into a
@@ -11130,7 +12028,7 @@ async function populateProviderToggles(visibility) {
   let unconfiguredCount = 0;
 
   providers
-    .filter(p => p.key !== 'codex' && p.key !== 'minimax')
+    .filter(p => p.key !== 'codex' && p.key !== 'minimax' && p.key !== 'alibaba')
     .forEach((p) => {
       const vis = baseVisibility[p.key] || {
         polling: p.pollingEnabled !== false,
@@ -11239,6 +12137,47 @@ async function populateProviderToggles(visibility) {
     }));
   }
 
+  // Alibaba (multi-account, like MiniMax) - ONE card with sub-accounts listed inside
+  let alibabaSection = null;
+  try {
+    const res = await authFetch(`${API_BASE}/api/alibaba/accounts`);
+    if (res.ok) {
+      const data = await res.json();
+      const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+      alibabaSection = createAlibabaProviderSection(accounts, alibabaStatus, baseVisibility);
+    }
+  } catch (e) {
+    // fall back to single row below
+  }
+
+  if (alibabaSection) {
+    container.appendChild(alibabaSection);
+  } else {
+    const fallbackAlibaba = alibabaStatus || {
+      key: 'alibaba',
+      name: 'Alibaba Token Plan',
+      description: 'Alibaba Token Plan usage tracking',
+      configured: false,
+      autoDetectable: false,
+      pollingEnabled: true,
+      dashboardVisible: true,
+      isPolling: false
+    };
+    const vis = baseVisibility.alibaba || {
+      polling: fallbackAlibaba.pollingEnabled !== false,
+      dashboard: fallbackAlibaba.dashboardVisible !== false
+    };
+    container.appendChild(createProviderToggleRow({
+      key: 'alibaba',
+      name: fallbackAlibaba.name || 'Alibaba Token Plan',
+      desc: fallbackAlibaba.description || 'Alibaba Token Plan usage tracking',
+      vis,
+      configured: fallbackAlibaba.configured !== false,
+      autoDetectable: false,
+      isPolling: !!fallbackAlibaba.isPolling
+    }));
+  }
+
   container.appendChild(createAPIIntegrationsToggleRow(State.apiIntegrationsVisibility || { dashboard: true }, apiIntegrationsHealth));
 
   if (unconfiguredCount > 0) {
@@ -11336,6 +12275,8 @@ const DEFAULT_PROVIDER_TAB_LABELS = {
   ollama: 'Ollama',
   muse: 'Muse',
   commandcode: 'Command Code',
+  zenmux: 'Zenmux',
+  alibaba: 'Alibaba',
   'api-integrations': 'API Integrations',
   both: 'Home',
 };
@@ -12018,6 +12959,12 @@ const providerSettingsConfig = {
     fields: [],
     hasAccountManagement: true,
   },
+  alibaba: {
+    title: 'Alibaba Token Plan',
+    desc: 'Manage Alibaba Token Plan accounts. Paste the browser session cookies (Cookie header or Netscape cookies.txt) from the Alibaba Cloud Model Studio console. Cookies expire, so re-paste them when polling reports an expired session.',
+    fields: [],
+    hasAccountManagement: true,
+  },
   openrouter: {
     title: 'OpenRouter',
     desc: 'Configure OpenRouter usage tracking. Changes take effect after daemon restart.',
@@ -12085,6 +13032,13 @@ const providerSettingsConfig = {
     fields: [
       { id: 'api_key', label: 'API Key', type: 'password', placeholder: 'Auto-detected', hint: 'Meta API key. Leave empty to use your `muse login` session. Overrides META_API_KEY from .env.', sensitive: true },
       { id: 'model', label: 'Probe Model', type: 'text', placeholder: 'muse-spark-1.3', hint: 'Model used for the usage probe (for example muse-spark-1.3-contributor). Leave empty to use your Muse settings model. Overrides META_MUSE_MODEL.' },
+    ],
+  },
+  zenmux: {
+    title: 'Zenmux',
+    desc: 'Track subscription limits and personal account model usage with a Zenmux Management API Key. Standard API keys cannot read these endpoints.',
+    fields: [
+      { id: 'api_key', label: 'Management API Key', type: 'password', placeholder: 'Not configured', hint: 'Overrides ZENMUX_MANAGEMENT_API_KEY. Changes apply immediately.', sensitive: true },
     ],
   },
   commandcode: {
@@ -12394,6 +13348,160 @@ async function openProviderSettingsModal(providerKey) {
                       body: JSON.stringify(body),
                     });
                     if (res.ok) { await openProviderSettingsModal('minimax'); }
+                    else { const err = await res.json().catch(() => ({})); alert('Update failed: ' + (err.error || res.statusText)); saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
+                  } catch (e) { alert('Update failed: ' + e.message); saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
+                });
+              }
+            });
+          });
+        }
+      } else {
+        accountsList.innerHTML = '<p style="color:var(--text-secondary);font-size:13px">Failed to load accounts</p>';
+      }
+    } catch (e) {
+      accountsList.innerHTML = '<p style="color:var(--text-secondary);font-size:13px">Failed to load accounts</p>';
+    }
+  } else if (providerKey === 'alibaba') {
+    // Alibaba: account management UI (cookies-based, fully UI-driven)
+    let accountsHTML = '<div class="alibaba-modal-accounts">';
+    accountsHTML += '<p style="color:var(--text-secondary);font-size:13px;margin:0 0 16px">' + config.desc + '</p>';
+    accountsHTML += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">';
+    accountsHTML += '<h4 style="margin:0;font-size:13px;color:var(--text-secondary)">Accounts</h4>';
+    accountsHTML += '<button id="alibaba-add-account-btn" style="padding:4px 12px;font-size:12px;background:var(--md-primary,#6750a4);color:#fff;border:none;border-radius:4px;cursor:pointer">+ Add Account</button>';
+    accountsHTML += '</div>';
+    accountsHTML += '<div id="alibaba-accounts-list">Loading...</div>';
+    accountsHTML += '<div id="alibaba-add-form" hidden style="margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--surface-inset)">';
+    accountsHTML += '<div class="settings-fields">';
+    accountsHTML += '<div class="settings-field"><label for="alibaba-new-name">Account Name</label><input type="text" id="alibaba-new-name" class="settings-input" placeholder="e.g. work, personal" /></div>';
+    accountsHTML += '<div class="settings-field"><label for="alibaba-new-key">Session Cookies</label><textarea id="alibaba-new-key" class="settings-input" rows="4" placeholder="Paste the Cookie header value or a Netscape cookies.txt export" autocomplete="off" spellcheck="false"></textarea></div>';
+    accountsHTML += '<div class="settings-field"><label for="alibaba-new-region">Region</label><input type="text" id="alibaba-new-region" class="settings-input" value="ap-southeast-1" placeholder="ap-southeast-1" autocomplete="off" /></div>';
+    accountsHTML += '</div>';
+    accountsHTML += '<div style="display:flex;gap:8px;margin-top:8px">';
+    accountsHTML += '<button id="alibaba-save-new-btn" style="padding:4px 12px;font-size:12px;background:var(--md-primary,#6750a4);color:#fff;border:none;border-radius:4px;cursor:pointer">Save</button>';
+    accountsHTML += '<button id="alibaba-cancel-new-btn" style="padding:4px 12px;font-size:12px;background:var(--surface-inset);border:1px solid var(--border);border-radius:4px;cursor:pointer">Cancel</button>';
+    accountsHTML += '</div></div>';
+    accountsHTML += '</div>';
+
+    bodyEl.innerHTML = accountsHTML;
+
+    // Wire add button
+    const addBtn = document.getElementById('alibaba-add-account-btn');
+    const addForm = document.getElementById('alibaba-add-form');
+    if (addBtn && addForm) {
+      addBtn.addEventListener('click', () => { addForm.hidden = false; addBtn.hidden = true; });
+      document.getElementById('alibaba-cancel-new-btn')?.addEventListener('click', () => { addForm.hidden = true; addBtn.hidden = false; });
+      document.getElementById('alibaba-save-new-btn')?.addEventListener('click', async () => {
+        const name = document.getElementById('alibaba-new-name')?.value?.trim();
+        const apiKey = document.getElementById('alibaba-new-key')?.value?.trim();
+        const region = document.getElementById('alibaba-new-region')?.value?.trim() || 'ap-southeast-1';
+        if (!name) { alert('Account name is required'); return; }
+        try {
+          const res = await authFetch(`${API_BASE}/api/alibaba/accounts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, cookies: apiKey, region }),
+          });
+          if (res.ok) {
+            await openProviderSettingsModal('alibaba');
+          } else {
+            const err = await res.json().catch(() => ({}));
+            alert('Failed to create account: ' + (err.error || res.statusText));
+          }
+        } catch (e) { alert('Failed to create account: ' + e.message); }
+      });
+    }
+
+    // Fetch and render accounts
+    const accountsList = document.getElementById('alibaba-accounts-list');
+    try {
+      const res = await authFetch(`${API_BASE}/api/alibaba/accounts`);
+      if (res.ok) {
+        const data = await res.json();
+        const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+        if (accounts.length === 0) {
+          accountsList.innerHTML = '<p style="color:var(--text-secondary);font-size:13px;margin:0">No accounts configured. Add your first Alibaba account above.</p>';
+        } else {
+          let html = '';
+          accounts.forEach(account => {
+            const isDeleted = !!account.deletedAt;
+            const regionLabel = account.region || 'ap-southeast-1';
+            html += `<div class="alibaba-account-item" style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border-light)">`;
+            html += `<div style="flex:1">`;
+            html += `<div style="font-weight:500">${escapeHtml(account.name)}</div>`;
+            html += `<div style="font-size:12px;color:var(--text-secondary)">${isDeleted ? 'Deleted' : escapeHTML(regionLabel) + ' - ' + (account.hasCookies ? 'Cookies configured' : 'No cookies set')}</div>`;
+            html += `</div>`;
+            html += `<div style="display:flex;gap:8px;align-items:center">`;
+            if (!isDeleted) {
+              html += `<button class="alibaba-acct-btn" data-action="edit" data-id="${account.id}" data-name="${escapeHtml(account.name)}" data-region="${escapeHtml(account.region || 'ap-southeast-1')}" data-has-key="${account.hasCookies}" title="Edit account" style="padding:4px 8px;font-size:12px;background:var(--surface-inset);border:1px solid var(--border);border-radius:4px;cursor:pointer">Edit</button>`;
+              html += `<button class="alibaba-acct-btn" data-action="delete" data-id="${account.id}" data-name="${escapeHtml(account.name)}" title="Delete account" style="padding:4px 8px;font-size:12px;background:var(--surface-inset);border:1px solid var(--border);border-radius:4px;cursor:pointer;color:var(--md-error,#b3261e)">Delete</button>`;
+            } else {
+              html += `<button class="alibaba-acct-btn" data-action="restore" data-id="${account.id}" data-name="${escapeHtml(account.name)}" title="Restore account" style="padding:4px 8px;font-size:12px;background:var(--surface-inset);border:1px solid var(--border);border-radius:4px;cursor:pointer;color:var(--accent-teal,#0d9488)">Restore</button>`;
+            }
+            html += `</div></div>`;
+          });
+          accountsList.innerHTML = html;
+
+          // Wire action buttons
+          accountsList.querySelectorAll('.alibaba-acct-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+              const action = btn.dataset.action;
+              const id = btn.dataset.id;
+              if (action === 'delete') {
+                if (!confirm(`Delete account "${btn.dataset.name}"? Historical data will be preserved.`)) return;
+                btn.disabled = true; btn.textContent = '...';
+                try {
+                  const res = await authFetch(`${API_BASE}/api/alibaba/accounts?id=${id}`, { method: 'DELETE' });
+                  if (res.ok) { await openProviderSettingsModal('alibaba'); }
+                  else { const e = await res.json().catch(() => ({})); alert('Delete failed: ' + (e.error || res.statusText)); btn.disabled = false; btn.textContent = 'Delete'; }
+                } catch (e) { alert('Delete failed: ' + e.message); btn.disabled = false; btn.textContent = 'Delete'; }
+              } else if (action === 'restore') {
+                btn.disabled = true; btn.textContent = '...';
+                try {
+                  const res = await authFetch(`${API_BASE}/api/alibaba/accounts?id=${id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ restore: true }),
+                  });
+                  if (res.ok) { await openProviderSettingsModal('alibaba'); }
+                  else { const e = await res.json().catch(() => ({})); alert('Restore failed: ' + (e.error || res.statusText)); btn.disabled = false; btn.textContent = 'Restore'; }
+                } catch (e) { alert('Restore failed: ' + e.message); btn.disabled = false; btn.textContent = 'Restore'; }
+              } else if (action === 'edit') {
+                // Show inline edit form
+                const item = btn.closest('.alibaba-account-item');
+                if (!item) return;
+                const currentName = btn.dataset.name;
+                const currentRegion = btn.dataset.region;
+                const hasKey = btn.dataset.hasKey === 'true';
+                item.innerHTML = `<div style="width:100%">
+                  <div class="settings-fields" style="gap:8px">
+                    <div class="settings-field" style="margin-bottom:4px"><label style="font-size:12px">Name</label><input type="text" class="settings-input alibaba-edit-name" value="${escapeHtml(currentName)}" /></div>
+                    <div class="settings-field" style="margin-bottom:4px"><label style="font-size:12px">Session Cookies</label><textarea class="settings-input alibaba-edit-key" rows="4" placeholder="${hasKey ? 'Cookies configured - leave blank to keep' : 'Paste cookies'}" autocomplete="off" spellcheck="false"></textarea></div>
+                    <div class="settings-field" style="margin-bottom:4px"><label style="font-size:12px">Region</label><input type="text" class="settings-input alibaba-edit-region" value="${escapeHtml(currentRegion)}" autocomplete="off" /></div>
+                  </div>
+                  <div style="display:flex;gap:8px;margin-top:8px">
+                    <button class="alibaba-edit-save" data-id="${id}" style="padding:4px 12px;font-size:12px;background:var(--md-primary,#6750a4);color:#fff;border:none;border-radius:4px;cursor:pointer">Save</button>
+                    <button class="alibaba-edit-cancel" style="padding:4px 12px;font-size:12px;background:var(--surface-inset);border:1px solid var(--border);border-radius:4px;cursor:pointer">Cancel</button>
+                  </div>
+                </div>`;
+                item.querySelector('.alibaba-edit-cancel')?.addEventListener('click', () => openProviderSettingsModal('alibaba'));
+                item.querySelector('.alibaba-edit-save')?.addEventListener('click', async (e) => {
+                  const saveBtn = e.target;
+                  const newName = item.querySelector('.alibaba-edit-name')?.value?.trim();
+                  const newKey = item.querySelector('.alibaba-edit-key')?.value?.trim();
+                  const newRegion = item.querySelector('.alibaba-edit-region')?.value?.trim();
+                  const body = {};
+                  if (newName && newName !== currentName) body.name = newName;
+                  if (newKey) body.cookies = newKey;
+                  if (newRegion && newRegion !== currentRegion) body.region = newRegion;
+                  if (Object.keys(body).length === 0) { await openProviderSettingsModal('alibaba'); return; }
+                  saveBtn.disabled = true; saveBtn.textContent = '...';
+                  try {
+                    const res = await authFetch(`${API_BASE}/api/alibaba/accounts?id=${id}`, {
+                      method: 'PUT',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(body),
+                    });
+                    if (res.ok) { await openProviderSettingsModal('alibaba'); }
                     else { const err = await res.json().catch(() => ({})); alert('Update failed: ' + (err.error || res.statusText)); saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
                   } catch (e) { alert('Update failed: ' + e.message); saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
                 });
@@ -13654,12 +14762,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (getCurrentProvider() === 'anthropic' || getCurrentProvider() === 'antigravity') {
     await loadProviderAccounts(getCurrentProvider());
   }
+
+  loadAlibabaAccount();
+  if (getCurrentProvider() === 'alibaba') {
+    await loadAlibabaAccounts();
+  } else {
+    updateAlibabaAccountTabsVisibility();
+  }
+  initAlibabaAccountTabs();
   loadAPIIntegrationsPreferences();
 
   initTheme();
   initLayoutToggle();
   await initTimezoneBadge();
   setupProviderSelector();
+  setupZenmuxUsage();
   setupRangeSelector();
   setupAPIIntegrationsMetricSelector();
   setupCycleFilters();

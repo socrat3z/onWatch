@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -21,6 +22,11 @@ const (
 	maxLogFileBytes = 50 * 1024 * 1024
 	maxLogBackups   = 3
 )
+
+// alibabaRegionPattern bounds the Alibaba console region to a lowercase slug.
+// It must stay in step with the dashboard validator (alibabaRegionPattern in
+// internal/web): the region is embedded in the console page URL.
+var alibabaRegionPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,31}$`)
 
 // Config holds all application configuration.
 //
@@ -137,6 +143,16 @@ type Config struct {
 	CommandCodeEnabled   bool   // true if a key is present or COMMANDCODE_ENABLED=true
 	CommandCodeDisabled  bool   // true if COMMANDCODE_ENABLED=false explicitly opted out
 	CommandCodeBaseURL   string // COMMANDCODE_BASE_URL override for proxy setups
+
+	ZenmuxManagementAPIKey string // ZENMUX_MANAGEMENT_API_KEY
+	ZenmuxDisabled         bool   // explicit ZENMUX_ENABLED=false
+
+	// Alibaba Cloud Model Studio Token Plan provider (browser session cookies)
+	AlibabaCookies     string // ALIBABA_COOKIES (Cookie header or Netscape cookies.txt text)
+	AlibabaCookiesFile string // ALIBABA_COOKIES_FILE (path to a cookie export, loaded in main)
+	AlibabaRegion      string // ALIBABA_REGION (default: ap-southeast-1)
+	AlibabaEnabled     bool   // true if cookies are present or ALIBABA_ENABLED=true
+	AlibabaDisabled    bool   // true if ALIBABA_ENABLED=false explicitly opted out
 
 	// Custom API Integrations telemetry ingestion
 	APIIntegrationsEnabled   bool          // ONWATCH_API_INTEGRATIONS_ENABLED (default: true)
@@ -341,6 +357,12 @@ var onwatchEnvKeys = []string{
 	"COMMANDCODE_ENABLED",
 	"COMMANDCODE_BASE_URL",
 	"COMMANDCODE_AUTH_PATH",
+	"ZENMUX_MANAGEMENT_API_KEY",
+	"ZENMUX_ENABLED",
+	"ALIBABA_COOKIES",
+	"ALIBABA_COOKIES_FILE",
+	"ALIBABA_REGION",
+	"ALIBABA_ENABLED",
 	"ANTIGRAVITY_ENABLED",
 	"MINIMAX_API_KEY",
 	"OPENROUTER_API_KEY",
@@ -595,6 +617,33 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 	}
 	// File-based auto-detection (DetectCommandCodeCredentials) happens later in
 	// main.go preflight.
+
+	cfg.ZenmuxManagementAPIKey = strings.TrimSpace(os.Getenv("ZENMUX_MANAGEMENT_API_KEY"))
+	cfg.ZenmuxDisabled = strings.EqualFold(strings.TrimSpace(os.Getenv("ZENMUX_ENABLED")), "false")
+
+	// Alibaba Token Plan provider (browser session cookies). The cookies file is
+	// read in main when the default account is seeded, so a missing file does
+	// not fail config loading.
+	cfg.AlibabaCookies = strings.TrimSpace(os.Getenv("ALIBABA_COOKIES"))
+	cfg.AlibabaCookiesFile = strings.TrimSpace(os.Getenv("ALIBABA_COOKIES_FILE"))
+	cfg.AlibabaRegion = strings.TrimSpace(os.Getenv("ALIBABA_REGION"))
+	if cfg.AlibabaRegion == "" {
+		cfg.AlibabaRegion = "ap-southeast-1"
+	} else if !alibabaRegionPattern.MatchString(cfg.AlibabaRegion) {
+		// The region is embedded in the console page URL. The dashboard
+		// validates it against the same pattern; an env value that does not
+		// match falls back to the default rather than being carried into the
+		// request path. The value is never echoed (it is untrusted input).
+		fmt.Fprintf(os.Stderr, "  config: ignoring invalid ALIBABA_REGION, using ap-southeast-1\n")
+		cfg.AlibabaRegion = "ap-southeast-1"
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("ALIBABA_ENABLED")), "false") {
+		cfg.AlibabaEnabled = false
+		cfg.AlibabaDisabled = true
+	} else if strings.EqualFold(strings.TrimSpace(os.Getenv("ALIBABA_ENABLED")), "true") ||
+		cfg.AlibabaCookies != "" || cfg.AlibabaCookiesFile != "" {
+		cfg.AlibabaEnabled = true
+	}
 
 	// Custom API Integrations telemetry ingestion
 	cfg.APIIntegrationsDir = strings.TrimSpace(os.Getenv("ONWATCH_API_INTEGRATIONS_DIR"))
@@ -920,8 +969,14 @@ func (c *Config) availableProvidersLocked() []string {
 	if c.CommandCodeAPIKey != "" || c.CommandCodeEnabled {
 		providers = append(providers, "commandcode")
 	}
+	if c.hasProviderLocked("zenmux") {
+		providers = append(providers, "zenmux")
+	}
 	if c.hasProviderLocked("mistral") {
 		providers = append(providers, "mistral")
+	}
+	if c.hasProviderLocked("alibaba") {
+		providers = append(providers, "alibaba")
 	}
 	return providers
 }
@@ -989,6 +1044,12 @@ func (c *Config) hasProviderLocked(name string) bool {
 		// Every Command Code poll is a read-only billing GET, so a detected key
 		// is enough; only an explicit opt-out disables it.
 		return !c.CommandCodeDisabled && (c.CommandCodeAPIKey != "" || c.CommandCodeEnabled)
+	case "zenmux":
+		return !c.ZenmuxDisabled && strings.TrimSpace(c.ZenmuxManagementAPIKey) != ""
+	case "alibaba":
+		// Cookies (inline or file) or an explicit ALIBABA_ENABLED=true start the
+		// provider; only an explicit opt-out disables it.
+		return !c.AlibabaDisabled && (c.AlibabaEnabled || c.AlibabaCookies != "" || c.AlibabaCookiesFile != "")
 	}
 	return false
 }
@@ -1057,7 +1118,13 @@ func (c *Config) hasMultipleProvidersLocked() bool {
 	if c.CommandCodeAPIKey != "" || c.CommandCodeEnabled {
 		count++
 	}
+	if c.hasProviderLocked("zenmux") {
+		count++
+	}
 	if c.hasProviderLocked("mistral") {
+		count++
+	}
+	if c.hasProviderLocked("alibaba") {
 		count++
 	}
 	return count > 1
@@ -1154,12 +1221,32 @@ func (c *Config) String() string {
 	if c.MuseEnabled {
 		fmt.Fprintf(&sb, "  MuseEnabled: true,\n")
 	}
+	if c.ZenmuxManagementAPIKey != "" {
+		fmt.Fprintln(&sb, "  ZenmuxManagementAPIKey: (set),")
+	} else {
+		fmt.Fprintln(&sb, "  ZenmuxManagementAPIKey: (not set),")
+	}
 	fmt.Fprintf(&sb, "  CommandCodeAPIKey: %s,\n", redactAPIKey(c.CommandCodeAPIKey, ""))
 	if c.CommandCodeAutoToken {
 		fmt.Fprintf(&sb, "  CommandCodeAutoToken: true,\n")
 	}
 	if c.CommandCodeEnabled {
 		fmt.Fprintf(&sb, "  CommandCodeEnabled: true,\n")
+	}
+	if c.AlibabaCookies != "" {
+		// Session cookies are fully redacted; a prefix/suffix would leak token bytes.
+		fmt.Fprintf(&sb, "  AlibabaCookies: ***...***,\n")
+	} else {
+		fmt.Fprintf(&sb, "  AlibabaCookies: (not set),\n")
+	}
+	if c.AlibabaCookiesFile != "" {
+		fmt.Fprintf(&sb, "  AlibabaCookiesFile: %s,\n", c.AlibabaCookiesFile)
+	}
+	if c.AlibabaRegion != "" {
+		fmt.Fprintf(&sb, "  AlibabaRegion: %s,\n", c.AlibabaRegion)
+	}
+	if c.AlibabaEnabled {
+		fmt.Fprintf(&sb, "  AlibabaEnabled: true,\n")
 	}
 	if c.KimiAutoToken {
 		fmt.Fprintf(&sb, "  KimiAutoToken: true,\n")

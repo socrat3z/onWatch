@@ -362,6 +362,7 @@ const MULTI_ACCOUNT_PROVIDER_KEYS = {
   antigravity: 'antigravityAccounts',
   codex: 'codexAccounts',
   minimax: 'minimaxAccounts',
+  alibaba: 'alibabaAccounts',
 };
 
 const MULTI_ACCOUNT_PROVIDER_FROM_KEY = Object.fromEntries(

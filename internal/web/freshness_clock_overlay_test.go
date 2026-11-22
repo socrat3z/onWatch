@@ -192,8 +192,11 @@ vm.createContext(context);
 context.document = { getElementById: () => null, querySelectorAll: () => [], createElement: makeElement };
 new vm.Script(%s, { filename: 'fork_overlay.js' }).runInContext(context);
 
-const work = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-const personal = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+// One clock read: two Date.now() calls can straddle a millisecond and floor
+// a 45-minute age to 44.
+const base = Date.now();
+const work = new Date(base - 5 * 60 * 1000).toISOString();
+const personal = new Date(base - 10 * 60 * 1000).toISOString();
 const html = context.renderHomepageAccountsHTML('antigravity', [
   { accountId: 1, accountName: 'work', snapshotAt: work, quotas: [] },
   { accountId: 2, accountName: 'personal', snapshotAt: personal, quotas: [] },

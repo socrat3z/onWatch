@@ -456,12 +456,31 @@ func (m *CursorModelUsage) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Cursor credential sources. A refreshed token is written back only to the
+// store it was read from, so a Keychain-sourced credential never replaces the
+// encrypted tokens Cursor Desktop keeps in its SQLite database.
+const (
+	CursorSourceSQLite   = "sqlite"
+	CursorSourceKeychain = "keychain"
+)
+
+// cursorOpaqueTokenPrefix marks the encrypted values newer Cursor Desktop
+// versions store in state.vscdb instead of a plain JWT.
+const cursorOpaqueTokenPrefix = "cursor-safe-storage:"
+
 type CursorCredentials struct {
 	AccessToken  string
 	RefreshToken string
 	ExpiresAt    time.Time
 	ExpiresIn    time.Duration
-	Source       string // "sqlite" or "keychain"
+	Source       string // CursorSourceSQLite or CursorSourceKeychain
+
+	// ReadOnly marks a Keychain credential that was selected only because
+	// Cursor Desktop's SQLite value is opaque. That Keychain item may be an
+	// old copy onWatch itself wrote, sharing the refresh token Desktop holds
+	// encrypted, so refreshing it would consume Desktop's one-time token and
+	// log Cursor Desktop out. Such a credential must never be refreshed.
+	ReadOnly bool
 }
 
 func (c *CursorCredentials) IsExpiringSoon(threshold time.Duration) bool {
@@ -558,6 +577,19 @@ func ParseCursorRequestUsageResponse(data []byte) (*CursorRequestUsageResponse, 
 	}
 
 	return resp, nil
+}
+
+// CursorAccessTokenUsableForAPI reports whether the token can authenticate
+// Connect RPC and cookie-based cursor.com endpoints (needs a JWT subject).
+func CursorAccessTokenUsableForAPI(accessToken string) bool {
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		return false
+	}
+	if strings.HasPrefix(accessToken, cursorOpaqueTokenPrefix) {
+		return false
+	}
+	return ExtractJWTSubject(accessToken) != ""
 }
 
 func ExtractJWTSubject(token string) string {
@@ -865,6 +897,168 @@ func DetermineCursorAccountType(planName string, usage *CursorUsageResponse, use
 	}
 
 	return CursorAccountIndividual
+}
+
+// CursorUsageSummaryResponse is returned by https://cursor.com/api/usage-summary
+// for enterprise/team billing pools when legacy /api/usage has null limits.
+type CursorUsageSummaryResponse struct {
+	BillingCycleStart string
+	BillingCycleEnd   string
+	MembershipType    string
+	LimitType         string
+	IndividualUsage   CursorUsageSummaryPool `json:"individualUsage"`
+	TeamUsage         CursorUsageSummaryTeam `json:"teamUsage"`
+
+	badNumericFields int
+}
+
+type CursorUsageSummaryPool struct {
+	Overall CursorUsageSummaryOverall `json:"overall"`
+}
+
+type CursorUsageSummaryTeam struct {
+	OnDemand CursorUsageSummaryOverall `json:"onDemand"`
+}
+
+type CursorUsageSummaryOverall struct {
+	Enabled   bool
+	Used      cursorFlexInt
+	Limit     cursorFlexInt
+	Remaining cursorFlexInt
+	badUsed   bool
+	badLimit  bool
+}
+
+func ParseCursorUsageSummaryResponse(data []byte) (*CursorUsageSummaryResponse, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	resp := &CursorUsageSummaryResponse{}
+	if v, ok := raw["billingCycleStart"]; ok {
+		_ = json.Unmarshal(v, &resp.BillingCycleStart)
+	}
+	if v, ok := raw["billingCycleEnd"]; ok {
+		_ = json.Unmarshal(v, &resp.BillingCycleEnd)
+	}
+	if v, ok := raw["membershipType"]; ok {
+		_ = json.Unmarshal(v, &resp.MembershipType)
+	}
+	if v, ok := raw["limitType"]; ok {
+		_ = json.Unmarshal(v, &resp.LimitType)
+	}
+	var bad cursorBadFields
+	if v, ok := raw["individualUsage"]; ok {
+		var ind map[string]json.RawMessage
+		if err := json.Unmarshal(v, &ind); err == nil {
+			if ov, ok := ind["overall"]; ok {
+				parseUsageSummaryOverall(ov, &resp.IndividualUsage.Overall, &bad)
+			}
+		}
+	}
+	if v, ok := raw["teamUsage"]; ok {
+		var team map[string]json.RawMessage
+		if err := json.Unmarshal(v, &team); err == nil {
+			if od, ok := team["onDemand"]; ok {
+				parseUsageSummaryOverall(od, &resp.TeamUsage.OnDemand, &bad)
+			}
+		}
+	}
+	resp.badNumericFields = bad.count
+	if resp.badNumericFields > 0 {
+		slog.Warn("cursor: usage summary had unparseable numeric fields, dropping the affected quotas",
+			"field_count", resp.badNumericFields)
+	}
+	return resp, nil
+}
+
+func parseUsageSummaryOverall(raw json.RawMessage, out *CursorUsageSummaryOverall, bad *cursorBadFields) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return
+	}
+	if v, ok := fields["enabled"]; ok {
+		_ = json.Unmarshal(v, &out.Enabled)
+	}
+	out.badUsed = bad.intFieldDefining(fields["used"], &out.Used)
+	out.badLimit = bad.intFieldDefining(fields["limit"], &out.Limit)
+	_ = bad.intFieldDefining(fields["remaining"], &out.Remaining)
+}
+
+func shouldTryCursorUsageSummaryFallback(snapshot *CursorSnapshot) bool {
+	if snapshot == nil {
+		return false
+	}
+	if len(snapshot.Quotas) == 0 {
+		return true
+	}
+	if snapshot.AccountType != CursorAccountEnterprise && snapshot.AccountType != CursorAccountTeam {
+		return false
+	}
+	for _, q := range snapshot.Quotas {
+		if q.Limit > 0 || (q.Format == CursorFormatPercent && q.Utilization > 0) {
+			return false
+		}
+	}
+	return true
+}
+
+func buildUsageSummaryQuotas(summary *CursorUsageSummaryResponse) []CursorQuota {
+	if summary == nil {
+		return nil
+	}
+	var resetsAt *time.Time
+	if summary.BillingCycleEnd != "" {
+		if t, err := time.Parse(time.RFC3339, summary.BillingCycleEnd); err == nil {
+			resetsAt = &t
+		} else if t, err := time.Parse(time.RFC3339Nano, summary.BillingCycleEnd); err == nil {
+			resetsAt = &t
+		}
+	}
+
+	var quotas []CursorQuota
+	appendPool := func(name string, pool CursorUsageSummaryOverall) {
+		// A defining field that failed to parse drops the quota rather than
+		// storing a fabricated value; the last good card stays.
+		if !pool.Enabled || pool.badLimit || pool.badUsed || pool.Limit <= 0 {
+			return
+		}
+		used := float64(pool.Used)
+		limit := float64(pool.Limit)
+		util := 0.0
+		if limit > 0 {
+			util = used / limit * 100
+		}
+		quotas = append(quotas, CursorQuota{
+			Name:        name,
+			Used:        used / 100,
+			Limit:       limit / 100,
+			Utilization: util,
+			Format:      CursorFormatDollars,
+			ResetsAt:    resetsAt,
+		})
+	}
+
+	appendPool("total_usage", summary.IndividualUsage.Overall)
+	appendPool("on_demand", summary.TeamUsage.OnDemand)
+	return quotas
+}
+
+func accountTypeFromUsageSummary(summary *CursorUsageSummaryResponse) CursorAccountType {
+	if summary == nil {
+		return CursorAccountIndividual
+	}
+	switch NormalizeCursorPlanName(summary.MembershipType) {
+	case "enterprise":
+		return CursorAccountEnterprise
+	case "team":
+		return CursorAccountTeam
+	default:
+		if strings.EqualFold(strings.TrimSpace(summary.LimitType), "team") {
+			return CursorAccountTeam
+		}
+		return CursorAccountIndividual
+	}
 }
 
 func buildEnterpriseQuotas(usage *CursorUsageResponse, requestUsage *CursorRequestUsageResponse) []CursorQuota {

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/onllm-dev/onwatch/v2/internal/api"
@@ -549,6 +550,33 @@ func (h *Handler) buildMenubarProviders(settings *menubar.Settings, includeHidde
 			}
 		}
 	}
+	if h.config != nil && h.config.HasProvider("alibaba") && h.providerDashboardVisible("alibaba", visibility) {
+		alibabaAccounts, enumerated := h.alibabaUsageAccountsOK()
+		if enumerated {
+			multiAlibaba := len(alibabaAccounts) > 1
+			for _, account := range alibabaAccounts {
+				usage := account.Usage
+				accountID := alibabaUsageAccountID(usage)
+				providerKey := fmt.Sprintf("alibaba:%d", accountID)
+				if !providerDashboardVisibleForKey(visibility, providerKey, "alibaba") {
+					continue
+				}
+				attempted[providerKey] = struct{}{}
+				name := stringValue(usage, "accountName")
+				if name == "" {
+					name = "default"
+				}
+				label := menubarAccountLabel("alibaba", labels, name, multiAlibaba)
+				add(h.menubarResolveCard(providerKey, label, "Alibaba Token Plan", usage, account.ReadOK, account.HasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
+			}
+		} else {
+			// The account list could not be read: keep the known account cards
+			// and do not prune them.
+			for _, entry := range h.menubarCachedAccountCards("alibaba", attempted, visibility) {
+				add(entry.card, entry.captured)
+			}
+		}
+	}
 	if h.config != nil && h.config.HasProvider("openrouter") && h.providerDashboardVisible("openrouter", visibility) {
 		attempted["openrouter"] = struct{}{}
 		payload, readOK, hasData := h.buildOpenRouterCurrentOK()
@@ -583,6 +611,11 @@ func (h *Handler) buildMenubarProviders(settings *menubar.Settings, includeHidde
 		attempted["ollama"] = struct{}{}
 		payload, readOK, hasData := h.buildOllamaCurrentOK()
 		add(h.menubarResolveCard("ollama", resolveProviderTabLabel("ollama", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
+	}
+	if h.config != nil && h.config.HasProvider("zenmux") && h.providerDashboardVisible("zenmux", visibility) {
+		attempted["zenmux"] = struct{}{}
+		payload, readOK, hasData := h.buildZenmuxCurrentOK(context.Background())
+		add(h.menubarResolveCard("zenmux", resolveProviderTabLabel("zenmux", labels), "", payload, readOK, hasData, normalized.WarningPercent, normalized.CriticalPercent, nil))
 	}
 	if h.config != nil && h.config.HasProvider("muse") && h.providerDashboardVisible("muse", visibility) {
 		attempted["muse"] = struct{}{}
@@ -1471,6 +1504,12 @@ func normalizeQuotas(payload map[string]interface{}, warningPercent, criticalPer
 		if label == "" {
 			continue
 		}
+		// A quota that reports no utilization at all carries nothing a meter
+		// can show: rendering it would invent a 0% bar. The provider page still
+		// lists it (for its limits), but the compact menubar/tray must not.
+		if unknown, ok := item["utilizationUnknown"].(bool); ok && unknown {
+			continue
+		}
 		percent := firstFloat(item, "cardPercent", "usagePercent", "percent", "utilization", "remainingPercent")
 		statusLabel := stringValue(item, "statusLabel")
 		percentOnly := false
@@ -1819,6 +1858,15 @@ func stringValue(item map[string]interface{}, key string) string {
 	switch value := item[key].(type) {
 	case string:
 		return value
+	case time.Time:
+		return value.UTC().Format(time.RFC3339)
+	case *time.Time:
+		// A typed nil pointer still satisfies fmt.Stringer; calling String on
+		// it panics (Zenmux quotas carry resetsAt as *time.Time).
+		if value == nil {
+			return ""
+		}
+		return value.UTC().Format(time.RFC3339)
 	case fmt.Stringer:
 		return value.String()
 	case int:
@@ -1845,6 +1893,20 @@ func firstFloat(item map[string]interface{}, keys ...string) float64 {
 			return float64(value)
 		case uint64:
 			return float64(value)
+		case *float64:
+			// A typed nil pointer means the provider did not report the value.
+			// Skip it rather than turning it into a fabricated zero.
+			if value != nil {
+				return *value
+			}
+		case *float32:
+			if value != nil {
+				return float64(*value)
+			}
+		case *int64:
+			if value != nil {
+				return float64(*value)
+			}
 		case string:
 			if parsed, err := strconv.ParseFloat(value, 64); err == nil {
 				return parsed

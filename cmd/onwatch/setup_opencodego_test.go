@@ -136,7 +136,8 @@ func TestAddMissingProviders_OpenCodeGoAndCommandCode(t *testing.T) {
 	existing := loadExistingEnv(envFile)
 
 	// Decline synthetic/zai/anthropic/codex/opencode/antigravity/gemini/grok/
-	// ollama, accept Command Code then OpenCode Go (prompt order).
+	// ollama, accept Command Code, skip Zenmux and Alibaba, then add OpenCode Go
+	// (prompt order).
 	answers := []string{
 		"n", // zai
 		"n", // anthropic
@@ -148,6 +149,8 @@ func TestAddMissingProviders_OpenCodeGoAndCommandCode(t *testing.T) {
 		"n", // ollama
 		"y", // add Command Code
 		"user_added_cmd",
+		"n", // skip Zenmux
+		"n", // skip Alibaba
 		"y", // add OpenCode Go
 		"oc_sk_added_from_env",
 	}

@@ -11,6 +11,8 @@ onWatch detects your Cursor authentication from two sources:
 
 If both sources exist and the SQLite account is a free-tier plan while the keychain has a different account, onWatch prefers the keychain token (matching openusage behavior).
 
+If SQLite stores opaque `cursor-safe-storage:` tokens while Keychain still has JWTs, onWatch prefers Keychain so cookie and Connect RPC calls can authenticate.
+
 ## Auto-Detection
 
 No manual configuration needed. If Cursor Desktop is installed and you're logged in, onWatch will auto-detect your credentials on startup.
@@ -35,7 +37,11 @@ Cursor access tokens are short-lived JWTs. onWatch automatically refreshes them:
 
 1. Before each poll, onWatch checks if the token expires within 5 minutes
 2. If expiring, it calls the Cursor OAuth refresh endpoint (`https://api2.cursor.sh/oauth/token`)
-3. The refreshed access token is written back to Cursor's SQLite database
+3. The refreshed tokens are written back to the store they were read from (Cursor's SQLite database or the macOS Keychain). If the other store still holds the exact refresh token that was just consumed, the same session is duplicated there (older onWatch versions wrote every refresh to both stores), so it is updated too. A store holding a different token is left alone, and a missing store is never created. If Cursor's database holds an encrypted `cursor-safe-storage:` value, onWatch never overwrites it.
+
+If the SQLite database holds an encrypted `cursor-safe-storage:` value and onWatch falls back to the Keychain token, that token is treated as read-only and never refreshed. It may be an old copy of Cursor Desktop's session, so refreshing it would consume the refresh token Desktop holds and log Desktop out. If it has expired, onWatch reports the normal auth-failure state; re-authenticate in Cursor Desktop to recover.
+
+If a refresh succeeds but the new tokens cannot be saved, onWatch keeps the new access token in memory for this process and stops further automatic refreshes, so it never rotates a token it cannot persist.
 
 If the refresh token is invalid (e.g., revoked), onWatch pauses polling and logs an error. You'll need to re-authenticate via the Cursor app.
 
@@ -56,7 +62,8 @@ If the refresh token is invalid (e.g., revoked), onWatch pauses polling and logs
 - **On-Demand** - individual or pooled spend limit (dollars)
 
 ### Enterprise Accounts
-- **Requests** - per-model request counts and limits
+- **Requests** - per-model request counts and limits (when `/api/usage` exposes finite limits)
+- **Total Usage** - included pool usage in dollars (from `/api/usage-summary` when legacy usage has null limits)
 
 ## Account Type Detection
 
@@ -78,6 +85,7 @@ Numeric usage fields are decoded tolerantly: Cursor may send an amount as a JSON
 | `POST /aiserver.v1.DashboardService/GetCreditGrantsBalance` | Credit grants balance (Connect RPC) |
 | `GET https://cursor.com/api/auth/stripe` | Stripe prepaid balance (cookie auth) |
 | `GET https://cursor.com/api/usage` | Request-based usage for enterprise (cookie auth) |
+| `GET https://cursor.com/api/usage-summary` | Billing pool usage for enterprise/team when `/api/usage` has no limits |
 | `POST https://api2.cursor.sh/oauth/token` | OAuth token refresh |
 
 ## Troubleshooting

@@ -1438,6 +1438,17 @@ func run() error {
 		minimaxTr = tracker.NewMiniMaxTracker(db, logger)
 	}
 
+	// Alibaba accounts can live only in the database (added from the dashboard),
+	// so start the tracker and manager for those too. Marking the provider
+	// enabled makes the dashboard, menubar and API list it.
+	if !cfg.HasProvider("alibaba") && !cfg.AlibabaDisabled && hasAlibabaAccounts(db) {
+		cfg.WithWrite(func() { cfg.AlibabaEnabled = true })
+	}
+	var alibabaTr *tracker.AlibabaTracker
+	if cfg.HasProvider("alibaba") {
+		alibabaTr = tracker.NewAlibabaTracker(db, logger)
+	}
+
 	var openrouterTr *tracker.OpenRouterTracker
 	if cfg.HasProvider("openrouter") {
 		openrouterTr = tracker.NewOpenRouterTracker(db, logger)
@@ -1516,6 +1527,15 @@ func run() error {
 		}
 	}
 
+	// Create Alibaba agent manager for multi-account support. Cookies from
+	// ALIBABA_COOKIES / ALIBABA_COOKIES_FILE seed the default account.
+	var alibabaMgr *agent.AlibabaAgentManager
+	if cfg.HasProvider("alibaba") || alibabaTr != nil {
+		alibabaMgr = agent.NewAlibabaAgentManager(db, alibabaTr, cfg.PollInterval, logger)
+		alibabaMgr.SetRegion(cfg.AlibabaRegion)
+		seedAlibabaDefaultAccount(db, cfg, logger)
+	}
+
 	var openrouterAg *agent.OpenRouterAgent
 	if openrouterClient != nil {
 		openrouterSm := agent.NewSessionManager(db, "openrouter", idleTimeout, logger)
@@ -1554,8 +1574,8 @@ func run() error {
 		cursorAg.SetCredentialsRefresh(func() *api.CursorCredentials {
 			return api.DetectCursorCredentials(logger)
 		})
-		cursorAg.SetTokenSave(func(accessToken, refreshToken string) error {
-			return api.WriteCursorCredentials(accessToken, refreshToken)
+		cursorAg.SetTokenSave(func(accessToken, refreshToken, source, previousRefreshToken string) error {
+			return api.WriteCursorCredentials(accessToken, refreshToken, source, previousRefreshToken)
 		})
 	}
 
@@ -1624,6 +1644,9 @@ func run() error {
 	}
 	if minimaxMgr != nil {
 		minimaxMgr.SetNotifier(notifier)
+	}
+	if alibabaMgr != nil {
+		alibabaMgr.SetNotifier(notifier)
 	}
 	if openrouterAg != nil {
 		openrouterAg.SetNotifier(notifier)
@@ -1794,6 +1817,35 @@ func run() error {
 			return true
 		})
 	}
+	if alibabaMgr != nil {
+		alibabaMgr.SetPollingCheck(func() bool { return isPollingEnabled("alibaba") })
+		alibabaMgr.SetAccountPollingCheck(func(accountID int64) bool {
+			v, err := db.GetSetting("provider_visibility")
+			if err != nil || v == "" {
+				return true
+			}
+			var vis map[string]interface{}
+			if json.Unmarshal([]byte(v), &vis) != nil {
+				return true
+			}
+			accountKey := fmt.Sprintf("alibaba:%d", accountID)
+			if accountVis, ok := vis[accountKey].(map[string]interface{}); ok {
+				if polling, exists := accountVis["polling"]; exists {
+					if p, ok := polling.(bool); ok {
+						return p
+					}
+				}
+			}
+			if alibabaVis, ok := vis["alibaba"].(map[string]interface{}); ok {
+				if polling, exists := alibabaVis["polling"]; exists {
+					if p, ok := polling.(bool); ok {
+						return p
+					}
+				}
+			}
+			return true
+		})
+	}
 	if openrouterAg != nil {
 		openrouterAg.SetPollingCheck(func() bool { return isPollingEnabled("openrouter") })
 	}
@@ -1857,6 +1909,11 @@ func run() error {
 	if minimaxTr != nil {
 		minimaxTr.SetOnReset(func(modelName string) {
 			notifier.Check(notify.QuotaStatus{Provider: "minimax", QuotaKey: modelName, ResetOccurred: true})
+		})
+	}
+	if alibabaTr != nil {
+		alibabaTr.SetOnReset(func(quotaName string) {
+			notifier.Check(notify.QuotaStatus{Provider: "alibaba", QuotaKey: quotaName, ResetOccurred: true})
 		})
 	}
 	if openrouterTr != nil {
@@ -1940,6 +1997,9 @@ func run() error {
 	if minimaxTr != nil {
 		handler.SetMiniMaxTracker(minimaxTr)
 	}
+	if alibabaTr != nil {
+		handler.SetAlibabaTracker(alibabaTr)
+	}
 	if openrouterTr != nil {
 		handler.SetOpenRouterTracker(openrouterTr)
 	}
@@ -1995,6 +2055,9 @@ func run() error {
 	forkManagers.Register(agentMgr)
 	if minimaxMgr != nil {
 		agentMgr.RegisterFactory("minimax", func() (agent.AgentRunner, error) { return minimaxMgr, nil })
+	}
+	if alibabaMgr != nil {
+		agentMgr.RegisterFactory("alibaba", func() (agent.AgentRunner, error) { return alibabaMgr, nil })
 	}
 	if openrouterAg != nil {
 		agentMgr.RegisterFactory("openrouter", func() (agent.AgentRunner, error) { return openrouterAg, nil })
@@ -2069,12 +2132,25 @@ func run() error {
 		agentMgr.RegisterFactory("commandcode", func() (agent.AgentRunner, error) { return commandCodeAg, nil })
 	}
 
+	agentMgr.RegisterFactory("zenmux", func() (agent.AgentRunner, error) {
+		snapshot := cfg.Snapshot()
+		if !snapshot.HasProvider("zenmux") {
+			return nil, fmt.Errorf("zenmux: set a Management API Key in Settings -> Providers")
+		}
+		ag := agent.NewZenmuxAgent(api.NewZenmuxClient(snapshot.ZenmuxManagementAPIKey), db, snapshot.PollInterval, logger, notifier)
+		ag.SetPollingCheck(func() bool { return isPollingEnabled("zenmux") })
+		return ag, nil
+	})
+
 	if apiIntegrationsAg != nil {
 		agentMgr.RegisterFactory("api_integrations", func() (agent.AgentRunner, error) { return apiIntegrationsAg, nil })
 	}
 	handler.SetAgentManager(agentMgr)
 	if minimaxMgr != nil {
 		handler.SetMiniMaxAgentManager(minimaxMgr)
+	}
+	if alibabaMgr != nil {
+		handler.SetAlibabaAgentManager(alibabaMgr)
 	}
 	if codexMgr != nil {
 		handler.SetCodexPauseReporter(codexMgr)
@@ -2116,7 +2192,7 @@ func run() error {
 
 	// Start configured agents through the manager.
 	startedAny := false
-	for _, providerKey := range []string{"synthetic", "zai", "anthropic", "copilot", "codex", "antigravity", "minimax", "openrouter", "gemini", "cursor", "grok", "kimi", "moonshot", "deepseek", "opencode", "mistral", "ollama", "muse", "commandcode"} {
+	for _, providerKey := range []string{"synthetic", "zai", "anthropic", "copilot", "codex", "antigravity", "minimax", "openrouter", "gemini", "cursor", "grok", "kimi", "moonshot", "deepseek", "opencode", "mistral", "ollama", "muse", "commandcode", "zenmux", "alibaba"} {
 		if !isPollingEnabled(providerKey) {
 			continue
 		}
@@ -2616,6 +2692,9 @@ func printBanner(cfg *config.Config, version string) {
 	if cfg.HasProvider("minimax") {
 		fmt.Println("║  API:       minimax.io/coding_plan   ║")
 	}
+	if cfg.HasProvider("alibaba") {
+		fmt.Println("║  API:       modelstudio.console      ║")
+	}
 	if cfg.HasProvider("openrouter") {
 		fmt.Println("║  API:       openrouter.ai/api         ║")
 	}
@@ -2664,6 +2743,16 @@ func printBanner(cfg *config.Config, version string) {
 	}
 	if cfg.HasProvider("minimax") {
 		fmt.Printf("MiniMax API Key:   %s\n", redactAPIKey(cfg.MiniMaxAPIKey))
+	}
+	if cfg.HasProvider("alibaba") {
+		source := "console accounts"
+		switch {
+		case cfg.AlibabaCookiesFile != "":
+			source = "file " + cfg.AlibabaCookiesFile
+		case cfg.AlibabaCookies != "":
+			source = "env var (redacted)"
+		}
+		fmt.Printf("Alibaba Cookies:   %s (region %s)\n", source, cfg.AlibabaRegion)
 	}
 	if cfg.HasProvider("openrouter") {
 		fmt.Printf("OpenRouter Key:    %s\n", redactAPIKey(cfg.OpenRouterAPIKey))
@@ -2736,6 +2825,10 @@ func printHelp() {
 	fmt.Println("  MINIMAX_API_KEY         MiniMax API key")
 	fmt.Println("  MINIMAX_REGION          MiniMax region: global or cn (default: global)")
 	fmt.Println("  OPENROUTER_API_KEY      OpenRouter API key")
+	fmt.Println("  ALIBABA_COOKIES         Alibaba Token Plan console cookies (Cookie header or Netscape text; keep private)")
+	fmt.Println("  ALIBABA_COOKIES_FILE    Path to an Alibaba cookies export (cookies.txt or Cookie header)")
+	fmt.Println("  ALIBABA_REGION          Alibaba console region (default: ap-southeast-1)")
+	fmt.Println("  ALIBABA_ENABLED         Set true to enable (accounts added in the dashboard) or false to disable")
 	fmt.Println("  MISTRAL_ENABLED        Enable Mistral subscription and pay-as-you-go tracking")
 	fmt.Println("  MISTRAL_AUTH_COOKIE    Manual Mistral Cookie header (keep private)")
 	fmt.Println("  MISTRAL_BROWSER        auto, chrome, firefox, safari, or edge")
@@ -2752,6 +2845,8 @@ func printHelp() {
 	fmt.Println("  COMMANDCODE_ENABLED     Set false to disable the Command Code provider")
 	fmt.Println("  COMMANDCODE_BASE_URL    Command Code API base URL (default: https://api.commandcode.ai)")
 	fmt.Println("  COMMANDCODE_AUTH_PATH   Override the commandcode auth.json path")
+	fmt.Println("  ZENMUX_MANAGEMENT_API_KEY  Zenmux Management API Key for subscription quota")
+	fmt.Println("  ZENMUX_ENABLED          Set false to disable Zenmux polling")
 	fmt.Println("  CODEX_HOME              Optional Codex auth directory (uses CODEX_HOME/auth.json)")
 	fmt.Println("  ONWATCH_POLL_INTERVAL   Polling interval in seconds")
 	fmt.Println("  ONWATCH_PORT            Dashboard HTTP port")
@@ -2836,4 +2931,86 @@ func initEncryptionSalt(db *store.Store, logger *slog.Logger) error {
 	web.SetEncryptionSalt(salt)
 	logger.Info("Generated and stored new encryption salt")
 	return nil
+}
+
+// hasAlibabaAccounts reports whether the database holds an active Alibaba
+// account with session cookies, so accounts added from the dashboard start
+// polling even when no ALIBABA_* environment variable is set.
+func hasAlibabaAccounts(db *store.Store) bool {
+	if db == nil {
+		return false
+	}
+	accounts, err := db.QueryActiveProviderAccounts("alibaba")
+	if err != nil {
+		return false
+	}
+	for _, acc := range accounts {
+		var meta struct {
+			Cookies string `json:"cookies"`
+		}
+		if acc.Metadata == "" || json.Unmarshal([]byte(acc.Metadata), &meta) != nil {
+			continue
+		}
+		if strings.TrimSpace(meta.Cookies) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// seedAlibabaDefaultAccount stores cookies from ALIBABA_COOKIES (or
+// ALIBABA_COOKIES_FILE) on the default Alibaba account when that account has
+// no cookies yet. Cookies already saved from the dashboard are never replaced.
+func seedAlibabaDefaultAccount(db *store.Store, cfg *config.Config, logger *slog.Logger) {
+	// Keep the raw Netscape export (or Cookie header) so the client can send
+	// domain-scoped cookies. Flattening here would break the Zelda gateway.
+	cookies := strings.TrimSpace(cfg.AlibabaCookies)
+	if cookies == "" && cfg.AlibabaCookiesFile != "" {
+		loaded, err := api.LoadAlibabaCookiesFile(cfg.AlibabaCookiesFile)
+		if err != nil {
+			logger.Warn("failed to load ALIBABA_COOKIES_FILE", "path", cfg.AlibabaCookiesFile, "error", err)
+			return
+		}
+		cookies = loaded
+	}
+	// Drop cookies for unrelated sites before they are stored in plaintext.
+	filtered, err := api.FilterAlibabaCookies(cookies)
+	if err != nil {
+		logger.Warn("Ignoring Alibaba cookies: no alibabacloud.com cookies found")
+		return
+	}
+	cookies = filtered
+	if api.ParseAlibabaCookies(cookies) == "" {
+		return
+	}
+
+	accounts, err := db.QueryActiveProviderAccounts("alibaba")
+	if err != nil {
+		logger.Warn("failed to query Alibaba accounts for seeding", "error", err)
+		return
+	}
+	for _, acc := range accounts {
+		if acc.Name != "default" {
+			continue
+		}
+		var meta struct {
+			Cookies string `json:"cookies"`
+		}
+		if acc.Metadata != "" {
+			_ = json.Unmarshal([]byte(acc.Metadata), &meta)
+		}
+		if strings.TrimSpace(meta.Cookies) != "" {
+			return
+		}
+		metaJSON, err := json.Marshal(map[string]string{"cookies": cookies, "region": cfg.AlibabaRegion})
+		if err != nil {
+			return
+		}
+		if err := db.UpdateProviderAccountMetadata(acc.ID, string(metaJSON)); err != nil {
+			logger.Warn("failed to seed default Alibaba account", "error", err)
+			return
+		}
+		logger.Info("Seeded default Alibaba account with configured cookies", "id", acc.ID)
+		return
+	}
 }
