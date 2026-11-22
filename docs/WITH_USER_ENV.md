@@ -427,6 +427,14 @@ reviewable commit.
 4. Read the upstream release notes for changes to authentication, subcommand names,
    or credential paths. **If a login command changed, update the allowlist in
    `docker-entrypoint-with-user-env.sh` and its tests in the same commit.**
+   For `agy`, also check that the language server still serves at least one
+   readiness probe RPC (`antigravityProbeRPCs` in
+   `internal/api/antigravity_client.go`). The smoke test has no credentials, so
+   it cannot catch this: agy 1.5.x removed `GetUnleashData`, and polling stalled
+   with `quota service did not become ready` until the probe fell back to
+   `Heartbeat`/`GetUserStatus`. Quick check:
+   `docker run --rm --entrypoint sh <image> -c 'grep -a -c -e Heartbeat -e GetUserStatus /usr/local/bin/agy'`
+   must print a non-zero count.
 5. Re-measure image size and memory, and update
    [Measured resource budget](#measured-resource-budget) with the new date and
    versions.

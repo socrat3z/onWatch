@@ -591,17 +591,44 @@ func (c *AntigravityClient) probeForConnectAPI(ctx context.Context, ports []int,
 	return nil, ErrAntigravityConnectionFailed
 }
 
+// antigravityProbeRPCs are tried in order until one answers 200 or 401.
+// GetUnleashData comes first so older language servers keep the original
+// path; agy 1.5.x removed it (404), so fall back to RPCs it still serves.
+var antigravityProbeRPCs = []struct{ method, body string }{
+	{"GetUnleashData", `{"wrapper_data":{}}`},
+	{"Heartbeat", `{"metadata":{"ideName":"antigravity","extensionName":"antigravity","locale":"en"}}`},
+	{"GetUserStatus", `{"metadata":{"ideName":"antigravity","extensionName":"antigravity","locale":"en"}}`},
+}
+
 // probePort tests if a port has the Connect RPC endpoint.
 func (c *AntigravityClient) probePort(ctx context.Context, port int, protocol, csrfToken string) *AntigravityConnection {
 	baseURL := fmt.Sprintf("%s://127.0.0.1:%d", protocol, port)
-	endpoint := baseURL + "/exa.language_server_pb.LanguageServerService/GetUnleashData"
+	for _, rpc := range antigravityProbeRPCs {
+		status, err := c.probeRPC(ctx, baseURL+"/exa.language_server_pb.LanguageServerService/"+rpc.method, rpc.body, csrfToken)
+		if err != nil {
+			return nil // port unreachable or wrong protocol; other RPCs won't differ
+		}
+		// Valid Connect API returns 200 or 401
+		if status == http.StatusOK || status == http.StatusUnauthorized {
+			return &AntigravityConnection{
+				BaseURL:   baseURL,
+				CSRFToken: csrfToken,
+				Port:      port,
+				Protocol:  protocol,
+			}
+		}
+	}
+	return nil
+}
 
+// probeRPC posts one Connect probe request and returns its HTTP status.
+func (c *AntigravityClient) probeRPC(ctx context.Context, endpoint, body, csrfToken string) (int, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, strings.NewReader(`{"wrapper_data":{}}`))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, strings.NewReader(body))
 	if err != nil {
-		return nil
+		return 0, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -612,21 +639,10 @@ func (c *AntigravityClient) probePort(ctx context.Context, port int, protocol, c
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil
+		return 0, err
 	}
 	defer resp.Body.Close()
-
-	// Valid Connect API returns 200 or 401
-	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusUnauthorized {
-		return &AntigravityConnection{
-			BaseURL:   baseURL,
-			CSRFToken: csrfToken,
-			Port:      port,
-			Protocol:  protocol,
-		}
-	}
-
-	return nil
+	return resp.StatusCode, nil
 }
 
 // Helper functions

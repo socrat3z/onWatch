@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -317,6 +318,44 @@ func TestProbePort_FailsOn404(t *testing.T) {
 	conn := client.probePort(context.Background(), port, "http", "")
 	if conn != nil {
 		t.Error("probePort should return nil for 404")
+	}
+}
+
+// agy 1.5.x no longer serves GetUnleashData (Connect answers 404), so the probe
+// must fall back to an RPC the newer language server still implements.
+func TestProbePort_FallsBackWhenUnleashDataRemoved(t *testing.T) {
+	for _, served := range []string{"Heartbeat", "GetUserStatus"} {
+		t.Run(served, func(t *testing.T) {
+			var calls []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				rpc := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+				calls = append(calls, rpc)
+				if r.Header.Get("X-Codeium-Csrf-Token") != "test-csrf" {
+					t.Errorf("%s: missing CSRF header", rpc)
+				}
+				if rpc == served {
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer server.Close()
+
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+			client := NewAntigravityClient(logger)
+			port := server.Listener.Addr().(*net.TCPAddr).Port
+
+			conn := client.probePort(context.Background(), port, "http", "test-csrf")
+			if conn == nil {
+				t.Fatalf("probePort returned nil; calls = %v", calls)
+			}
+			if calls[0] != "GetUnleashData" {
+				t.Errorf("first probe = %q, want GetUnleashData (keeps older servers on the original path)", calls[0])
+			}
+			if conn.Port != port || conn.CSRFToken != "test-csrf" {
+				t.Errorf("conn = %+v", conn)
+			}
+		})
 	}
 }
 
