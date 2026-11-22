@@ -83,13 +83,13 @@ FROM debian:bookworm-slim AS cli-installer
 ARG TARGETARCH
 ARG BUILDARCH
 
-ARG CODEX_VERSION=0.164.0
-ARG CODEX_SHA256_AMD64=62659fefd9a8efa21a496402fde3c11c025bbeee735a582968f8ffd14cb5f79c
-ARG CODEX_SHA256_ARM64=048a62731ce28aa000508efcc032302e58488ca079970dcae06d28df39ae5ce0
+ARG CODEX_VERSION=0.171.0
+ARG CODEX_SHA256_AMD64=e13d67afb0533cc6160b5f4140e4ad07e2acd87adbaa081bbf69b82e90cf4e55
+ARG CODEX_SHA256_ARM64=26ae27788c7d962ae64321aba4673f918b99b40c4655246930bf962fa5b81b01
 
-ARG CLAUDE_VERSION=2.1.310
-ARG CLAUDE_SHA256_AMD64=8c90b0170d08fdb370db282c61d74897b834fc2569dd14c35eb1e491212dc6de
-ARG CLAUDE_SHA256_ARM64=b94afea57c67e8001b6da656dc83cca070ac2f716c02cdd3b5987f7583b0c185
+ARG CLAUDE_VERSION=2.1.330
+ARG CLAUDE_SHA256_AMD64=40ff30c5768723958032132065e6fcdd1e2dc3a2b3ff9a0bf36c6620ef1c40ef
+ARG CLAUDE_SHA256_ARM64=5460d42c696670f4fd2a7ec619719edda14a576b28ee3c289b348ade96efbf6d
 
 ARG NPM_REGISTRY=https://registry.npmjs.org
 
@@ -126,6 +126,7 @@ RUN set -eu; \
     cp -a "/tmp/codex/vendor/${codex_triple}/." /opt/provider-cli/codex/; \
     cp -a /tmp/claude/claude /opt/provider-cli/claude; \
     rm -f /opt/provider-cli/codex/bin/codex-code-mode-host; \
+    rm -rf /opt/provider-cli/codex/codex-resources/voice; \
     rm -rf /tmp/dl /tmp/codex /tmp/claude; \
     if [ "${BUILDARCH:-}" = "${TARGETARCH:-}" ]; then \
       /opt/provider-cli/codex/bin/codex --version; \
@@ -147,10 +148,10 @@ FROM debian:bookworm-slim AS runtime
 # checksums. Keep the version, release ID, and both architecture checksums in sync.
 ARG TARGETARCH
 ARG BUILDARCH
-ARG AGY_VERSION=1.4.7
-ARG AGY_RELEASE_ID=1.4.7-5900205422411776
-ARG AGY_SHA512_AMD64=beda760587589f5827b0b516c3ec2c5bd5cd2e91eb0e2533807ba1e990a27dcd63aef0191e0b76fb60feab0d16eaa8210fb79842c34dd4809e257e1712edd152
-ARG AGY_SHA512_ARM64=6a9fa0df6300633404571f66ec7924098cc70a9f23ac55c3659139bbcbdd2ea5301fe1ef728d4c064fac65104ea14a2b74421f320a82e5bcf218c482b58e3a16
+ARG AGY_VERSION=1.5.14
+ARG AGY_RELEASE_ID=1.5.14-5302690847260672
+ARG AGY_SHA512_AMD64=83311d3f354567612dc16c1ae2ea9b503d6f6833aa4e138d39aa229da3f3bb99b0e4d7cca0bce4796b0060d6a51d8113eb7449ed5dc0e7900bf217107ea5bff9
+ARG AGY_SHA512_ARM64=c9b29bba475f63a1a80161ae93ba72b221c7a586d9851e4d0061546704bab66d6b2760b25d716d191724fc7564f3246456ee151e28aa37af48dbcd72bdc6c463
 ARG AGY_DOWNLOAD_BASE=https://storage.googleapis.com/antigravity-public/antigravity-cli
 
 ARG VERSION=dev

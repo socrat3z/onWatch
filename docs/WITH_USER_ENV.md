@@ -344,7 +344,10 @@ Upstream layout, pinned and guarded by `test -x` assertions:
 | `@anthropic-ai/claude-code-linux-x64` | `claude` |
 | `@anthropic-ai/claude-code-linux-arm64` | `claude` |
 
-Codex's 48 MB `codex-code-mode-host` is pruned; a login never uses it.
+Codex's `codex-code-mode-host` (67 MB) and its `codex-resources/voice` runtime
+(a 39 MB host binary plus bundled GStreamer libraries, about 50 MB in total) are
+pruned; a login uses neither. If a new Codex release adds another resource tree,
+check whether a login needs it before it ships in the image.
 
 ### Privilege drop
 
@@ -399,8 +402,8 @@ reviewable commit.
 1. Pick the new version and record both architectures' checksums:
 
    ```bash
-   CODEX_VERSION=0.164.0
-   CLAUDE_VERSION=2.1.310
+   CODEX_VERSION=0.171.0
+   CLAUDE_VERSION=2.1.330
    for u in \
      "https://registry.npmjs.org/@openai/codex/-/codex-${CODEX_VERSION}-linux-x64.tgz" \
      "https://registry.npmjs.org/@openai/codex/-/codex-${CODEX_VERSION}-linux-arm64.tgz" \
@@ -455,7 +458,7 @@ non-CLI arguments still route to the daemon (including that `codexprofile` is no
 treated as a `codex` prefix match).
 
 `test-with-user-env-image.sh` covers: staged binaries report the pinned versions,
-Bun/Node/npm/`codex-code-mode-host` are absent, PID 1 runs as UID 65532, allowlisted
+Bun/Node/npm/`codex-code-mode-host`/`codex-resources/voice` are absent, PID 1 runs as UID 65532, allowlisted
 status commands dispatch while agentic ones are refused, and all four credential
 directories are writable by UID 65532. The `--all-arch` cross build is build-only -
 it proves the `TARGETARCH` mapping and checksums resolve on both architectures
@@ -468,17 +471,19 @@ Both run in CI on every push and pull request, alongside a `linux/amd64` +
 
 ## Measured resource budget
 
-Measured **2026-10-25**, `linux/amd64`, Docker Desktop, with codex 0.164.0,
-claude-code 2.1.310, agy 1.4.7:
+Image and binary sizes measured **2026-11-22**, `linux/amd64`, Docker Desktop, with
+codex 0.171.0, claude-code 2.1.330, agy 1.5.14. The memory rows were measured
+**2026-10-25** with codex 0.164.0, claude-code 2.1.310, agy 1.4.7 and have not been
+re-measured since the bump:
 
 | Measurement | Value |
 |---|---|
-| Image size (`runtime` target) | 1.6 GB as reported by Docker Desktop's containerd image store (the 2026-08-10 figure of 342 MB came from the classic store and is not comparable) |
+| Image size (`runtime` target) | 1.76 GB (`docker image inspect`) on Docker Desktop's containerd image store (the 2026-08-10 figure of 342 MB came from the classic store and is not comparable) |
 | Daemon container, idle (onWatch + D-Bus + gnome-keyring) | 10.4 MiB |
 | `onwatch` process RSS | 23.3 MB |
 | `gnome-keyring-daemon` RSS | 8.3 MB |
 | `dbus-daemon` RSS | 2.4 MB |
-| `agy` binary on disk | 228 MB |
+| `agy` binary on disk | 273 MB |
 | Peak RSS of one `agy --version` | 134 MB (agy 1.1.11, 2026-08-10; not re-measured) |
 
 The daemon limit is **768M**: with CLI polling the daemon keeps up to two `agy`

@@ -48,7 +48,8 @@ docker run --rm --entrypoint /usr/local/bin/agy "$image" --version
 
 echo "== pruned artifacts stayed out of the runtime image =="
 for path in /opt/bun /usr/local/bin/bun /usr/local/bin/node /usr/local/bin/npm \
-            /opt/provider-cli/codex/bin/codex-code-mode-host; do
+            /opt/provider-cli/codex/bin/codex-code-mode-host \
+            /opt/provider-cli/codex/codex-resources/voice; do
   if docker run --rm --entrypoint /bin/sh "$image" -c "test -e $path"; then
     echo "FAIL: $path present in runtime image" >&2
     exit 1

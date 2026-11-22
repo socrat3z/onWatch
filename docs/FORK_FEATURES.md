@@ -2,7 +2,7 @@
 
 What this fork carries on top of upstream (`onllm-dev/onWatch`). Every section names files that exist. Anything not in this document is stock upstream. For the review that produced this list and the plan for shrinking it, see [FORK_DELTA_MULTI_ANGLE_REVIEW.md](FORK_DELTA_MULTI_ANGLE_REVIEW.md).
 
-Stock behaviour the fork deliberately does **not** change: Anthropic authentication (OAuth refresh, rate-limit handling, credential files), `provider_accounts` and Codex/MiniMax multi-account, OpenRouter as a provider, the Codex auto quota-starter, and `internal/testutil/testhome`.
+Stock behaviour the fork deliberately does **not** change: Anthropic authentication (OAuth refresh, rate-limit handling, credential files), `provider_accounts` and Codex/MiniMax/Alibaba multi-account, OpenRouter as a provider, the Codex auto quota-starter, and `internal/testutil/testhome`.
 
 ---
 
@@ -19,11 +19,12 @@ Upstream's container is a distroless image with API keys only. Providers that ne
 
 ## 2. Multi-account for Antigravity (and native Codex discovery)
 
-Upstream already supports multiple Codex and MiniMax accounts. The fork adds:
+Upstream already supports multiple Codex, MiniMax and Alibaba Token Plan accounts. The fork adds:
 
 - **Antigravity**: `ANTIGRAVITY_AUTH_ROOT=<root>` with one folder per account, a per-account agent manager (`internal/agent/antigravity_agent_manager.go`), `account_id` on `antigravity_snapshots` and `antigravity_reset_cycles` (`internal/store/fork_schema_overlay.go`, `internal/store/antigravity_store.go`), and account-scoped API/dashboard views.
 - **Codex native homes**: `CODEX_AUTH_ROOT=<root>` discovers `<root>/<alias>/auth.json` (`internal/agent/codex_agent_manager.go`, `internal/api/codex_credentials.go`).
 - **Shared plumbing**: `internal/account/`, `internal/agent/account_reconcile.go`, `internal/store/provider_account_helpers.go`, `cmd/onwatch/main_overlay.go` (startup hooks), `internal/web/accounts_overlay.go` (`/api/accounts`), account identity in notifications (`internal/notify/notify.go`) and metrics (`internal/metrics/metrics.go`).
+- **Homepage grouping**: every multi-account provider renders as one card with one widget per account. The mapping lives in `MULTI_ACCOUNT_PROVIDER_KEYS` in `internal/web/static/fork_overlay.js`; stock Codex, MiniMax and Alibaba keep their upstream pickers and are only registered there so the homepage groups them.
 - Docs: [MULTI_ACCOUNT.md](MULTI_ACCOUNT.md).
 
 Anthropic is **not** multi-account in this fork. Only the default Claude login is polled.
