@@ -431,6 +431,15 @@ reviewable commit.
    [Measured resource budget](#measured-resource-budget) with the new date and
    versions.
 
+**Antigravity is held at 1.4.x.** agy 1.5.x (checked on 1.5.14) no longer
+implements the `GetUnleashData` RPC that onWatch's readiness probe
+(`probePort` in `internal/api/antigravity_client.go`) uses to find the language
+server. With 1.5.14 the managed CLI launches and logs in, but every poll ends with
+`agy quota service did not become ready before timeout`. Before bumping `agy`,
+confirm the probe still matches: `grep -a -c GetUnleashData /usr/local/bin/agy`
+must be non-zero, or the probe must first be changed to an RPC the new release
+serves. The image smoke test cannot catch this because it has no credentials.
+
 Finding the current versions:
 
 ```bash
@@ -472,18 +481,18 @@ Both run in CI on every push and pull request, alongside a `linux/amd64` +
 ## Measured resource budget
 
 Image and binary sizes measured **2026-11-22**, `linux/amd64`, Docker Desktop, with
-codex 0.171.0, claude-code 2.1.330, agy 1.5.14. The memory rows were measured
+codex 0.171.0, claude-code 2.1.330, agy 1.4.7. The memory rows were measured
 **2026-10-25** with codex 0.164.0, claude-code 2.1.310, agy 1.4.7 and have not been
 re-measured since the bump:
 
 | Measurement | Value |
 |---|---|
-| Image size (`runtime` target) | 1.76 GB (`docker image inspect`) on Docker Desktop's containerd image store (the 2026-08-10 figure of 342 MB came from the classic store and is not comparable) |
+| Image size (`runtime` target) | 1.68 GB (`docker image inspect`) on Docker Desktop's containerd image store (the 2026-08-10 figure of 342 MB came from the classic store and is not comparable) |
 | Daemon container, idle (onWatch + D-Bus + gnome-keyring) | 10.4 MiB |
 | `onwatch` process RSS | 23.3 MB |
 | `gnome-keyring-daemon` RSS | 8.3 MB |
 | `dbus-daemon` RSS | 2.4 MB |
-| `agy` binary on disk | 273 MB |
+| `agy` binary on disk | 228 MB |
 | Peak RSS of one `agy --version` | 134 MB (agy 1.1.11, 2026-08-10; not re-measured) |
 
 The daemon limit is **768M**: with CLI polling the daemon keeps up to two `agy`
